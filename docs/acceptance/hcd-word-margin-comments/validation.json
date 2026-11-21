@@ -1,0 +1,7 @@
+{
+  "checks": [
+    "Word review anchors a real text selection, follows it past a separate paragraph edit, preserves the reply and resolved status in a native DOCX, and can reopen the thread after re-import.",
+    "Word page-margin comments share the paper scroll surface, highlight both nearby anchors, avoid card collisions, keep tethers under zoom, use an active thread in a narrow canvas, and restore all threads after refresh without adding a document revision.",
+    "Word accepts or rejects individual native tracked runs, synchronizes the body, preserves a later edit to restored bold text and an unrelated pending revision, and reopens the original comment thread in the exported DOCX."
+  ]
+}

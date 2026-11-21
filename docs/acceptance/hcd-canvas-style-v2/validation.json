@@ -1,0 +1,49 @@
+{
+  "date": "2026-11-17",
+  "uiStatus": "passed",
+  "penDocument": {
+    "status": "blocked_by_plan_usage_limit",
+    "updated": false,
+    "reference": "existing Pen V2 exports and shared components"
+  },
+  "checks": {
+    "canvasBrowser": 10,
+    "sharedChatBrowser": 4,
+    "workspaceUnit": 12,
+    "typecheck": "passed",
+    "editorAndEmbedBuild": "passed",
+    "packaging": "passed",
+    "hostWorkflow": "passed",
+    "gitDiffCheck": "passed"
+  },
+  "geometry": {
+    "canvasRadius": 26,
+    "panelRadius": 16,
+    "composerRadius": 16,
+    "panelGap": 10,
+    "composerGap": 10,
+    "agentWidth": 344,
+    "expandedAgentWidth": 480
+  },
+  "model": "local-scripted-fixture",
+  "hostWorkflowChecks": [
+    "packaged Workspace creates and opens a native free canvas with local fonts",
+    "host-owned actor delegates a scoped AI task through the real durable runner and the local scripted model; outside objects survive",
+    "native PNG export and font loading work with all external HTTP traffic blocked",
+    "business publication downloads an editable native scene rather than flattening it to HTML",
+    "anonymous visitors draw collaboratively, cannot invoke AI, and become read-only after permission downgrade"
+  ],
+  "localWorkspace": {
+    "url": "http://127.0.0.1:7400",
+    "editorStatus": 200,
+    "entry": "/assets/index-CI4AxddP.js"
+  },
+  "screenshots": [
+    "canvas-light.png",
+    "canvas-dark.png",
+    "canvas-phone.png",
+    "canvas-phone-ai.png",
+    "canvas-host-ai.png",
+    "canvas-export.png"
+  ]
+}

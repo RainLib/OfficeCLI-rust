@@ -1,8 +1,9 @@
 use crate::common::{
     base_manifest, checked_export_state, collect_dirty_nodes, emit_failed, emit_started,
     escape_attribute, escape_text, finish_import, source_identity, source_identity_with_extensions,
-    write_fidelity_report, ExportOptions, ImportOptions,
+    write_fidelity_report, ExportOptions, ImportOptions, RunFontSupport,
 };
+use base64::Engine;
 use hcd_core::{
     hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
     FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent, NodeMapEntry,
@@ -19,6 +20,8 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::Path;
 
+mod html_inline;
+
 const HTML_SOURCE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const HTML_SOURCE_MAX_ELEMENTS: usize = 1_000_000;
 const HTML_SOURCE_MAX_DEPTH: usize = 256;
@@ -32,6 +35,150 @@ const SOURCE_RANGE_PREFIX: &str = "bytes:";
 const HTML_PART: &str = "html/document";
 const MARKDOWN_PART: &str = "markdown/document";
 const TEXT_PART: &str = "text/document";
+
+/// Only embedded raster payloads cross this boundary. Source HTML attributes,
+/// scripts, local paths and remote URLs never reach the preview.
+#[derive(Default)]
+struct EmbeddedImages {
+    assets: HashMap<String, (String, Vec<u8>)>,
+    bytes: usize,
+}
+
+struct EmbeddedImage {
+    hash: String,
+    width: f64,
+    height: f64,
+    alt: String,
+}
+
+impl EmbeddedImages {
+    fn parse(&mut self, tag: &HtmlTag) -> Result<Option<EmbeddedImage>, HcdError> {
+        const MAX_IMAGE: usize = 16 * 1024 * 1024;
+        const MAX_TOTAL: usize = 64 * 1024 * 1024;
+        if tag.name != "img" || tag.closing {
+            return Ok(None);
+        }
+        let Some((header, payload)) = tag.attributes.get("src").and_then(|s| s.split_once(','))
+        else {
+            return Ok(None);
+        };
+        let (extension, format) = match header {
+            "data:image/png;base64" => ("png", image::ImageFormat::Png),
+            "data:image/jpeg;base64" => ("jpg", image::ImageFormat::Jpeg),
+            _ => return Ok(None),
+        };
+        if payload.len() > MAX_IMAGE * 4 / 3 + 4 {
+            return Err(HcdError::ResourceLimit(
+                "embedded image exceeds 16 MiB".into(),
+            ));
+        }
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(payload) else {
+            return Ok(None);
+        };
+        let Ok((width, height)) =
+            image::ImageReader::with_format(std::io::Cursor::new(&bytes), format).into_dimensions()
+        else {
+            return Ok(None);
+        };
+        if width == 0
+            || height == 0
+            || width > 8192
+            || height > 8192
+            || u64::from(width) * u64::from(height) > 32_000_000
+        {
+            return Err(HcdError::ResourceLimit(
+                "embedded image dimensions exceed the raster budget".into(),
+            ));
+        }
+        let hash = hash_bytes(&bytes);
+        if !self.assets.contains_key(&hash) {
+            self.bytes = self.bytes.saturating_add(bytes.len());
+            if self.bytes > MAX_TOTAL {
+                return Err(HcdError::ResourceLimit(
+                    "embedded images exceed 64 MiB".into(),
+                ));
+            }
+            self.assets.insert(hash.clone(), (extension.into(), bytes));
+        }
+        let dimension = |name: &str, fallback: u32| {
+            tag.attributes
+                .get(name)
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|n| n.is_finite() && *n > 0.0 && *n <= 16384.0)
+                .unwrap_or(f64::from(fallback))
+        };
+        Ok(Some(EmbeddedImage {
+            hash,
+            width: dimension("width", width),
+            height: dimension("height", height),
+            alt: tag.attributes.get("alt").cloned().unwrap_or_default(),
+        }))
+    }
+
+    fn write(&self, writer: &BundleWriter, part: &str) -> Result<(), HcdError> {
+        let mut assets = Vec::new();
+        let mut ordered: Vec<_> = self.assets.iter().collect();
+        ordered.sort_by_key(|(hash, _)| *hash);
+        for (_, (extension, bytes)) in ordered {
+            let (href, hash, byte_length) =
+                writer.write_asset_from_reader(extension, &mut bytes.as_slice())?;
+            assets.push(hcd_core::AssetDescriptor {
+                source_part: part.into(),
+                hash,
+                href,
+                byte_length,
+            });
+        }
+        if !assets.is_empty() {
+            std::fs::write(
+                writer.root().join("assets/index.json"),
+                serde_json::to_vec(&assets)?,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn embedded_image_node(
+    document_id: &str,
+    part: &str,
+    ordinal: u64,
+    range: Range<usize>,
+    image: EmbeddedImage,
+) -> (String, NodeMapEntry) {
+    let node_id = stable_node_id(&[document_id, part, "embedded-image", &ordinal.to_string()]);
+    let node_hash = hash_bytes(b"");
+    let geometry = hcd_core::ImageGeometry {
+        x: 0.0,
+        y: 0.0,
+        width: image.width * 0.75,
+        height: image.height * 0.75,
+        unit: hcd_core::ImageGeometryUnit::Pt,
+    };
+    let visual_hash = hcd_core::image_visual_hash(Some(&image.hash), Some(&geometry));
+    let href = format!("asset://sha256/{}", image.hash);
+    let html = format!("<span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\" data-hcd-node-kind=\"image\" data-hcd-asset-hash=\"{}\" data-hcd-visual-hash=\"{visual_hash}\" data-hcd-x=\"0\" data-hcd-y=\"0\" data-hcd-width=\"{}\" data-hcd-height=\"{}\" data-hcd-geometry-unit=\"pt\" style=\"display:inline-block;max-width:100%;width:{}px;height:{}px\"><img src=\"{href}\" data-hcd-asset-href=\"{href}\" alt=\"{}\" style=\"display:block;width:100%;height:100%;object-fit:fill\" /></span>", image.hash, geometry.width, geometry.height, image.width, image.height, escape_attribute(&image.alt));
+    (
+        html,
+        NodeMapEntry {
+            node_id,
+            node_hash,
+            source: SourceAnchor {
+                part: part.into(),
+                text_ordinal: ordinal,
+                paragraph_id: None,
+                text_id: Some(format!(
+                    "{SOURCE_RANGE_PREFIX}{}:{}",
+                    range.start, range.end
+                )),
+                node_kind: "image".into(),
+                editable: false,
+                created_in_hcd: false,
+                source_cell_ref: None,
+            },
+        },
+    )
+}
 
 struct FlatChunkWriter<'a, F>
 where
@@ -293,12 +440,14 @@ where
         level: FidelityLevel::Semantic,
         preserved: vec![
             "UTF-8 visible text in source order with stable source byte ranges".to_string(),
+            "nested bold/italic tags and inline weight/style with explicit normal resets; safe hyperlinks and titles".to_string(),
             "safe heading, paragraph, list and table semantics with bounded table fragments"
                 .to_string(),
             "the immutable HTML source as the source-backed export boundary".to_string(),
+            "bounded embedded PNG/JPEG images with explicit dimensions and content-addressed assets".to_string(),
         ],
         flattened: vec![
-            "source CSS, arbitrary attributes and unsupported or nested markup are reduced to a canonical safe structure".to_string(),
+            "stylesheets, inline CSS beyond font-weight/font-style, arbitrary attributes and unsupported markup are reduced to a canonical safe structure".to_string(),
         ],
         dropped: vec![
             "active and non-rendered element content from editable HCD chunks".to_string(),
@@ -372,7 +521,7 @@ where
 
     let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
     writer.write_styles(&format!(
-        "{MARKDOWN_STYLES}{MARKDOWN_PRINT_FIDELITY_STYLES}"
+        "{MARKDOWN_STYLES}{MARKDOWN_PRINT_FIDELITY_STYLES}{MARKDOWN_INLINE_STYLES}"
     ))?;
     let mut chunks = FlatChunkWriter {
         document_id: &options.document_id,
@@ -447,6 +596,7 @@ where
     }
     chunks.flush()?;
 
+    renderer.images.write(chunks.writer, MARKDOWN_PART)?;
     let mut manifest = base_manifest(options, "md", "semantic-flow", source_hash, source_size);
     manifest.warnings.push(FidelityWarning {
         code: "MARKDOWN_SANITIZED_HTML".to_string(),
@@ -462,9 +612,10 @@ where
             "GFM tables, task lists, strikethrough, autolinks, alert blockquotes and footnotes".to_string(),
             "safe extensions for math, superscript, subscript, definition lists, wikilinks, heading attributes and metadata blocks".to_string(),
             "stable text/image node IDs with source byte ranges and source-backed editing".to_string(),
+            "bounded embedded PNG/JPEG image tags with portable resources and explicit dimensions".to_string(),
         ],
         flattened: vec![
-            "raw HTML outside the safe inline allowlist is displayed as escaped source instead of executing".to_string(),
+            "raw HTML outside the safe inline and embedded raster allowlist is displayed as escaped source instead of executing".to_string(),
             "remote Markdown images are addressable semantic image nodes and are not fetched during import".to_string(),
             "editing a Markdown text node rewrites only its mapped source range as escaped Markdown text".to_string(),
         ],
@@ -480,6 +631,9 @@ const MARKDOWN_STYLES: &str = ".hcd-source{display:block;line-height:1.6;color:#
 // (12 pt) typography. Print-only fragmentation hints reduce avoidable splits;
 // the print engine may still split an oversized block rather than overflow it.
 const MARKDOWN_PRINT_FIDELITY_STYLES: &str = ".hcd-source{font-family:HCDSans,HCDEmoji,HCDFallback,\"Noto Sans SC\",\"PingFang SC\",\"Microsoft YaHei\",Arial,sans-serif;font-size:16px}.hcd-markdown-heading{break-after:avoid}.hcd-markdown-table,.hcd-mermaid{break-inside:avoid}@media print{.hcd-markdown-code,.hcd-markdown-quote,.hcd-markdown-alert,.hcd-markdown-admonition{break-inside:avoid}}";
+
+// Boolean bold marks must not become UA `bolder` inside headings/table headers.
+const MARKDOWN_INLINE_STYLES: &str = ".hcd-source strong,.hcd-source b{font-weight:700}";
 
 struct RenderedMarkdownTag {
     close: String,
@@ -497,6 +651,7 @@ struct MarkdownHcdRenderer<'a> {
     html: String,
     entries: Vec<NodeMapEntry>,
     tags: Vec<RenderedMarkdownTag>,
+    inline_html_tags: Vec<(String, usize)>,
     depth: usize,
     node_ordinal: u64,
     table_alignments: Vec<Alignment>,
@@ -504,6 +659,7 @@ struct MarkdownHcdRenderer<'a> {
     table_head: bool,
     table_rows: usize,
     table_fragment: usize,
+    images: EmbeddedImages,
 }
 
 impl<'a> MarkdownHcdRenderer<'a> {
@@ -521,6 +677,7 @@ impl<'a> MarkdownHcdRenderer<'a> {
             html: String::new(),
             entries: Vec::new(),
             tags: Vec::new(),
+            inline_html_tags: Vec::new(),
             depth: 0,
             node_ordinal: 0,
             table_alignments: Vec::new(),
@@ -528,6 +685,7 @@ impl<'a> MarkdownHcdRenderer<'a> {
             table_head: false,
             table_rows: 0,
             table_fragment: 0,
+            images: EmbeddedImages::default(),
         }
     }
 
@@ -591,15 +749,19 @@ impl<'a> MarkdownHcdRenderer<'a> {
                 self.text_node(&math, &html, range, "markdown-display-math", true)?;
             }
             MarkdownEvent::Html(html) => {
-                let rendered = format!(
-                    "<code class=\"hcd-markdown-raw-html\">{}</code>",
-                    escape_text(&html)
-                );
-                self.text_node(&html, &rendered, range, "markdown-html", false)?;
+                if !self.embedded_html_image(&html, range.clone())? {
+                    let rendered = format!(
+                        "<code class=\"hcd-markdown-raw-html\">{}</code>",
+                        escape_text(&html)
+                    );
+                    self.text_node(&html, &rendered, range, "markdown-html", false)?;
+                }
             }
             MarkdownEvent::InlineHtml(html) => {
-                if let Some(safe) = safe_markdown_inline_html(&html) {
-                    self.html.push_str(safe);
+                if self.embedded_html_image(&html, range.clone())? {
+                    // The bounded embedded raster was rebuilt using safe attributes.
+                } else if self.safe_inline_html(&html) {
+                    // Only balanced allowlisted inline tags can enter canonical HTML.
                 } else {
                     let rendered = format!(
                         "<code class=\"hcd-markdown-raw-html\">{}</code>",
@@ -909,9 +1071,36 @@ impl<'a> MarkdownHcdRenderer<'a> {
     }
 
     fn end(&mut self, end: MarkdownTagEnd) -> Result<(), HcdError> {
-        let state = self.tags.pop().ok_or_else(|| {
+        while self
+            .inline_html_tags
+            .last()
+            .is_some_and(|(_, depth)| *depth >= self.depth)
+        {
+            if let Some((name, _)) = self.inline_html_tags.pop() {
+                self.html.push_str(&format!("</{name}>"));
+            }
+        }
+        let mut state = self.tags.pop().ok_or_else(|| {
             HcdError::InvalidBundle(format!("Markdown parser emitted unmatched end tag {end:?}"))
         })?;
+        if matches!(end, MarkdownTagEnd::HtmlBlock)
+            && !self.entries.is_empty()
+            && self
+                .entries
+                .iter()
+                .all(|entry| entry.source.node_kind == "image")
+        {
+            // Only successfully decoded, bounded rasters reach this case.
+            // Other raw HTML stays escaped in its original code container.
+            let opener = "<pre class=\"hcd-source-block hcd-markdown-raw-html\">";
+            if let Some(start) = self.html.rfind(opener) {
+                self.html.replace_range(
+                    start..start + opener.len(),
+                    "<figure class=\"hcd-source-block hcd-markdown-embedded-image\">",
+                );
+                state.close = "</figure>".into();
+            }
+        }
         self.html.push_str(&state.close);
         self.depth = self.depth.saturating_sub(1);
         if matches!(end, MarkdownTagEnd::TableHead) {
@@ -928,6 +1117,36 @@ impl<'a> MarkdownHcdRenderer<'a> {
             self.table_fragment = 0;
         }
         Ok(())
+    }
+
+    fn safe_inline_html(&mut self, raw: &str) -> bool {
+        let Some(safe) = safe_markdown_inline_html(raw) else {
+            return false;
+        };
+        let Some(tag) = parse_html_tag(safe.trim_matches(['<', '>'])) else {
+            return false;
+        };
+        if tag.name == "br" {
+            self.html.push_str("<br/>");
+            return true;
+        }
+        if tag.closing {
+            if !self
+                .inline_html_tags
+                .last()
+                .is_some_and(|(name, depth)| name == &tag.name && *depth == self.depth)
+            {
+                return false;
+            }
+            self.inline_html_tags.pop();
+        } else {
+            if self.inline_html_tags.len() >= 256 {
+                return false;
+            }
+            self.inline_html_tags.push((tag.name, self.depth));
+        }
+        self.html.push_str(&safe.to_ascii_lowercase());
+        true
     }
 
     fn simple_tag(&mut self, open: &str, close: &str, state: &mut RenderedMarkdownTag) {
@@ -951,6 +1170,32 @@ impl<'a> MarkdownHcdRenderer<'a> {
         self.html.push_str(&span);
         self.entries.push(entry);
         Ok(())
+    }
+
+    fn embedded_html_image(&mut self, raw: &str, range: Range<usize>) -> Result<bool, HcdError> {
+        let trimmed = raw.trim();
+        if !trimmed.starts_with('<')
+            || find_tag_end(trimmed.as_bytes(), 1) != Some(trimmed.len().saturating_sub(1))
+        {
+            return Ok(false);
+        }
+        let Some(tag) = parse_html_tag(&trimmed[1..trimmed.len() - 1]) else {
+            return Ok(false);
+        };
+        let Some(image) = self.images.parse(&tag)? else {
+            return Ok(false);
+        };
+        self.node_ordinal += 1;
+        let (html, entry) = embedded_image_node(
+            self.document_id,
+            MARKDOWN_PART,
+            self.node_ordinal,
+            self.source_base + range.start..self.source_base + range.end,
+            image,
+        );
+        self.html.push_str(&html);
+        self.entries.push(entry);
+        Ok(true)
     }
 
     fn render_node(
@@ -1254,7 +1499,11 @@ fn markdown_fragment_id(value: &str) -> String {
 
 fn safe_markdown_destination(value: &str) -> bool {
     let value = value.trim();
-    if value.is_empty() || value.starts_with("//") {
+    if value.is_empty()
+        || value.starts_with("//")
+        || value.contains('\\')
+        || value.chars().any(char::is_control)
+    {
         return false;
     }
     let lower = value.to_ascii_lowercase();
@@ -1280,7 +1529,19 @@ fn safe_markdown_inline_html(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     matches!(
         trimmed.to_ascii_lowercase().as_str(),
-        "<mark>"
+        "<strong>"
+            | "</strong>"
+            | "<b>"
+            | "</b>"
+            | "<em>"
+            | "</em>"
+            | "<i>"
+            | "</i>"
+            | "</span>"
+            | "<span style=\"font-weight:normal;\">"
+            | "<span style=\"font-style:normal;\">"
+            | "<span style=\"font-weight:normal;font-style:normal;\">"
+            | "<mark>"
             | "</mark>"
             | "<kbd>"
             | "</kbd>"
@@ -2292,7 +2553,8 @@ fn export_textual(
         )));
     }
     validate_target_extension(target, format)?;
-    let (manifest, _, dirty_parts, dirty_node_ids) = checked_export_state(bundle, source, options)?;
+    let (manifest, _, dirty_parts, dirty_node_ids) =
+        checked_export_state(bundle, source, options, RunFontSupport::Rejects)?;
     if manifest.source.format != format {
         return Err(HcdError::InvalidBundle(format!(
             "bundle source format is {}, expected {format}",
@@ -2532,6 +2794,7 @@ struct HtmlTag {
     attributes: HashMap<String, String>,
     closing: bool,
     self_closing: bool,
+    range: Range<usize>,
 }
 
 enum HtmlScanEvent {
@@ -2929,6 +3192,8 @@ where
     text_ordinal: u64,
     block_ordinal: usize,
     table_ordinal: usize,
+    images: EmbeddedImages,
+    inline: html_inline::HtmlInline,
 }
 
 impl<'a, 'w, F> StructuredHtmlCanonicalizer<'a, 'w, F>
@@ -2950,13 +3215,18 @@ where
             text_ordinal: 0,
             block_ordinal: 0,
             table_ordinal: 0,
+            images: EmbeddedImages::default(),
+            inline: html_inline::HtmlInline::default(),
         }
     }
 
     fn event(&mut self, event: HtmlScanEvent) -> Result<(), HcdError> {
         match event {
             HtmlScanEvent::Text(segment) => self.text(segment),
-            HtmlScanEvent::Tag(tag) => self.tag(tag),
+            HtmlScanEvent::Tag(tag) => {
+                self.inline.tag(&tag)?;
+                self.tag(tag)
+            }
         }
     }
 
@@ -2964,24 +3234,18 @@ where
         if segment.text.is_empty() {
             return Ok(());
         }
-        if self.table.is_some() {
-            if self
-                .table
-                .as_ref()
-                .is_some_and(|table| table.cell.is_none())
-            {
+        if let Some(table) = self.table.as_mut() {
+            if table.cell.is_none() {
                 return Ok(());
             }
             self.text_ordinal = self.text_ordinal.saturating_add(1);
-            let paragraph_id = self.table.as_ref().and_then(|table| {
-                table.row.as_ref().map(|row| {
-                    format!(
-                        "table-{}-row-{}-cell-{}",
-                        table.table_ordinal,
-                        table.total_rows + 1,
-                        row.cells
-                    )
-                })
+            let paragraph_id = table.row.as_ref().map(|row| {
+                format!(
+                    "table-{}-row-{}-cell-{}",
+                    table.table_ordinal,
+                    table.total_rows + 1,
+                    row.cells
+                )
             });
             let (html, entry) = render_source_text_node(
                 self.document_id,
@@ -2993,10 +3257,7 @@ where
                 "html-table-cell-text",
                 paragraph_id,
             )?;
-            self.table
-                .as_mut()
-                .expect("checked table")
-                .push_text(html, entry);
+            table.push_text(self.inline.wrap(html), entry);
             return Ok(());
         }
         if self.block.is_none() {
@@ -3036,7 +3297,7 @@ where
             block.node_kind,
             Some(block.paragraph_id.clone()),
         )?;
-        block.html.push_str(&html);
+        block.html.push_str(&self.inline.wrap(html));
         block.entries.push(entry);
         if block.html.len() > MAX_CHUNK_BYTES {
             return Err(HcdError::ResourceLimit(format!(
@@ -3048,6 +3309,31 @@ where
     }
 
     fn tag(&mut self, tag: HtmlTag) -> Result<(), HcdError> {
+        if let Some(image) = self.images.parse(&tag)? {
+            self.text_ordinal += 1;
+            let (html, entry) = embedded_image_node(
+                self.document_id,
+                HTML_PART,
+                self.text_ordinal,
+                tag.range.clone(),
+                image,
+            );
+            if let Some(table) = &mut self.table {
+                table.push_text(html, entry);
+            } else if let Some(block) = &mut self.block {
+                block.html.push_str(&html);
+                block.entries.push(entry);
+            } else {
+                self.chunks.push_rendered(
+                    RenderedSourceBlock {
+                        html,
+                        entries: vec![entry],
+                    },
+                    false,
+                )?;
+            }
+            return Ok(());
+        }
         if self.table.is_some() {
             return self.table_tag(tag);
         }
@@ -3116,7 +3402,7 @@ where
             ) => self.finish_block(),
             (
                 _,
-                "body" | "main" | "section" | "article" | "header" | "footer" | "address"
+                "body" | "div" | "main" | "section" | "article" | "header" | "footer" | "address"
                 | "figure" | "figcaption",
             ) => self.finish_implicit_block(),
             _ => Ok(()),
@@ -3257,6 +3543,7 @@ where
                 "HTML table plan was not consumed".to_string(),
             ));
         }
+        self.images.write(self.chunks.writer, HTML_PART)?;
         Ok(self.text_ordinal)
     }
 }
@@ -3307,7 +3594,8 @@ fn scan_html(
                 "HTML tag at byte {start} exceeds {MAX_CHUNK_BYTES} bytes"
             )));
         }
-        if let Some(tag) = parse_html_tag(&source[start + 1..end]) {
+        if let Some(mut tag) = parse_html_tag(&source[start + 1..end]) {
+            tag.range = start..end + 1;
             element_count = element_count.saturating_add(1);
             if element_count > HTML_SOURCE_MAX_ELEMENTS {
                 return Err(HcdError::ResourceLimit(format!(
@@ -3324,6 +3612,7 @@ fn scan_html(
                     element_stack.truncate(position);
                 }
             } else if !tag.self_closing && !is_void_html_element(&tag.name) {
+                html_inline::close_implicit(&mut element_stack, &tag.name, String::as_str);
                 if element_stack.len() >= HTML_SOURCE_MAX_DEPTH {
                     return Err(HcdError::ResourceLimit(format!(
                         "HTML source exceeds nesting depth {HTML_SOURCE_MAX_DEPTH}"
@@ -3380,6 +3669,7 @@ fn parse_html_tag(raw: &str) -> Option<HtmlTag> {
         },
         closing,
         self_closing,
+        range: 0..0,
     })
 }
 
@@ -3422,10 +3712,7 @@ fn parse_html_attributes(source: &str) -> HashMap<String, String> {
                 index = (index + 1).min(bytes.len());
             } else {
                 let value_start = index;
-                while index < bytes.len()
-                    && !bytes[index].is_ascii_whitespace()
-                    && bytes[index] != b'/'
-                {
+                while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
                     index += 1;
                 }
                 value = decode_entities(&source[value_start..index]);
@@ -3587,6 +3874,113 @@ mod tests {
     }
 
     #[test]
+    fn embedded_raster_images_reopen_with_dimensions_and_safe_assets() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(24, 16)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png.get_ref());
+        for extension in ["md", "html"] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = temp.path().join(format!("source.{extension}"));
+            let output = temp.path().join("bundle");
+            let raw = format!("<img src=\"data:image/png;base64,{encoded}\" alt=\"口型 &amp; 气流\" width=\"160\" height=\"100\" onerror=\"unsafe()\" />\n\n");
+            std::fs::write(&source, &raw).unwrap();
+            crate::import_document(&source, &output, &options("image-roundtrip"), |_| Ok(()))
+                .unwrap();
+            let bundle = Bundle::open(&output).unwrap();
+            let validation = validate_bundle(&bundle).unwrap();
+            assert!(validation.valid, "{:?}", validation.issues);
+            let html = chunk_html(&bundle).join("");
+            assert!(!html.contains("unsafe()"));
+            assert!(!html.contains("data:image/"));
+            if extension == "md" {
+                assert!(html.contains("hcd-markdown-embedded-image"));
+                assert!(!html.contains("<pre"));
+                let projection = hcd_core::editor_projection(&bundle, None).unwrap();
+                assert_eq!(projection.blocks.len(), 1);
+                assert!(projection.blocks[0].read_only);
+            }
+            let nodes = hcd_core::extract_html_image_nodes(&html).unwrap();
+            assert_eq!(nodes.len(), 1, "{html}");
+            let node = nodes.values().next().unwrap();
+            assert_eq!(node.geometry.as_ref().unwrap().width, 120.0);
+            assert_eq!(node.geometry.as_ref().unwrap().height, 75.0);
+            let assets = bundle.read_asset_index_for_revision(0).unwrap();
+            assert_eq!(assets.len(), 1);
+            assert_eq!(
+                std::fs::read(bundle.resolve_href(&assets[0].href).unwrap()).unwrap(),
+                png.get_ref().clone()
+            );
+            let target = temp.path().join(format!("export.{extension}"));
+            crate::export_document(&output, &source, &target, &ExportOptions::default()).unwrap();
+            assert_eq!(std::fs::read_to_string(target).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn markdown_rasters_never_enable_active_html_or_remote_fetches() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("unsafe.md");
+        let output = temp.path().join("bundle");
+        std::fs::write(&source, "<img src=\"https://example.invalid/tracker.png\" onerror=\"unsafe()\" />\n\n<img src=\"data:image/svg+xml;base64,PHN2Zz4=\" />\n\n<img src=\"data:image/png;base64,invalid\" />\n").unwrap();
+        crate::import_document(&source, &output, &options("unsafe-images"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(output).unwrap();
+        let html = chunk_html(&bundle).join("");
+        assert!(hcd_core::extract_html_image_nodes(&html)
+            .unwrap()
+            .is_empty());
+        assert!(!html.contains("<img"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn flow_image_insertion_requires_the_tail_chunk_for_native_consistency() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.md");
+        let output = temp.path().join("bundle");
+        std::fs::write(&source, "# First\n\nMiddle paragraph.\n\nLast paragraph.\n").unwrap();
+        let mut opts = options("flow-image");
+        opts.chunk_blocks = 1;
+        crate::import_document(&source, &output, &opts, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(output).unwrap();
+        let manifest = bundle.manifest().unwrap();
+        let chunks = bundle.read_index_page(&manifest, 0).unwrap().chunks;
+        assert!(chunks.len() > 1);
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(24, 16)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        png.set_position(0);
+        let asset = bundle.stage_asset_from_reader("png", &mut png).unwrap();
+        let patch = |chunk_id: String| PatchBatch {
+            schema_version: "hcd-patch/47".into(),
+            document_id: "flow-image".into(),
+            patch_id: "append-image".into(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::ImageInsert {
+                chunk_id,
+                asset_hash: asset.hash.clone(),
+                alt: "插图".into(),
+                geometry: hcd_core::ImageGeometry {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 120.0,
+                    height: 80.0,
+                    unit: hcd_core::ImageGeometryUnit::Pt,
+                },
+            }],
+        };
+        let error = apply_patch(&bundle, &patch(chunks[0].chunk_id.clone()), 0).unwrap_err();
+        assert!(error.to_string().contains("last chunk"));
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        apply_patch(&bundle, &patch(chunks.last().unwrap().chunk_id.clone()), 0).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
     fn html_hcd_patch_preserves_markup_and_escapes_replacement() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.html");
@@ -3662,6 +4056,280 @@ mod tests {
         assert!(output.contains("class='x'"));
         assert!(output.contains("Secret &lt;masked&gt; 中文"));
         assert!(output.contains("<script>alert('kept')</script>"));
+    }
+
+    #[test]
+    fn html_inline_import_keeps_independent_marks_links_and_original_text_ranges() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("inline.html");
+        let original = "<div style='font-style:italic'><p><b>同名😀</b><span style='font-style:normal'> plain</span><a href=https://example.com/a/b?q=1&amp;x=2 title='文档 &quot;链接&quot;'> link</a></p></div><p><i>同名😀</i> plain</p>";
+        std::fs::write(&source, original).unwrap();
+        let output = temp.path().join("bundle");
+        import_html(&source, &output, &options("inline-html"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&output).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let projection = hcd_core::editor_projection(&bundle, None).unwrap();
+        let inlines: Vec<_> = projection
+            .blocks
+            .iter()
+            .flat_map(|block| &block.content.inlines)
+            .map(|inline| {
+                (
+                    inline.text.as_str(),
+                    inline.bold,
+                    inline.italic,
+                    inline.link.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            inlines,
+            vec![
+                ("同名😀", true, true, None),
+                (" plain", false, false, None),
+                (
+                    " link",
+                    false,
+                    true,
+                    Some("https://example.com/a/b?q=1&x=2")
+                ),
+                ("同名😀", false, true, None),
+                (" plain", false, false, None),
+            ]
+        );
+        let html = chunk_html(&bundle).join("");
+        assert!(html.contains("title=\"文档 &quot;链接&quot;\""));
+        let manifest = bundle.manifest().unwrap();
+        for descriptor in bundle.read_index_page(&manifest, 0).unwrap().chunks {
+            let map = bundle.read_map(&descriptor).unwrap();
+            let text = hcd_core::extract_html_text_nodes(&bundle.read_chunk(&descriptor).unwrap())
+                .unwrap();
+            for entry in map.entries {
+                let (start, end) =
+                    parse_source_range(entry.source.text_id.as_deref(), &entry.node_id).unwrap();
+                assert_eq!(
+                    decode_entities(&original[start as usize..end as usize]),
+                    text[&entry.node_id]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn html_inline_styles_respect_normal_priority_and_sibling_boundaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("styles.html");
+        std::fs::write(&source, "<p style='font-weight:bold;font-style:italic'><span style='font-weight:normal !important;font-weight:900;font-style:initial'>普通😀</span><span style='font-weight:300;FONT-WEIGHT:700 !IMPORTANT;font-style:inherit'>粗斜</span><b style='font-weight:inherit'>继承</b></p><p>普通</p><table style='font-style:italic'><tr><th style='font-weight:normal'>表头</th><td><b>表格粗体</b></td><td>下一格</td></tr></table>").unwrap();
+        let output = temp.path().join("bundle");
+        import_html(&source, &output, &options("styles-html"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&output).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let projection = hcd_core::editor_projection(&bundle, None).unwrap();
+        let inlines: Vec<_> = projection
+            .blocks
+            .iter()
+            .flat_map(|block| &block.content.inlines)
+            .map(|inline| (inline.text.as_str(), inline.bold, inline.italic))
+            .collect();
+        assert_eq!(
+            inlines,
+            vec![
+                ("普通😀", false, false),
+                ("粗斜", true, true),
+                ("继承", true, true),
+                ("普通", false, false),
+                ("表头", false, true),
+                ("表格粗体", true, true),
+                ("下一格", false, true)
+            ]
+        );
+    }
+
+    #[test]
+    fn html_inline_optional_cell_end_tags_do_not_leak_styles_or_exhaust_depth() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("omitted.html");
+        let mut html = String::from("<table>");
+        for _ in 0..300 {
+            html.push_str("<tr><td style='font-weight:bold'>粗<td>普通");
+        }
+        html.push_str("</table>");
+        std::fs::write(&source, html).unwrap();
+        let output = temp.path().join("bundle");
+        import_html(&source, &output, &options("omitted-html"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&output).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let projection = hcd_core::editor_projection(&bundle, None).unwrap();
+        let inlines: Vec<_> = projection
+            .blocks
+            .iter()
+            .flat_map(|block| &block.content.inlines)
+            .collect();
+        assert_eq!(inlines.len(), 600);
+        for pair in inlines.as_chunks::<2>().0 {
+            assert!(pair[0].bold);
+            assert!(!pair[1].bold);
+        }
+    }
+
+    #[test]
+    fn html_inline_links_never_admit_active_urls_or_arbitrary_attributes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("links.html");
+        std::fs::write(&source, r##"<p><a href="javascript:alert(1)" onclick="unsafe()">a</a><a href="data:text/html,unsafe()">b</a><a href="//evil.test">c</a><a href="\\evil.test">d</a><a href="java&#10;script:unsafe()">e</a><a href="https://example.com" title="bad&#1;title" style="background:url(https://tracker.test)">safe</a><a href="#section">section</a><a href="../document.html">relative</a></p><script>unsafe()</script>"##).unwrap();
+        let output = temp.path().join("bundle");
+        import_html(&source, &output, &options("links-html"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&output).unwrap();
+        let validation = validate_bundle(&bundle).unwrap();
+        assert!(validation.valid, "{:?}", validation.issues);
+        let html = chunk_html(&bundle).join("");
+        for forbidden in [
+            "unsafe()",
+            "onclick",
+            "background",
+            "tracker.test",
+            "<script",
+            "bad",
+        ] {
+            assert!(!html.contains(forbidden), "{html}");
+        }
+        let projection = hcd_core::editor_projection(&bundle, None).unwrap();
+        let links: Vec<_> = projection
+            .blocks
+            .iter()
+            .flat_map(|block| &block.content.inlines)
+            .filter_map(|inline| inline.link.as_deref())
+            .collect();
+        assert_eq!(links, vec!["https://example.com", "#section"]);
+    }
+
+    #[test]
+    fn html_inline_text_checkpoint_preserves_anchors_source_markup_and_safe_exports() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("editable.html");
+        let original = "<p class='private'><b>同名😀</b><i>同名😀</i><a href='https://example.com' title='原链接'>链接</a><a href='#section'>章节</a><a href='TEL:+86-123'>电话</a></p>";
+        std::fs::write(&source, original).unwrap();
+        let output = temp.path().join("bundle");
+        import_html(&source, &output, &options("edit-inline-html"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&output).unwrap();
+        hcd_core::project_editor(&bundle, 0).unwrap();
+        let original_block = hcd_core::editor_projection(&bundle, None)
+            .unwrap()
+            .blocks
+            .remove(0);
+        let ids: Vec<_> = original_block
+            .content
+            .inlines
+            .iter()
+            .map(|inline| inline.node_id.clone())
+            .collect();
+        let mut content = original_block.content.clone();
+        content.inlines[0].text.push_str(" & <编辑>");
+        for inline in &mut content.inlines {
+            inline.node_id = None;
+        }
+        let patch = hcd_core::StructurePatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_4.into(),
+            document_id: "edit-inline-html".into(),
+            patch_id: "html-inline-checkpoint".into(),
+            base_revision: 1,
+            operations: vec![hcd_core::StructureOperation::Replace {
+                block_id: original_block.block_id,
+                block: content,
+                precondition: hcd_core::BlockPrecondition {
+                    block_hash: original_block.block_hash,
+                },
+            }],
+        };
+        hcd_core::apply_structure_patch(&bundle, &patch, 1).unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let block = hcd_core::editor_projection(&bundle, None)
+            .unwrap()
+            .blocks
+            .remove(0);
+        assert_eq!(
+            block
+                .content
+                .inlines
+                .iter()
+                .map(|inline| inline.node_id.clone())
+                .collect::<Vec<_>>(),
+            ids
+        );
+        assert_eq!(block.content.inlines[0].text, "同名😀 & <编辑>");
+        assert!(block.content.inlines[0].bold);
+        assert!(block.content.inlines[1].italic);
+        let target = temp.path().join("exported.html");
+        let report = export_html(&bundle, &source, &target, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            original.replacen("同名😀", "同名😀 &amp; &lt;编辑&gt;", 1)
+        );
+        let readback = temp.path().join("readback");
+        import_html(&target, &readback, &options("readback-inline-html"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            validate_bundle(&Bundle::open(&readback).unwrap())
+                .unwrap()
+                .valid
+        );
+    }
+
+    #[test]
+    fn html_inline_mark_changes_rebuild_instead_of_reusing_stale_source_ranges() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("change.html");
+        std::fs::write(&source, "<p><b>同名😀</b></p>").unwrap();
+        let output = temp.path().join("bundle");
+        import_html(&source, &output, &options("changed-html"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&output).unwrap();
+        hcd_core::project_editor(&bundle, 0).unwrap();
+        let block = hcd_core::editor_projection(&bundle, None)
+            .unwrap()
+            .blocks
+            .remove(0);
+        let original_id = block.content.inlines[0].node_id.clone();
+        let mut changed = block.content;
+        changed.inlines[0].bold = false;
+        changed.inlines[0].link = Some("#changed".into());
+        changed.inlines[0].node_id = None;
+        hcd_core::apply_structure_patch(
+            &bundle,
+            &hcd_core::StructurePatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_4.into(),
+                document_id: "changed-html".into(),
+                patch_id: "html-inline-format-change".into(),
+                base_revision: 1,
+                operations: vec![hcd_core::StructureOperation::Replace {
+                    block_id: block.block_id,
+                    block: changed,
+                    precondition: hcd_core::BlockPrecondition {
+                        block_hash: block.block_hash,
+                    },
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        let changed = hcd_core::editor_projection(&bundle, None)
+            .unwrap()
+            .blocks
+            .remove(0);
+        assert!(!changed.content.inlines[0].bold);
+        assert_eq!(changed.content.inlines[0].link.as_deref(), Some("#changed"));
+        let node = hcd_core::get_text_node(&bundle, original_id.as_deref().unwrap()).unwrap();
+        assert_eq!(node.node.source.node_kind, "editor-text");
+        assert!(node
+            .node
+            .source
+            .text_id
+            .as_deref()
+            .unwrap()
+            .starts_with("editor:"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
     }
 
     #[test]

@@ -1,0 +1,149 @@
+{
+  "status": "passed",
+  "completed": [
+    {
+      "name": "pivots",
+      "checks": [
+        "Created a cross-sheet pivot by dragging dimension fields, validated live formula-derived output, rejected an occupied destination and verified that result cells are read-only.",
+        "Recovered the workbook view on reload. A source edit updated a dependent formula and refreshed the report from 240 to 480.",
+        "Downloaded the original-format XLSX, reopened it in the workbench and changed the native PivotTable aggregation."
+      ],
+      "native": {
+        "browserDownloadIndependentlyVerified": true,
+        "resultPlacementProtected": true,
+        "sourcePartsIdentical": true,
+        "nativePivotDefinition": true,
+        "nativeTypedCacheRecords": true,
+        "reportCellsMaterialized": true,
+        "reopenEditRemove": true,
+        "historicalExport": true
+      }
+    },
+    {
+      "name": "conditions",
+      "checks": [
+        "Existing conditional rule appears in the editor and draws in the native grid canvas.",
+        "Edited imported rule, created a range rule, verified both fill colors, and reopened the rule editor after a page refresh.",
+        "Downloaded XLSX, opened it as a new tab, removed its native rule and restored it using revision undo."
+      ],
+      "native": {
+        "nativeRulesReopened": true,
+        "thresholdAndRangeValues": true,
+        "unsupportedColorScalePreserved": true,
+        "chartXmlUnchanged": true,
+        "frozenPanesPreserved": true,
+        "originalSha256": "b1a79f887662bc3c82cc111653c86dde9bac6799808f408b2616074cc820581d"
+      }
+    },
+    {
+      "name": "ocr",
+      "checks": [
+        "PDF zoom changed the decoded raster from 816 to 1632 pixels at DPR 1.",
+        "A blocked-external-network browser recognized both scan-only pages using the bundled Chinese and English models.",
+        "The mixed page preserved its real header and the rotated crop retained upright Chinese and English line boxes.",
+        "OCR text was selected with the pointer, copied to the clipboard, corrected inline, saved, reloaded and searched.",
+        "The source-backed PDF was downloaded, uploaded as a fresh file, and searched by its native invisible OCR layer."
+      ],
+      "native": {
+        "evidence": "browser OCR measurements replayed through the native CLI",
+        "independentPdfReader": "pypdf and Poppler",
+        "pixelComparator": "Poppler at 96 DPI, same CropBox, zero differing pixels",
+        "nativePixelSizes": [
+          [
+            816,
+            1056
+          ],
+          [
+            816,
+            1056
+          ],
+          [
+            990,
+            763
+          ]
+        ],
+        "portablePixelSizes": [
+          [
+            816,
+            1056
+          ],
+          [
+            816,
+            1056
+          ],
+          [
+            990,
+            763
+          ]
+        ],
+        "nativeHeaderOccurrences": 1,
+        "originalContentStreamsIntact": true,
+        "originalSourceBytesUnchanged": true,
+        "rotatedCropAndOcrGeometryVerified": true,
+        "nativePdfReimportedAsSelectableOcr": true,
+        "portableArchiveAndPageSubsetSearchable": true,
+        "portableReimportedInvisibleLayerPreserved": true,
+        "sourceReimportCorrectionPreservedPixels": true,
+        "duplicateOcrRejected": true,
+        "historyRestoredOriginalAndRecognizedState": true,
+        "browserArtifactIndependentlyVerified": true,
+        "outputDirectory": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-workbench-native-5cUdo2/ocr/verification-vhei7z08"
+      }
+    },
+    {
+      "name": "layers",
+      "checks": [
+        "Workbench imported layers, moved and resized on-canvas, renamed, set opacity, drag-sorted and toggled visibility with saved revisions.",
+        "A concurrent stale layer mutation was rejected with HTTP 409.",
+        "Reload restored the layer selection and properties; a color adjustment saved as a reversible result layer.",
+        "Restoring a prior revision restored its layer order, metadata and raster together.",
+        "Downloaded the current composition in its original PNG format and reopened it as a new raster document; also downloaded the layer archive."
+      ],
+      "native": {
+        "sameOriginalSha256": "8635c64837ad5746e20f0213ddbfa31216b498107bbe77d711ad9f869c3bad1e",
+        "originalPngAndReopenVerified": true,
+        "reorderChangedPixels": 27901,
+        "layerOpacity": 56,
+        "actualProbeRGBA": [
+          177,
+          145,
+          134,
+          255
+        ],
+        "hiddenLayerAndAdjustmentAreReversiblePixelForPixel": true,
+        "browserRestoredLayerOrderAndPixels": true,
+        "archiveAssetsAndLayerGraphVerified": true,
+        "archivedLayerGraphRemainedEditableAfterUnpack": true,
+        "originalRestoredPixelForPixel": true,
+        "directory": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-workbench-native-5cUdo2/layers/native-4_6j874l"
+      }
+    }
+  ],
+  "checks": [
+    "Created a cross-sheet pivot by dragging dimension fields, validated live formula-derived output, rejected an occupied destination and verified that result cells are read-only.",
+    "Recovered the workbook view on reload. A source edit updated a dependent formula and refreshed the report from 240 to 480.",
+    "Downloaded the original-format XLSX, reopened it in the workbench and changed the native PivotTable aggregation.",
+    "Existing conditional rule appears in the editor and draws in the native grid canvas.",
+    "Edited imported rule, created a range rule, verified both fill colors, and reopened the rule editor after a page refresh.",
+    "Downloaded XLSX, opened it as a new tab, removed its native rule and restored it using revision undo.",
+    "PDF zoom changed the decoded raster from 816 to 1632 pixels at DPR 1.",
+    "A blocked-external-network browser recognized both scan-only pages using the bundled Chinese and English models.",
+    "The mixed page preserved its real header and the rotated crop retained upright Chinese and English line boxes.",
+    "OCR text was selected with the pointer, copied to the clipboard, corrected inline, saved, reloaded and searched.",
+    "The source-backed PDF was downloaded, uploaded as a fresh file, and searched by its native invisible OCR layer.",
+    "Workbench imported layers, moved and resized on-canvas, renamed, set opacity, drag-sorted and toggled visibility with saved revisions.",
+    "A concurrent stale layer mutation was rejected with HTTP 409.",
+    "Reload restored the layer selection and properties; a color adjustment saved as a reversible result layer.",
+    "Restoring a prior revision restored its layer order, metadata and raster together.",
+    "Downloaded the current composition in its original PNG format and reopened it as a new raster document; also downloaded the layer archive."
+  ],
+  "errors": [],
+  "sourceSha256": {
+    "native-conditions-source.xlsx": "b1a79f887662bc3c82cc111653c86dde9bac6799808f408b2616074cc820581d",
+    "pivot-source.xlsx": "cabd1003707e5c911498cd6c73622d27ecdb63e943c697f9a266ea76fb934882",
+    "workshop-scan.pdf": "6e0519a810d524884e9adf1a82bb7501de22e9a6132437ee156149ca0024b413",
+    "橙色卡片.png": "172bcd953a0d62ab19717e5f05aca58dcf364415acca3b182354a725a27941ed",
+    "素材原件.png": "8635c64837ad5746e20f0213ddbfa31216b498107bbe77d711ad9f869c3bad1e",
+    "蓝色卡片.png": "b853c9ac7f1055d8ea86fc82bdfd7110b54da61ce0c226791b0a2cb0c4c2c8b8"
+  }
+}

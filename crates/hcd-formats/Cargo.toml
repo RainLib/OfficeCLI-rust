@@ -4,19 +4,23 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+base64 = "0.22"
 hcd-core = { path = "../hcd-core" }
 hcd-docx = { path = "../hcd-docx" }
 oxml = { path = "../oxml" }
 pdf-handler = { path = "../pdf-handler" }
 hayro = { workspace = true }
 handler-common = { path = "../handler-common" }
+xlsx-handler = { path = "../xlsx-handler" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 quick-xml = { workspace = true }
+roxmltree = { workspace = true }
+csv = "1"
 tempfile = { workspace = true }
 time = { workspace = true }
 pulldown-cmark = { version = "0.13.4", default-features = false }
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 
 [dev-dependencies]
 zip = { workspace = true }

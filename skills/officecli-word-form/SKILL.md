@@ -15,7 +15,7 @@ description: "Use this skill to create fillable Word forms (.docx) with real Con
 
 ```bash
 if ! command -v officecli >/dev/null 2>&1; then
-    curl -fsSL https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/RainLib/Foldly/main/install.sh | bash
 fi
 ```
 
@@ -23,7 +23,7 @@ fi
 
 ```powershell
 if (-not (Get-Command officecli -ErrorAction SilentlyContinue)) {
-    irm https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/RainLib/Foldly/main/install.ps1 | iex
 }
 ```
 
@@ -31,7 +31,7 @@ Verify: `officecli --version`
 
 If `officecli` is still not found after first install, open a new terminal and run the verify command again.
 
-If the install command above fails (e.g. blocked by security policy, no network access, or insufficient permissions), install manually — download the binary for your platform from https://github.com/RainLib/OfficeCli-rust/releases — then re-run the verify command.
+If the install command above fails (e.g. blocked by security policy, no network access, or insufficient permissions), install manually — download the binary for your platform from https://github.com/RainLib/Foldly/releases — then re-run the verify command.
 
 ## Help-First Rule
 

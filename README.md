@@ -1,617 +1,254 @@
-# OfficeCLI (Rust)
+<p align="center">
+  <img src="docs/assets/readme/foldly-logo.svg" width="280" alt="Foldly · 折页" />
+</p>
 
-> **A pure-Rust CLI for AI agents to create, read, modify, and render Office documents and PDFs.**
+<h1 align="center">Documents for teams. Tools for agents.</h1>
 
-**Give any AI agent structured control over Word, Excel, PowerPoint, and PDF — in one line of code.**
+<p align="center">A collaborative workspace and Rust document engine for people, AI assistants and coding agents.</p>
 
-Open-source. Single binary. No Office installation. No runtime dependency. Works on macOS, Linux, and Windows.
+<p align="center">
+  <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/license-Apache%202.0-377664" /></a>
+  <img alt="Rust document engine" src="https://img.shields.io/badge/engine-Rust-536A60" />
+  <img alt="MCP and CLI integration" src="https://img.shields.io/badge/agents-MCP%20%2B%20CLI-536A60" />
+</p>
 
-[![GitHub Release](https://img.shields.io/github/v/release/RainLib/OfficeCli-rust)](https://github.com/RainLib/OfficeCli-rust/releases)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
+<p align="center"><b>English</b> · <a href="README_zh.md">中文</a> · <a href="README_ja.md">日本語</a> · <a href="README_ko.md">한국어</a></p>
 
-**English** | [中文](README_zh.md) | [日本語](README_ja.md) | [한국어](README_ko.md)
+![Foldly connects documents, worksheets, slides and whiteboards](docs/assets/readme/foldly-banner.svg)
 
-## About This Repository
+**Foldly brings documents, spreadsheets, presentations and whiteboards into one workspace.** Open several files, work with teammates, and let a global AI assistant operate on the files and selections you choose. Embed an editor in your own product, or connect an external agent through MCP without showing a chat panel.
 
-This is **[RainLib/OfficeCli-rust](https://github.com/RainLib/OfficeCli-rust)** — a **Rust rewrite** of [OfficeCLI](https://github.com/iOfficeAI/OfficeCLI), the open-source Office automation CLI originally built in C#/.NET by [iOfficeAI](https://github.com/iOfficeAI).
+Its Rust document engine is exposed through the `officecli` command for reading, creating, editing and exporting files from scripts, developer tools and agent workflows.
 
-| | **This repo (Rust)** | **[Upstream (C#)](https://github.com/iOfficeAI/OfficeCLI)** |
-|---|---|---|
-| Repository | [RainLib/OfficeCli-rust](https://github.com/RainLib/OfficeCli-rust) | [iOfficeAI/OfficeCLI](https://github.com/iOfficeAI/OfficeCLI) |
-| Language | Pure Rust | C# / .NET (self-contained binary) |
-| Version | v0.1.x (command parity) | v1.0.x (mature, 6k+ stars) |
-| Runtime | None — native binary | .NET embedded in binary |
-| PDF support | ✅ read / modify / preview | Via plugins |
-| Goal | Lightweight, auditable, embeddable Rust core | Full-featured production CLI + ecosystem |
+[Try the workspace](#run-the-workspace) · [Connect an agent](#connect-ai-and-coding-agents) · [Embed an editor](#embed-in-your-product) · [Documentation](#documentation)
 
-The Rust edition shares the same **CLI philosophy** — path-based DOM operations, JSON output, TextOffsetMap, three-layer architecture, MCP server, and live HTML preview — and has reached **command-level parity** with the C# upstream. Use upstream for maximum ecosystem integration (AionUi, plugins marketplace); use this repo when you need a **dependency-free Rust binary** or want to contribute to the Rust implementation.
+## One workspace, several ways to collaborate
 
-## Supported Formats
+- **Keep work together.** A file library, shared projects and multiple tabs for documents, sheets, slides, whiteboards, PDFs and images. Reorder or group tabs, reopen closed files, and recover each tab's selection, viewport and unsent AI draft.
+- **Work with people and agents.** Collaborative text editing, named presence and selections, visible agent activity, anchored comments and reviewable revisions. Whiteboard Spec text supports simultaneous human and AI edits in the same passage.
+- **Give AI a precise target.** Select a paragraph, cell range or canvas object. Review proposed cross-file changes, apply them, and follow the saved revision back to its file. Supported AI edits can be undone individually while retaining distinguishable later input.
+- **Move between formats.** Reference document passages and worksheet ranges on a whiteboard, open the original source, and organize selected board content back into an editable document with a backlink.
+- **Keep your own application.** Use the full workspace, an individual embedded editor, a selection-scoped MCP connection, or the local CLI. The chat UI is optional.
 
-| Format             | Read | Modify                         | Create | Text/Offset Mapping | Convert Legacy  |
-| ------------------ | ---- | ------------------------------ | ------ | ------------------- | --------------- |
-| Word (.docx)       | ✅   | ✅                             | ✅     | ✅                  | ✅ .doc → .docx |
-| Excel (.xlsx)      | ✅   | ✅                             | ✅     | ✅                  | ✅ .xls → .xlsx |
-| PowerPoint (.pptx) | ✅   | ✅                             | ✅     | ✅                  | ✅ .ppt → .pptx |
-| PDF (.pdf)         | ✅   | ✅ (text replace, page delete) | ✅     | ✅                  | —               |
+![The running workspace: file library, shared projects and optional global AI](docs/assets/readme/workspace-home.png)
 
-## New: HCD — Chunked, Editable HTML Document Layer
+## AI collaboration across files
 
-HCD makes **HTML the canonical editable body** across document formats. Instead of building one
-full-document DOM, `officecli hdoc import` streams a source file into bounded, content-addressed
-HTML chunks, source maps, assets, and immutable revisions. This lets a frontend load only the
-visible pages while backend changes still target stable `nodeId` values.
+A task can read one file and edit another, or coordinate several files with explicit dependencies:
 
-![OfficeCLI HCD workflow](docs/assets/hcd/hcd-workflow.svg)
+> Read the selected interview notes, record the actions in the worksheet, and append the confirmed next steps to the whiteboard.
 
-### What the new workflow provides
+The workspace tracks the target file and range for each step. Proposed writes have a review step; successful writes return revision receipts. Dependent steps use saved results, and a changed target requires a new check rather than silently overwriting newer work. Files have independent commits; a cross-file workflow is not a single distributed transaction.
 
-- **One editing model:** DOCX, XLSX, PPTX, PDF, HTML, Markdown, and TXT become canonical HTML
-  fragments with format-specific profiles.
-- **Stable addressing:** editable text and mapped images have deterministic `nodeId` values;
-  identical source bytes plus the same `documentId` produce the same IDs.
-- **Incremental revisions:** `text.splice`, annotations, `image.replace`, and `image.geometry`
-  append a revision instead of overwriting the previous state. Hash preconditions detect conflicts,
-  and `patchId` makes retries idempotent.
-- **Low-memory delivery:** chunk index pages contain at most 128 descriptors; full HTML and bounded
-  windows use the same bundle, and the example viewer keeps only a small viewport cache in the DOM.
-- **Verified assets:** raster images are content-addressed, hash-checked, revision-aware, and can be
-  read or replaced without embedding Base64 data in every HTML fragment.
-- **Pure Rust export:** a selected revision can be rebuilt as DOCX, XLSX, PPTX, PDF, Markdown, or TXT
-  without LibreOffice. When the immutable original is supplied, supported text changes use a
-  source-backed rewrite and preserve untouched package entries.
+External agents use the same document APIs and permission checks. Each agent can carry its own identity and visible editing activity. For the built-in natural-language planner, configure a supported model endpoint; local read/write commands also work without a model.
 
-### Quick HCD round trip
+For larger tasks, the editor's AI team supports 1–4 workers with a shared plan, scoped work leases and peer findings. Supported full-deck PPTX rebuilds draft slides in parallel and validate the results before live replacement. This requires the configured AI backend; see [agent-team verification and limits](docs/acceptance/hcd-agent-team-rebuild.zh.md).
 
-```bash
-# Import progressively; chunk_ready events may be consumed before import completes.
-officecli hdoc import report.docx --output report.hcd --events ndjson
+![A real multi-file AI task with selected targets and reviewable changes](docs/assets/readme/ai-collaboration.jpg)
 
-# Validate hashes, inspect a bounded text page, and render only chunks 20–29.
-officecli hdoc validate report.hcd --json
-officecli hdoc extract-text report.hcd --limit 100 --json
-officecli hdoc render-html report.hcd --chunk-start 20 --chunk-limit 10 \
-  --output report-window.html --json
+## Documents, data and an infinite canvas
 
-# Apply nodeId-addressed edits and inspect immutable history.
-officecli hdoc apply report.hcd --patch patch.json --expected-revision 0 --json
-officecli hdoc list-revisions report.hcd --json
-
-# Rebuild through the in-process Rust handler, or provide --source for supported source-backed edits.
-officecli hdoc export report.hcd --revision 1 --output report-revision-1.docx --json
-
-# Save the complete revision history as one portable file, then reopen it for editing.
-officecli hdoc pack report.hcd --output report-portable.hcd --json
-officecli hdoc unpack report-portable.hcd --output reopened.hcd --json
-officecli hdoc validate reopened.hcd --json
-```
-
-`report.hcd` above is the editable directory; `report-portable.hcd` is a ZIP-based single file.
-The archive includes the HCD/2 manifest, IR chunks, source maps, assets, and every referenced
-revision. It does not include the original Office/PDF source. The core API accepts `.hcd`
-uploads and offers `hcd` as a download format. Its 256 MiB HTTP download cap still applies.
-
-![Reference editor offering a portable HCD download](docs/assets/hcd/hcd-portable-download.png)
-![Reference editor reopened from an uploaded HCD file](docs/assets/hcd/hcd-portable-reopen.png)
-
-The standalone lazy-loading frontend is in [`examples/hdoc/lazy-viewer`](examples/hdoc/lazy-viewer).
-It fetches index pages and chunks independently, verifies hashes, and preserves `nodeId` across DOM
-eviction and reload.
-
-### Image nodes: replace content and geometry by `nodeId`
-
-The following real PPTX example was imported to HCD, then one image node was replaced and resized.
-The image keeps the same `nodeId`; its asset and geometry produce a new `visualHash` in revision 1.
-
-| Revision 0 | Revision 1 after `image.replace` + `image.geometry` |
+| Surface | Current capabilities |
 | --- | --- |
-| ![HCD image node before patch](docs/assets/hcd/image-node-before.png) | ![HCD image node after patch](docs/assets/hcd/image-node-after.png) |
+| **Word · DOCX** | Rich text, paragraph formatting, inline tables and merge/split, pictures, anchored margin comments, tracked-change review, page margins, linked table of contents and footnotes. |
+| **Spreadsheets · XLSX, CSV, TSV** | A virtualized grid, formulas, rich cell text, ranges, charts, filtering, sorting, conditional formats, pivot features and XLSX print settings. CSV/TSV upload opens an editable workbook. |
+| **Slides · PPTX** | Inline text and objects, pictures and shapes, alignment and grouping, thumbnail reordering, notes, inherited layout/master text styles, supported animations and slide transitions. |
+| **Whiteboards · Excalidraw** | Native editable shapes, sticky notes, connectors, mind maps, flowcharts, architecture and teaching diagrams, rich-text Specs, resource references, comments, mentions, stamps and animated materials. AI layouts append into free space. |
+| **PDF** | Fixed-page viewing, mapped text editing, page operations and OCR workflows. Capabilities depend on the source content and the available mapping. |
+| **Text and images** | Markdown, HTML and TXT editing; PNG, JPEG and WebP image workflows with selection and image controls. |
+
+Native Office settings and supported edits are verified through editing, export and reopening of the same original. Export fidelity is format- and operation-specific; see [current boundaries](#current-boundaries).
+
+![A live whiteboard with editable diagram nodes and the global AI panel](docs/assets/readme/whiteboard.jpg)
+
+<details>
+<summary><b>More real editor views: Word, Excel and PowerPoint</b></summary>
+
+| Word · rich text and formatting | Excel · cells and formulas |
+| --- | --- |
+| ![Word editor with the unified ribbon](docs/assets/readme/word-editor.png) | ![Worksheet editor with formatted cells and calculated totals](docs/assets/readme/sheet-editor.png) |
+
+![PowerPoint editor with native objects and the unified ribbon](docs/assets/readme/slides-editor.jpg)
+
+These are screenshots of running editors with example documents, not design mockups. [Capture sources and verification](docs/assets/readme/screenshots.json).
+
+</details>
+
+## Run the workspace
+
+The **Rust CLI is a native binary**. The **web workspace additionally runs Node.js services** for the application and collaboration. Building the workspace requires a Rust toolchain and Node.js **24.13+**.
+
+From a checkout of this source tree:
 
 ```bash
-officecli hdoc list-images presentation.hcd --limit 20 --json
-officecli hdoc get-image presentation.hcd <nodeId> --json
-officecli hdoc put-asset presentation.hcd replacement.png --json
-officecli hdoc apply presentation.hcd --patch image-patch.json \
-  --expected-revision 0 --json
+npm ci --prefix examples/hdoc/admin-app
+npm ci --prefix examples/hdoc/editor
+npm ci --prefix examples/hdoc/xlsx-univer-viewer
+npm ci --prefix examples/hdoc/embed-host
+cargo build --release -p officecli --bin officecli
+node apps/workspace/scripts/build.mjs
+npm run demo --prefix examples/hdoc/embed-host
 ```
 
-The reproducible patch is in
-[`examples/hdoc/image-patch/patch-pictures-basic.json`](examples/hdoc/image-patch/patch-pictures-basic.json).
-Generated `.hcd` bundles and preview output remain local and are intentionally excluded from Git.
+Open **http://fold.localhost:4417/workbench/**. The local demo creates an isolated temporary workspace with example files and signs in a restricted demo member. Restarting the demo creates new demo data.
 
-### Fidelity contract
+For a persistent workspace with your own accounts, initialize and start it with [`apps/workspace/cli.mjs`](apps/workspace/README.zh.md#构建与启动). That guide also covers permissions, sharing, tenant isolation, deployment, backups and business-file publication. Published standalone CLI binaries do not by themselves contain the built web workspace.
 
-HCD reports fidelity instead of claiming that every format is pixel-identical. DOCX imports target
-high-fidelity semantic flow; XLSX uses a virtualizable grid; PPTX uses slide-canvas geometry; PDF
-uses fixed-layout pages. Unsupported Office/PDF structures are retained through the immutable source
-when possible and listed as fidelity warnings. Source-backed image/media rewrites are currently
-rejected before output rather than silently dropping the requested change; source-free pure-Rust
-exports do include patched raster images. See the full contract in
-[`docs/hcd-docx-v1.zh.md`](docs/hcd-docx-v1.zh.md).
+## Connect AI and coding agents
 
-## For AI Agents — Text/Offset → Path Mapping
+### 1. Give a local coding agent document tools
 
-Every supported format can emit a **TextOffsetMap** — full text plus a character-offset→path mapping. An agent reads the map, finds the text to change, gets the exact document path (e.g. `/body/p[3]/r[1]`), and calls `set` precisely. No regex guessing.
+Start the stdio MCP server:
 
 ```bash
-officecli extract-text report.docx --with-offsets --json
+./target/release/officecli mcp
 ```
+
+For clients accepting a `mcpServers` configuration, register the **absolute path** to the binary:
 
 ```json
 {
-  "full_text": "Hello World\nSecond paragraph",
-  "spans": [
-    { "start": 0, "end": 5, "path": "/body/p[1]/r[1]", "text": "Hello", "element_type": "run" },
-    { "start": 6, "end": 11, "path": "/body/p[1]/r[2]", "text": "World", "element_type": "run" },
-    { "start": 12, "end": 28, "path": "/body/p[2]/r[1]", "text": "Second paragraph", "element_type": "run" }
-  ],
-  "meta": { "format": "docx", "total_chars": 28, "total_spans": 3 }
+  "mcpServers": {
+    "officecli": {
+      "command": "/absolute/path/to/officecli",
+      "args": ["mcp"]
+    }
+  }
 }
 ```
 
-**Agent setup** — feed the skill file to your coding agent:
+Use your client's equivalent stdio registration if its configuration format differs. The server exposes local document commands and HCD tools. For HCD, set `HCD_API_URL` to the document service origin and inject a document-scoped token as `HCD_MCP_TOKEN`; `token_env` can select a separate credential variable for another file. Start with `hcd_help` and discover the connected server's capabilities rather than hardcoding a protocol version.
+
+Give your coding agent the repository's [agent instructions](SKILL.md) and [format skills](skills/). A useful task is:
+
+> Read the current file and its capabilities. Locate the requested content using real paths or stable IDs, change only that content, read back the saved result, then export and reopen it. On a revision conflict, reread and replan.
+
+The CLI is also available directly to an agent's shell:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/SKILL.md
+./target/release/officecli create brief.docx
+./target/release/officecli add brief.docx /body --type paragraph --prop text="Workshop decisions"
+./target/release/officecli extract-text brief.docx --with-offsets --json
+./target/release/officecli view brief.docx --mode annotated
+./target/release/officecli help docx paragraph
 ```
 
-Or install the binary + skill in one step (see [Installation](#installation)).
+### 2. Connect to a user's current file and selection
 
-## Quick Start
+Enable selection MCP when initializing the workspace (`--selection-mcp`); the local demo already enables it. Select content, choose the task files under **Global AI**, then use **Copy MCP configuration for the selected range**. These short-lived Streamable HTTP connections are scoped to their file and selected target. Their tools include `read_selection` and the authorized edit operation, such as `replace_selected_text`, `edit_selected_cells`, `edit_canvas_selection` or `append_to_file`.
+
+An external Node.js agent can read and replace **one selected document passage** as follows. Install `@modelcontextprotocol/sdk` in your agent project; set `OFFICECLI_MCP_ENDPOINT` and `OFFICECLI_SELECTION_TOKEN` from the authorized connection. The replacement can come from your own model or application code.
+
+```js
+import { randomUUID } from 'node:crypto'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+
+const client = new Client({ name: 'editor-agent', version: '1.0.0' })
+await client.connect(new StreamableHTTPClientTransport(
+  new URL(process.env.OFFICECLI_MCP_ENDPOINT),
+  { requestInit: { headers: {
+    Authorization: `Bearer ${process.env.OFFICECLI_SELECTION_TOKEN}`,
+  } } },
+))
+async function call(name, args = {}) {
+  const result = await client.callTool({ name, arguments: args })
+  if (result.isError) throw new Error(JSON.stringify(result.content))
+  return result.structuredContent ?? JSON.parse(result.content[0].text)
+}
+try {
+  const selection = await call('read_selection')
+  if (selection.kind !== 'document' || selection.spans.length !== 1) {
+    throw new Error('Select one document passage before running this example.')
+  }
+  const receipt = await call('replace_selected_text', {
+    requestId: randomUUID(),
+    replacements: ['Confirm the interview outline together on Friday.'],
+  })
+  console.log(receipt) // Saved revision, file identity and change count.
+} finally {
+  await client.close()
+}
+```
+
+The backend rechecks the member, file permission, revision, collaboration epoch and grant. Changing the selection or closing its editor revokes the old grant; expired or stale targets require a fresh authorization. See the [working client](examples/hdoc/embed-host/agent.mjs) and [host integration guide](examples/hdoc/embed-host/README.md#外部-agent-的授权与实际调用).
+
+### 3. Coordinate richer document operations
+
+For service-backed HCD agents, `hcd_read` supplies stable nodes, paragraph IDs, cell addresses and precondition hashes. `hcd_patch` commits guarded edits; `hcd_activity` exposes agent focus; `hcd_canvas_plan` creates an append-only editable board layout; `hcd_office_features` handles supported page, print and transition settings. The server negotiates capabilities and records author identity and revisions.
+
+This supports an agent's **read → plan → edit → verify → export** loop without requiring screen-coordinate automation. Multi-agent work uses independent identities and guarded writes. Overlapping incompatible edits are rejected for replanning; it does not mean arbitrary simultaneous writes always merge.
+
+## Embed in your product
+
+Mount a document, sheet, slide deck or whiteboard with the same React component. Your backend supplies an authorized, renewable editor session; your product owns authentication and business-file permissions.
+
+```tsx
+import { EmbeddedHcdEditor } from '@officecli/hcd-reference-editor/react'
+import '@officecli/hcd-reference-editor/style.css'
+
+<EmbeddedHcdEditor
+  documentId={session.documentId}
+  token={session.token}
+  apiUrl="/v1/documents"
+  collabUrl={collaborationWebSocketUrl}
+  chatPanel={false}
+  onSelectionChange={handleSelectionChange}
+/>
+```
+
+Hide chat, provide your own chat component, or connect external agents independently. The component is built from [`examples/hdoc/editor`](examples/hdoc/editor/README.md); the import above is its package export, not a claim that it is published to a public registry. [Runnable host example, session renewal and proxy routes](examples/hdoc/embed-host/README.md#宿主接入).
+
+## How it fits together
+
+```mermaid
+flowchart LR
+  People[People] --> Workspace[Multi-tab workspace]
+  Workspace --> Editors[Embedded editors]
+  Agents[AI and coding agents] --> MCP[MCP tools]
+  Workspace --> Tasks[Reviewed cross-file tasks]
+  Editors <--> Collaboration[Text collaboration service]
+  Editors --> API[Authorized document API]
+  Tasks --> API
+  MCP --> API
+  API --> HCD[HCD chunks and immutable revisions]
+  HCD --> Rust[Rust format handlers]
+  Rust --> Files[Native files and exports]
+```
+
+HCD is the editable document layer: bounded HTML chunks, stable source mappings, content-addressed assets and immutable revisions. Human text collaboration uses Yjs; saved structural and native-format operations pass through revision and hash checks. Whiteboards use native editable Excalidraw objects. The web application, collaboration service and Rust engine are distinct runtime components.
+
+## Current boundaries
+
+- Format support is not a promise of complete Office feature coverage or pixel-identical rendering. Check capabilities and export warnings for the actual file. Some exports need installed fonts or a browser layout engine.
+- Word's linked table of contents currently provides heading navigation; automatic physical page-number generation is not implemented. Complex master graphics, advanced animations and unsupported Office structures have format-specific limits.
+- Selection-scoped spreadsheet MCP tools edit literal cells; formula and richer native edits use the appropriate document APIs and their own permissions. Not every engine operation is exposed by the selection grant.
+- AI undo preserves distinguishable later edits in supported operations and rejects ambiguous or changed targets. A multi-file workflow retains independent per-file receipts and history.
+- The local demo and deterministic test planner are not a bundled production model. Natural-language AI requires a configured model service; external agents can use their own model.
+
+## Documentation
+
+| Start here | Details |
+| --- | --- |
+| [Workspace application](apps/workspace/README.zh.md) | Accounts, projects, permissions, sharing, tenancy, deployment and backups. |
+| [Embedding and external agents](examples/hdoc/embed-host/README.md) | React integration, selection authorization, MCP and a runnable host. |
+| [Editor development](examples/hdoc/editor/README.md) | Editor and collaboration development workflows. |
+| [HCD examples](examples/hdoc/README.md) | Import, chunks, patches, source mapping and export. |
+| [Office features verification](docs/design/officecli-office-ribbon/implementation/office-features/validation.json) | Word, Excel and PPT edits, native export and reopening. |
+| [Canvas interaction verification](docs/design/officecli-office-ribbon/implementation/canvas-input/validation.json) | DOM overlays, zoom, pan and editor input. |
+| [Editable UI designs](docs/design/officecli-office-ribbon/README.zh.md) | Pen source, previews and implementation captures. |
+
+For a local check:
 
 ```bash
-# 1. Install (macOS / Linux)
-curl -fsSL https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.sh | bash
-# Windows (PowerShell):
-#   irm https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.ps1 | iex
-
-# 2. Create a blank PowerPoint
-officecli create deck.pptx
-
-# 3. Add a slide
-officecli add deck.pptx / --type slide --prop title="Hello, World!"
-
-# 4. Preview as HTML
-officecli view deck.pptx --mode html
-
-# 5. Live preview — auto-refresh on every edit
-officecli watch deck.pptx
+cargo test -p hcd-core -p hcd-docx -p hcd-formats -p oxml
+npm run build --prefix examples/hdoc/editor
+npm run build --prefix examples/hdoc/embed-host
+npm run test:workbench --prefix apps/workspace
 ```
 
-In another terminal, every `add` / `set` / `remove` refreshes the browser at `http://localhost:26315`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for changes and validation requirements. The repository keeps reproducible acceptance evidence alongside its code.
 
-## Why OfficeCLI?
+## License and acknowledgements
 
-What used to take 50 lines of Python and three separate libraries:
-
-```python
-from pptx import Presentation
-prs = Presentation()
-slide = prs.slides.add_slide(prs.slide_layouts[0])
-slide.shapes.title.text = "Q4 Report"
-# ... dozens more lines ...
-prs.save("deck.pptx")
-```
-
-Becomes one command:
-
-```bash
-officecli add deck.pptx / --type slide --prop title="Q4 Report"
-```
-
-**Core capabilities in this Rust build:**
-
-- **Create** blank documents or add structured content
-- **Read** text, outline, stats, and annotated views — plain text or `--json`
-- **Modify** elements via path-based `set` / `add` / `remove` / `move`
-- **Validate** document structure and surface issues
-- **Extract** text with offset→path mapping for agent positioning
-- **Render** documents to HTML/SVG for visual feedback
-- **Convert** legacy `.doc` / `.xls` / `.ppt` to modern formats
-- **PDF** — read, preview, replace text, delete pages
-- **Batch** — run multiple operations in one open/save cycle
-- **MCP** — expose all operations as AI tools over JSON-RPC
-
-## Installation
-
-Ships as a single native binary. Pure Rust — no .NET, no Python, no Office.
-
-**One-line install:**
-
-```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.sh | bash
-
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.ps1 | iex
-```
-
-Pin a specific release:
-
-```bash
-OFFICECLI_VERSION=v0.1.2 curl -fsSL https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.sh | bash
-```
-
-**Manual download** from [GitHub Releases](https://github.com/RainLib/OfficeCli-rust/releases):
-
-| Platform            | Binary                       |
-| ------------------- | ---------------------------- |
-| macOS Apple Silicon | `officecli-mac-arm64`        |
-| macOS Intel         | `officecli-mac-x64`          |
-| Linux x64           | `officecli-linux-x64`        |
-| Linux ARM64         | `officecli-linux-arm64`      |
-| Linux Alpine x64    | `officecli-linux-alpine-x64` |
-| Windows x64         | `officecli-win-x64.exe`      |
-| Windows ARM64       | `officecli-win-arm64.exe`    |
-
-```bash
-# Download script — current platform, latest published release
-./scripts/download.sh
-
-# Specific version, all platforms
-./scripts/download.sh v0.1.2 all
-
-# GitHub CLI
-gh release download v0.1.2 --repo RainLib/OfficeCli-rust --pattern 'officecli-*'
-```
-
-> **Release note:** CI builds binaries on every `v*` tag push and uploads them to a **draft** GitHub Release. Publish the draft on the [Releases](https://github.com/RainLib/OfficeCli-rust/releases) page before `latest` download URLs work. Push tags to the `github` remote (`git push github v0.1.2`), not only the internal `origin` remote.
-
-Verify: `officecli --version`
-
-## Key Features
-
-### Three-Layer Architecture
-
-Start simple, go deep only when needed.
-
-| Layer           | Purpose                                  | Commands                                                         |
-| --------------- | ---------------------------------------- | ---------------------------------------------------------------- |
-| **L1: Read**    | Semantic views of content                | `view` (text, annotated, outline, stats, issues, html, svg, screenshot, pdf, forms) |
-| **L2: DOM**     | Structured element operations            | `get`, `query`, `set`, `add`, `add-part`, `remove`, `move`, `swap`  |
-| **L3: Raw**     | Direct XML/XPath access — universal fallback | `raw`, `raw-set`, `validate`                                 |
-
-```bash
-# L1 — high-level views
-officecli view report.docx --mode annotated
-officecli view report.docx --mode forms      # list form fields (SDT)
-officecli view budget.xlsx --mode stats
-officecli view report.pdf --mode text
-officecli view report.pdf --mode pdf        # export as PDF via headless browser
-
-# L2 — element-level operations
-officecli query report.docx paragraph
-officecli add budget.xlsx / --type sheet --prop name="Q2 Report"
-officecli remove report.pptx '/slide[3]'
-
-# L3 — raw XML when L2 isn't enough
-officecli raw deck.pptx 'ppt/slides/slide1.xml'
-officecli raw-set report.docx document --xpath "//w:p[1]" --action append \
-  --xml '<w:r><w:t>Injected</w:t></w:r>'
-```
-
-### Live Preview & Rendering
-
-Built-in HTML/SVG rendering closes the **render → look → fix** loop without Office installed:
-
-```bash
-officecli view deck.pptx --mode html     # standalone HTML preview
-officecli view deck.pptx --mode svg      # SVG output
-officecli watch deck.pptx                # live server at :26315
-```
-
-### Format Conversion
-
-Multiple engines for legacy format conversion, PDF to DOCX, and standalone semantic HTML import:
-
-```bash
-officecli convert old.doc              # .doc -> .docx (LibreOffice, default)
-officecli convert old.xls -o new.xlsx  # .xls -> .xlsx
-officecli convert old.ppt --engine oxide  # pure-Rust engine, no external deps
-officecli convert input.pdf --engine pdf2docx  # PDF -> DOCX via Python pdf2docx
-officecli convert input.html -o report.docx    # headings/paragraphs/lists/tables -> Word
-officecli convert input.html -o report.xlsx    # tables/content -> worksheet cells
-officecli convert input.html -o report.pptx    # sections/H1 headings -> slides
-officecli convert input.html -o report.pdf     # CSS-paginated PDF (pure Rust)
-```
-
-HTML conversion is always performed in-process by OfficeCLI's Rust handlers. DOCX/XLSX/PPTX
-targets report `engine=rust-html-semantic` with `fidelity=semantic`; PDF reports
-`engine=rust-html-css-pdf` with `fidelity=high` and uses a pure-Rust HTML/CSS cascade, layout,
-pagination, font-subsetting, table and link renderer. It never invokes LibreOffice, WPS,
-`pdf2docx`, Chromium, or another browser renderer, even when one of those engines is supplied on
-the command line. It does not require an original Office file. JavaScript and active content remain
-disabled and unsupported browser-only CSS is reported rather than executed. Arbitrary local and remote
-URLs are not fetched; only validated content-addressed HCD assets are authorized. Source-free HCD export can embed validated,
-content-addressed raster assets natively in DOCX/XLSX/PPTX and as PNG/JPEG PDF image XObjects;
-bounded source dimensions are retained and direct PPTX picture coordinates are reused when present.
-Cropping, wrapping and page collision still remain semantic rather than source-layout exact. Input
-is bounded to 64 MiB and each semantic text block to 2 MiB.
-
-HTML/HCD tables are emitted as native Word/Excel structures and editable DrawingML tables in PPTX.
-PPTX tables wider than 12 columns or taller than 18 rows are split into bounded table slides with
-the first row repeated. Logical PPTX tables split across HCD chunks are validated and reassembled by
-stable table ID and contiguous row ranges before this layout step; PDF currently keeps the table as
-a bounded native vector grid with extractable cell text and automatic page splitting.
-
-For incremental editing, `officecli hdoc import` accepts `.docx`, `.xlsx`, `.pptx`, `.pdf`,
-`.html`/`.htm`, UTF-8 `.md`/`.markdown`, and UTF-8 `.txt`. It emits immutable canonical HTML chunks and source maps;
-HTML headings, paragraphs, lists, and tables remain safe canonical structures, while each editable
-text span retains its exact UTF-8 source byte range. Large HTML tables use stable IDs and contiguous
-128-row fragments for frontend virtualization and source-free native Office table reconstruction.
-When `--document-id` is omitted, an immutable source SHA-256-derived ID makes byte-identical imports
-repeat the same document and node IDs; production systems should pass their persistent business ID
-to preserve lineage when source bytes change. `hdoc get-node <bundle> <nodeId>` resolves one current
-node through chunk bloom filters and source maps without building a full-text buffer. `hdoc apply`
-then appends nodeId-addressed text/annotation revisions. With `--source`, `hdoc export` writes the selected
-revision back against the SHA-256-verified immutable source; without a source (or with a different
-target), it can rebuild DOCX/XLSX/PPTX/Markdown/TXT at explicitly reported `SEMANTIC` fidelity and PDF at
-canonical HTML/CSS `HIGH` fidelity through in-process Rust handlers. HTML, Markdown and TXT source-backed export rewrites only mapped text byte
-ranges, preserving all other source bytes. These HCD commands are implemented entirely in Rust and
-do not invoke an installed office suite. CSS PDF output preserves safe HTTP(S)/mailto links as
-native URI annotations attached to the visible anchor label without appending the URL to document
-text, and uses the canonical stylesheet for fenced code, tables, quotes, alerts and pagination.
-PDF text can embed multiple subset fonts on one page, so emoji and uncommon symbols use a
-character-level fallback instead of being replaced when an installed font covers them. Set
-`OFFICECLI_HTML_PDF_FALLBACK_FONT_FILE` to provide a deterministic deployment fallback font.
-`hdoc render-html --chunk-start N --chunk-limit M` materializes an independently viewable bounded
-window while preserving the default full-document output when those flags are omitted.
-`hdoc list-revisions`/`get-revision` expose the append-only history, and `hdoc get-asset` verifies a
-content-addressed asset before reporting or copying it. The dependency-free
-`examples/hdoc/lazy-viewer` progressively reads index pages, verifies chunk hashes, keeps only a
-bounded viewport cache in the DOM, and preserves canonical node IDs across eviction/reload. XLSX
-continues to use the Univer Canvas example for sheet/row-window virtualization and editable-cell
-node mapping.
-Mapped DOCX/XLSX/PPTX/PDF pictures are first-class image nodes: `hdoc list-images` and
-`get-image` expose stable node IDs, asset hashes, geometry and visual preconditions. `put-asset`
-stages a bounded raster without changing the current revision; `hcd-patch/3` atomically applies
-`image.replace` and `image.geometry`. Patched images are preserved by source-free pure-Rust exports;
-source-backed media rewrites fail before output until their format-specific rewriters are added.
-The PPTX adapter materializes direct text/picture
-geometry and DrawingML table grids, merges, direct cell formatting, and editable cell text while
-preserving the original presentation as the source-backed export authority. Large DrawingML tables
-stream as bounded row-group fragments (at most 128 rows per normal fragment); each fragment repeats
-its frame geometry and column grid, and row-spanning merge groups are never split.
-PDF HCD import uses a pinned pure-Rust Hayro renderer to composite each CropBox page into a
-content-addressed 96-DPI PNG visual authority layer. Extractable nodeId text remains in a separate
-transparent HTML interaction layer, and pages after the first are lazy-loaded. This preserves the
-source page layout far better than XObject/image reconstruction, but `VISUAL` does not mean that two
-different PDF engines produce byte- or pixel-identical color management and antialiasing. Edited PDF
-text requires dirty-page recomposition to retain the same visual guarantee. The current lopdf/Hayro
-backend also does not yet meet the 512 MiB RSS target on high-resolution JPEG2000-heavy files.
-
-The engine table below applies to non-HTML conversion paths:
-
-| Engine                  | Fidelity                                | Speed                  | Dependency           |
-| ----------------------- | --------------------------------------- | ---------------------- | -------------------- |
-| `libreoffice` (default) | ~1:1                                    | Slower (process spawn) | LibreOffice (~700MB) |
-| `oxide`                 | Lower (may lose styles/headers/objects) | Fast (sub-second)      | None (pure Rust)     |
-| `pdf-text`              | Text only                               | Fastest                | None (pure Rust)     |
-| `pdf2docx`              | Layout parser, PDF-only                 | Usually faster than LO | Python `pdf2docx` CLI |
-
-### Resident Mode & Batch
-
-For multi-step workflows, resident mode (Unix) keeps the document in memory. Batch runs multiple operations in one cycle.
-
-```bash
-# Resident mode — near-zero latency via Unix Domain Socket
-officecli open report.docx
-officecli set report.docx /body/p[1]/r[1] --prop text="Updated"
-officecli save report.docx
-officecli close report.docx
-
-# Batch mode — atomic multi-command execution
-echo '[{"command":"set","path":"/slide[1]/shape[1]","props":{"text":"Hello"}}]' \
-  | officecli batch deck.pptx --stdin --json
-officecli batch deck.pptx --commands-file batch.json --json
-```
-
-### PDF Support
-
-```bash
-officecli view report.pdf --mode text
-officecli get report.pdf '/page[1]'
-officecli extract-text report.pdf --with-offsets --json
-officecli set report.pdf '/page[1]' --prop text="New content"
-officecli remove report.pdf '/page[3]'
-officecli save report.pdf
-```
-
-## AI Integration
-
-### MCP Server
-
-```bash
-officecli mcp    # Start MCP stdio server (JSON-RPC 2.0)
-```
-
-Exposes document operations as tools — no shell access required.
-
-### Built-in Help
-
-```bash
-officecli --help
-officecli help docx paragraph
-officecli help xlsx cell --json
-```
-
-When unsure about property names, use `officecli help <format> <element>` — it reflects the installed binary version.
-
-## Comparison
-
-### vs. Traditional Tools
-
-|                                 | OfficeCLI (Rust) | [OfficeCLI (C#)](https://github.com/iOfficeAI/OfficeCLI) | Microsoft Office | python-docx / openpyxl |
-| ------------------------------- | ---------------- | -------------------------------------------------------- | ---------------- | ---------------------- |
-| Open source & free              | ✅ Apache 2.0    | ✅ Apache 2.0                                            | ✗                | ✅                     |
-| AI-native CLI + JSON            | ✅               | ✅                                                       | ✗                | ✗                      |
-| Zero runtime (single binary)    | ✅ (Rust)        | ✅ (.NET embedded)                                       | ✗                | ✗ (Python + pip)       |
-| Word + Excel + PowerPoint + PDF | ✅               | ✅ (+ plugins)                                           | ✅               | Separate libs          |
-| Text/offset → path mapping      | ✅               | ✅                                                       | ✗                | ✗                      |
-| Path-based element access       | ✅               | ✅                                                       | ✗                | ✗                      |
-| Live HTML preview (`watch`)     | ✅               | ✅                                                       | ✗                | ✗                      |
-| MCP server                      | ✅               | ✅ (+ auto-register)                                       | ✗                | ✗                      |
-| Headless / CI / Docker          | ✅               | ✅                                                       | ✗                | ✅                     |
-
-### vs. Upstream OfficeCLI (C#)
-
-This Rust port is **API-compatible** (same command names, path syntax, `--prop` conventions) and has reached **command-level parity** with the C# upstream. Remaining gaps are in edge-case fidelity and ecosystem tooling, not in command coverage.
-
-| Feature | Upstream (C#) | This repo (Rust) |
-| ------- | ------------- | ---------------- |
-| Template `merge` (`{{key}}`) | ✅ | ✅ |
-| `view screenshot` (PNG) | ✅ | ✅ (headless Chrome/Edge/Firefox) |
-| `view pdf` (PDF export) | ✅ | ✅ (headless Chromium `--print-to-pdf`) |
-| `view forms` (SDT form fields) | ✅ | ✅ (docx SDT parsing) |
-| `swap`, `refresh`, `plugins` | ✅ | ✅ |
-| `add-part` (chart/header/footer) | ✅ | ✅ |
-| `import` (CSV/TSV → xlsx) | ✅ | ✅ |
-| `mark/unmark/marks/goto` (watch) | ✅ | ✅ (watch server routes) |
-| `officecli install` self-setup | ✅ | ✅ (binary + skills + MCP) |
-| Formula engine (150+ functions) | ✅ | ✅ (80+ functions) |
-| Pivot tables (listing) | ✅ | ✅ (listing + source range) |
-| Morph transitions (reporting) | ✅ | ✅ (detection + candidate count) |
-| 3D models | ✅ | ✅ (HTML preview) |
-| Python SDK (`officecli-sdk`) | ✅ | ✅ (Unix domain socket IPC) |
-| CLI smoke & integration tests | ✅ | ✅ (39 CLI + 32 unit tests) |
-| `cargo clippy -D warnings` clean | N/A | ✅ |
-| AionUi GUI integration | ✅ | N/A (upstream ecosystem) |
-| Wiki & 4000+ commits of polish | ✅ | Early stage |
-
-Track upstream for the full command reference and wiki: [iOfficeAI/OfficeCLI Wiki](https://github.com/iOfficeAI/OfficeCLI/wiki).
-
-## Command Reference
-
-| Command        | Description                                                                   |
-| -------------- | ----------------------------------------------------------------------------- |
-| `create`       | Create a blank `.docx`, `.xlsx`, `.pptx`, or `.pdf`                           |
-| `view`         | View content (`text`, `annotated`, `outline`, `stats`, `issues`, `html`, `svg`, `screenshot`, `pdf`, `forms`) |
-| `get`          | Get element and children (`--depth N`, `--json`)                                |
-| `query`        | CSS-like element query                                                        |
-| `set`          | Modify element properties                                                     |
-| `add`          | Add element                                                                   |
-| `add-part`     | Create a new document part (chart, header, footer) and return its rel ID      |
-| `remove`       | Remove an element                                                             |
-| `move`         | Move element                                                                  |
-| `swap`         | Swap two elements (paragraphs, slides, cells)                                  |
-| `save`         | Save changes back to file                                                     |
-| `validate`     | Validate document structure                                                   |
-| `extract-text` | Extract text with offset→path mapping (`--with-offsets`, `--json`)            |
-| `convert`      | Convert legacy formats and PDF (`--engine libreoffice\|oxide\|pdf-text\|pdf2docx`) |
-| `batch`        | Multiple operations in one cycle                                              |
-| `dump`         | Serialize document structure to replayable JSON                               |
-| `raw`          | View raw XML of a document part                                               |
-| `raw-set`      | Modify raw XML via XPath (`setattr`, `remove`)                                |
-| `import`       | Import CSV/TSV data into an Excel sheet                                       |
-| `merge`        | Merge template placeholders (`{{key}}`) with JSON data                        |
-| `refresh`      | Refresh derived fields (TOC, cross-references)                                 |
-| `watch`        | Live HTML preview with auto-refresh                                           |
-| `unwatch`      | Stop a running watch server                                                   |
-| `open`         | Start resident mode (Unix)                                                    |
-| `close`        | Save and close resident mode                                                   |
-| `plugins`      | List, inspect, and lint installed plugins (`list`, `info`, `lint`)              |
-| `install`      | Install binary, skills, and MCP configuration (`--dry-run`, `--prefix`)        |
-| `info`         | Show info about the tool or document topics                                   |
-| `mcp`          | Start MCP server for AI tool integration                                      |
-
-Global flag: `--json` on any command for structured output.
-
-## Use Cases
-
-**Developers**
-- Automate report generation in CI/CD pipelines
-- Headless document processing in Docker (Alpine musl build available)
-- Embed a small Rust binary without .NET or Python runtimes
-
-**AI Agents**
-- Precise text edits via TextOffsetMap → path → `set`
-- Visual feedback loop with `watch` and `view html`
-- Tool integration via MCP server
-
-**Teams**
-- Internal document automation with auditable open-source Rust code
-- Gradual migration path from upstream OfficeCLI with compatible CLI syntax
-
-## Build from Source
-
-Requires [Rust](https://rustup.rs/) 1.75+ (CI pins 1.90.0).
-
-```bash
-git clone https://github.com/RainLib/OfficeCli-rust.git
-cd OfficeCli-rust
-cargo build --release
-# Binary at target/release/officecli
-```
-
-Cross-compile:
-
-```bash
-cargo build --release --target aarch64-apple-darwin    # macOS ARM
-cargo build --release --target x86_64-unknown-linux-gnu
-cargo build --release --target x86_64-pc-windows-msvc
-```
-
-Local distribution:
-
-```bash
-make dist          # build + copy to dist/ with SHA256
-make download VERSION=v0.1.2 PLATFORM=all  # fetch release binaries
-make smoke         # quick sanity check
-```
-
-## Project Structure
-
-```
-OfficeCli-rust/
-├── Cargo.toml                 # Workspace root (v0.1.x)
-├── install.sh / install.ps1   # One-line installers
-├── scripts/download.sh        # Platform binary downloader
-├── SKILL.md                   # AI agent skill file
-├── crates/
-│   ├── officecli/              # CLI entry + commands
-│   ├── handler-common/         # DocumentHandler trait + shared types
-│   ├── oxml/                   # OOXML ZIP/XML package handling
-│   ├── docx-handler/           # Word handler
-│   ├── xlsx-handler/           # Excel handler
-│   ├── pptx-handler/           # PowerPoint handler
-│   └── pdf-handler/            # PDF handler (lopdf + custom parser)
-├── examples/                   # Runnable examples (.sh / .md)
-└── skills/                     # Specialized agent skills
-```
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Every PR should be atomic and include a verifiable validation method (command sequence showing before/after).
-
-Bug reports and feature requests: [GitHub Issues](https://github.com/RainLib/OfficeCli-rust/issues)
-
-Upstream reference implementation: [iOfficeAI/OfficeCLI](https://github.com/iOfficeAI/OfficeCLI)
-
-## License
-
-[Apache License 2.0](LICENSE)
-
----
-
-If you find this project useful, please [star it on GitHub](https://github.com/RainLib/OfficeCli-rust) — and consider starring [upstream OfficeCLI](https://github.com/iOfficeAI/OfficeCLI) too.
-
-[GitHub — RainLib/OfficeCli-rust](https://github.com/RainLib/OfficeCli-rust) | [Upstream — iOfficeAI/OfficeCLI](https://github.com/iOfficeAI/OfficeCLI) | [Releases](https://github.com/RainLib/OfficeCli-rust/releases)
-
-<!-- LLM/agent discovery metadata
-tool: officecli
-repo: RainLib/OfficeCli-rust
-upstream: iOfficeAI/OfficeCLI
-type: cli
-language: rust
-formats: docx, xlsx, pptx, pdf
-capabilities: create, read, modify, validate, batch, resident-mode, mcp-server, live-preview, text-offset-mapping, format-conversion
-platforms: macos, linux, windows
-license: Apache-2.0
-skill-file: SKILL.md
--->
-
-PDF image encoding and rasterization settings are owned by the installed pdf2docx
-implementation. RainLib/pdf2docx supports PDF2DOCX_IMAGE_FORMAT,
-PDF2DOCX_IMAGE_JPEG_QUALITY and PDF2DOCX_IMAGE_MAX_DPI. OfficeCLI invokes
-this converter without re-encoding the resulting DOCX images.
+[Apache License 2.0](LICENSE). The `officecli` command model originated in [iOfficeAI/OfficeCLI](https://github.com/iOfficeAI/OfficeCLI). This repository develops a Rust engine and collaborative workspace, using projects including Excalidraw, Yjs, Tiptap and Univer under their respective licenses.

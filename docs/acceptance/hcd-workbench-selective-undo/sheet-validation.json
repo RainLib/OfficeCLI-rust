@@ -1,0 +1,119 @@
+{
+  "status": "passed",
+  "root": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-sheet-undo-z4b7mW",
+  "original": [
+    {
+      "properties": {
+        "b": {},
+        "color": {
+          "rgb": "FFCC2244"
+        },
+        "rFont": {
+          "val": "Arial"
+        },
+        "sz": {
+          "val": "18"
+        }
+      },
+      "text": "中文😀"
+    },
+    {
+      "properties": {
+        "b": {
+          "val": "0"
+        },
+        "color": {
+          "rgb": "FF2255AA"
+        },
+        "i": {
+          "val": "0"
+        },
+        "sz": {
+          "val": "11"
+        }
+      },
+      "text": " normal "
+    },
+    {
+      "properties": {
+        "i": {},
+        "scheme": {
+          "val": "minor"
+        },
+        "u": {}
+      },
+      "text": "斜体"
+    }
+  ],
+  "restored": [
+    {
+      "properties": {
+        "b": {},
+        "color": {
+          "rgb": "FFCC2244"
+        },
+        "rFont": {
+          "val": "Arial"
+        },
+        "sz": {
+          "val": "18"
+        }
+      },
+      "text": "中文😀"
+    },
+    {
+      "properties": {
+        "b": {
+          "val": "0"
+        },
+        "color": {
+          "rgb": "FF2255AA"
+        },
+        "i": {
+          "val": "0"
+        },
+        "sz": {
+          "val": "11"
+        }
+      },
+      "text": " normal "
+    },
+    {
+      "properties": {
+        "i": {},
+        "scheme": {
+          "val": "minor"
+        },
+        "u": {}
+      },
+      "text": "斜体"
+    },
+    {
+      "properties": {
+        "b": {},
+        "color": {
+          "rgb": "FFCC2244"
+        },
+        "rFont": {
+          "val": "Arial"
+        },
+        "sz": {
+          "val": "18"
+        },
+        "u": {
+          "val": "single"
+        }
+      },
+      "text": "📍"
+    }
+  ],
+  "revision": 5,
+  "parentRevision": 4,
+  "peerUpdateMs": 89,
+  "checks": [
+    "Distinct users used real browser workbench AI review and native cell text formatting.",
+    "The peer inserted styled Unicode inside AI text and supplemented an AI-created cell.",
+    "After row insertion and owner reload, one atomic inverse preserved peer input and native styles, restored the number and cleared only the untouched created cell.",
+    "Both browsers and source-backed XLSX export, reupload, metadata and reopened grid agree."
+  ]
+}

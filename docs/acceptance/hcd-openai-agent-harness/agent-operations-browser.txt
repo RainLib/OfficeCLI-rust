@@ -1,0 +1,70 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test --output=/tmp/officecli-agent-final-suite-v2
+
+
+Running 55 tests using 1 worker
+
+(node:45135) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 e2e/agent-harness.spec.ts:161:69 › OpenAI harness edits and verifies txt (231ms)
+  ✓   2 e2e/agent-harness.spec.ts:161:69 › OpenAI harness edits and verifies md (230ms)
+  ✓   3 e2e/agent-harness.spec.ts:161:69 › OpenAI harness edits and verifies html (210ms)
+  ✓   4 e2e/agent-harness.spec.ts:161:69 › OpenAI harness edits and verifies docx (823ms)
+  ✓   5 e2e/agent-harness.spec.ts:161:69 › OpenAI harness edits and verifies xlsx (269ms)
+  ✓   6 e2e/agent-harness.spec.ts:161:69 › OpenAI harness edits and verifies pptx (232ms)
+  ✓   7 e2e/agent-harness.spec.ts:161:69 › OpenAI harness edits and verifies pdf (364ms)
+scripted model tool rejection: hcd_patch collaboration generation changed; reload the editor
+scripted model tool rejection: hcd_patch collaboration generation changed; reload the editor
+  ✓   8 e2e/agent-harness.spec.ts:174:1 › two model agents preserve successive edits after a real revision conflict (717ms)
+  ✓   9 e2e/agent-harness.spec.ts:188:1 › MCP Streamable HTTP negotiates, isolates sessions and rejects stale or read-only edits (86ms)
+  ✓  10 e2e/agent-harness.spec.ts:214:45 › two MCP agents collaborate on xlsx while the preview stays synchronized (2.2s)
+  ✓  11 e2e/agent-harness.spec.ts:214:45 › two MCP agents collaborate on pptx while the preview stays synchronized (1.5s)
+  ✓  12 e2e/agent-harness.spec.ts:214:45 › two MCP agents collaborate on pdf while the preview stays synchronized (1.6s)
+  ✓  13 e2e/agent-harness.spec.ts:261:1 › right-click and slash commands target real content and launch a visible Agent task (1.6s)
+scripted model tool rejection: hcd_patch collaborators have unsaved edits; wait for a checkpoint, reread and replan
+scripted model tool rejection: hcd_patch collaborators have unsaved edits; wait for a checkpoint, reread and replan
+  ✓  14 e2e/agent-harness.spec.ts:279:1 › human pending drafts block Agent writes and read-only users cannot start tasks (1.3s)
+  ✓  15 e2e/agent-harness.spec.ts:291:1 › task cancellation preserves commits and cannot be used by another principal (209ms)
+  ✓  16 e2e/agent-harness.spec.ts:300:1 › offline human edits survive a newer Agent epoch and can be downloaded for comparison (2.4s)
+  ✓  17 e2e/agent-harness.spec.ts:323:1 › Rank formulas double, total recalculates, and automatic canvas cursors survive model latency (35.9s)
+  ✓  18 e2e/agent-harness.spec.ts:397:43 › Agent operation queue and borderless animated areas on md (6.0s)
+  ✓  19 e2e/agent-harness.spec.ts:397:43 › Agent operation queue and borderless animated areas on docx (6.6s)
+  ✓  20 e2e/agent-harness.spec.ts:397:43 › Agent operation queue and borderless animated areas on xlsx (7.5s)
+  ✓  21 e2e/revision-diff.spec.ts:7:1 › revision diffs distinguish insertion, deletion, formatting, movement and complex content (1ms)
+  ✓  22 e2e/revision-diff.spec.ts:22:1 › inline diffs preserve Unicode offsets and bound long replacements (1ms)
+  ✓  23 e2e/workspace.spec.ts:112:1 › document tabs retain independent unsaved text and collaboration sessions (1.2s)
+  ✓  24 e2e/workspace.spec.ts:134:1 › workspace reload restores multiple tabs, active document, preview and independent canvas zoom (1.2s)
+  ✓  25 e2e/workspace.spec.ts:165:1 › workspace restoration reauthenticates every tab and isolates expired access (790ms)
+  ✓  26 e2e/workspace.spec.ts:194:58 › workspace connections remain usable with blocked browser storage (549ms)
+  ✓  27 e2e/workspace.spec.ts:194:58 › workspace connections remain usable with quota browser storage (573ms)
+  ✓  28 e2e/workspace.spec.ts:213:1 › two real MCP agents show moving cursors, conflict safely and commit successive edits (3.8s)
+  ✓  29 e2e/workspace.spec.ts:256:1 › complex Word tables retain canonical read-only layout in the semantic editor (1.3s)
+  ✓  30 e2e/workspace.spec.ts:277:1 › Word table text editing checkpoints shared drafts and preserves source runs and merged cells (6.9s)
+  ✓  31 e2e/workspace.spec.ts:323:1 › Word table drafts survive an MCP table edit and reject stale commits (7.1s)
+  ✓  32 e2e/workspace.spec.ts:359:1 › Word typography survives text checkpoints, reload and historical comparisons (2.4s)
+  ✓  33 e2e/workspace.spec.ts:407:1 › Word pagination preserves sections, running regions, table rows and unsaved Unicode drafts (1.5s)
+  ✓  34 e2e/workspace.spec.ts:469:1 › Word source grids preserve font metrics, opt-outs, fixed lines and header anchors (741ms)
+  ✓  35 e2e/workspace.spec.ts:493:1 › Word agents locate visible paginated content across sections and keep moving cursors (6.3s)
+  ✓  36 e2e/workspace.spec.ts:539:1 › a grid agent highlights its cell without changing the local selection (3.1s)
+  ✓  37 e2e/workspace.spec.ts:564:1 › an MCP agent cannot overwrite a collaborator with pending unsaved text (831ms)
+  ✓  38 e2e/workspace.spec.ts:583:1 › semantic MCP commits refresh the browser across collaboration epochs (2.8s)
+  ✓  39 e2e/workspace.spec.ts:603:1 › workspace drawers, focus mode and preview preserve document state (1.3s)
+  ✓  40 e2e/workspace.spec.ts:641:1 › workbook preview keeps its canvas and refuses to discard an unapplied formula (1.4s)
+  ✓  41 e2e/workspace.spec.ts:660:1 › all seven formats use the content shell and enforce read-only preview (6.1s)
+  ✓  42 e2e/workspace.spec.ts:681:1 › phone workspace provides reachable drawers without page overflow (965ms)
+  ✓  43 e2e/workspace.spec.ts:704:1 › history previews and real diffs preserve drafts and enforce read permissions (2.4s)
+  ✓  44 e2e/workspace.spec.ts:776:1 › failed and superseded history requests cannot replace the current editor (1.5s)
+  ✓  45 e2e/workspace.spec.ts:798:1 › canvas zoom handles all formats and frames without scaling the page (5.2s)
+  ✓  46 e2e/workspace.spec.ts:824:1 › historical Word tables keep canonical layout and comparisons fit phones (1.3s)
+  ✓  47 e2e/workspace.spec.ts:841:1 › agent commits preserve preview, focus, zoom and the selected historical comparison (2.2s)
+  ✓  48 e2e/workspace.spec.ts:884:1 › history uses the selected outline and closes the mobile drawer after selection (1.1s)
+  ✓  49 e2e/workspace.spec.ts:916:1 › fixed text box initial focus preserves immediate full-text replacements (1.3s)
+  ✓  50 e2e/workspace.spec.ts:929:1 › fixed history saves drafts, pins even the latest revision read-only and restores the live deck (2.4s)
+  ✓  51 e2e/workspace.spec.ts:978:1 › fixed snapshot failures can retry and delayed requests cannot replace the selected revision (1.8s)
+  ✓  52 e2e/workspace.spec.ts:1018:1 › export menus use source-aware methods and prepare real TXT, XLSX and PDF artifacts (2.6s)
+  ✓  53 e2e/workspace.spec.ts:1048:1 › missing workbook sources fall back explicitly to content conversion (1.2s)
+  ✓  54 e2e/workspace.spec.ts:1069:1 › export capabilities follow the selected PDF revision and block historical HCD archives (1.4s)
+  ✓  55 e2e/workspace.spec.ts:1111:1 › export option failures retry and conversion failures never expose a download link (781ms)
+
+  55 passed (2.5m)

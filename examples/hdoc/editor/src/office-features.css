@@ -1,0 +1,71 @@
+.hcd-surface .office-feature-tools { display: inline-flex; gap: 5px; align-items: center; }
+.hcd-surface dialog.office-feature-dialog { box-sizing: border-box; width: min(720px, calc(100vw - 32px)); max-height: min(820px, calc(100dvh - 40px)); padding: 0; border: 1px solid var(--line, #e3e6e9); border-radius: 20px; background: var(--surface, #fff); color: var(--ink, #22282e); box-shadow: 0 24px 90px #111a2440; overflow: auto; font: 14px/1.6 system-ui, sans-serif; }
+.office-feature-dialog::backdrop { background: #11192366; backdrop-filter: blur(3px); }
+.hcd-surface .office-feature-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 24px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--surface, #fff); z-index: 1; }
+.office-feature-heading { display: flex; align-items: center; gap: 10px; font-size: 17px; }
+.hcd-surface .office-feature-dialog :is(button, input, select, textarea) { box-sizing: border-box; font: inherit; color: inherit; }
+.hcd-surface .office-feature-dialog button { display: inline-flex; justify-content: center; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 9px; min-height: 34px; padding: 5px 12px; background: var(--surface, #fff); cursor: pointer; }
+.hcd-surface .office-feature-dialog button:hover { background: var(--accent-soft, #e8f2ee); }
+.hcd-surface .office-feature-dialog :is(button.primary, button[aria-pressed="true"]) { background: var(--accent-soft, #e8f2ee); color: var(--accent, #216d5d); border-color: var(--accent, #216d5d); }
+.hcd-surface .office-feature-dialog button:disabled { opacity: .45; cursor: default; }
+.hcd-surface .office-feature-dialog header button { padding: 4px; width: 32px; border: 0; }
+.office-feature-body { padding: 22px 24px; }
+.hcd-surface .office-feature-dialog h3 { margin: 20px 0 10px; font-size: 13px; color: var(--ink); }
+.office-feature-dialog h3:first-child { margin-top: 0; }
+.office-feature-dialog label { display: flex; flex-direction: column; gap: 6px; margin: 9px 0; color: var(--muted, #667078); font-size: 12px; }
+.hcd-surface .office-feature-dialog :is(input:not([type="checkbox"]), select, textarea) { width: 100%; padding: 8px 10px; min-height: 38px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 14px; }
+.hcd-surface .office-feature-dialog :is(input, select, textarea, button):focus-visible { outline: 2px solid var(--accent, #216d5d); outline-offset: 2px; }
+.office-feature-dialog label.office-check { display: flex; flex-direction: row; align-items: center; gap: 9px; color: var(--ink); font-size: 13px; }
+.office-feature-dialog input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; }
+.office-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 18px; }
+.office-two-columns { display: grid; grid-template-columns: minmax(0, 1fr) 200px; gap: 30px; }
+.office-presets { display: flex; gap: 8px; }
+.office-page-demo { align-self: start; display: grid; justify-items: center; gap: 12px; padding: 24px; border-radius: 12px; background: var(--panel, #f3f5f6); }
+.office-page-demo > div { box-sizing: border-box; width: 150px; background: var(--surface, #fff); box-shadow: 0 2px 12px #11192320; }
+.office-page-demo span { display: grid; gap: 6px; width: 100%; height: 100%; outline: 1px dashed var(--line); }
+.office-page-demo i { height: 2px; background: var(--muted); opacity: .3; }
+.office-page-demo i:nth-child(3n) { width: 65%; }
+.office-feature-dialog small, .office-feature-help { font-size: 12px; color: var(--muted); }
+.hcd-surface .office-feature-dialog footer { display: flex; align-items: center; justify-content: space-between; padding: 16px 24px; border-top: 1px solid var(--line); gap: 12px; }
+.office-toc-preview { padding: 18px; margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; line-height: 2; max-height: 220px; overflow: auto; }
+.hcd-surface .office-feature-dialog .office-danger { color: #b4483b; }
+.office-feature-validation { color: #bb473e; padding: 0 24px 16px; white-space: pre-wrap; }
+.office-feature-error { position: fixed; right: 24px; top: 120px; max-width: 480px; z-index: 999; padding: 14px; border-radius: 12px; background: var(--surface); color: var(--ink); box-shadow: 0 8px 32px #11192330; }
+.office-transition-choices { display: flex; gap: 8px; flex-wrap: wrap; }
+.hcd-surface .office-transition-choices button { flex-direction: column; min-width: 78px; padding: 10px; }
+.transition-icon { display: flex; gap: 3px; padding: 6px; }
+.transition-icon i { display: block; width: 18px; height: 24px; background: #91b5aa; border-radius: 2px; }
+.transition-icon i:first-child { opacity: .3; }
+.transition-icon-push i:last-child { transform: translateX(-6px); }
+.transition-icon-wipe i:last-child { clip-path: polygon(0 0, 65% 0, 100% 100%, 0 100%); }
+.office-transition-demo { margin: 18px 0 10px; padding: 12px; border-radius: 12px; background: var(--panel, #f0f3f4); overflow: hidden; }
+.office-transition-frame { display: flex; flex-direction: column; align-items: center; justify-content: center; aspect-ratio: 16 / 6; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 40px; }
+.transition-fade { animation: office-fade var(--transition-duration, 500ms) ease both; }
+.transition-push { animation: office-push var(--transition-duration, 500ms) cubic-bezier(.2,.7,.2,1) both; }
+.transition-wipe { animation: office-wipe var(--transition-duration, 500ms) ease both; }
+@keyframes office-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes office-push { from { transform: translate(var(--transition-x, 100%), var(--transition-y, 0)); } to { transform: translate(0,0); } }
+@keyframes office-wipe { from { clip-path: inset(var(--wipe-inset, 0 100% 0 0)); } to { clip-path: inset(0 0 0 0); } }
+.hcd-surface .document[data-office-page="true"] { width: var(--office-page-width) !important; min-height: var(--office-page-height) !important; padding: var(--office-page-top) var(--office-page-right) var(--office-page-bottom) var(--office-page-left) !important; }
+.word-native-toc-cache { display: none !important; }
+.hcd-surface .word-linked-toc { margin: 0 0 32px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+.hcd-surface .word-linked-toc h2 { margin: 0 0 14px; }
+.hcd-surface .word-linked-toc button { display: block; border: 0; background: none; text-align: left; width: 100%; padding: 6px 0; color: inherit; font: inherit; cursor: pointer; }
+.word-linked-toc button:hover { text-decoration: underline; color: var(--accent); }
+.word-footnote-reference { color: var(--accent); font-size: .7em; cursor: pointer; padding: 0 2px; user-select: none; }
+.word-footnotes { margin: 36px 0 0; padding-top: 12px; border-top: 1px solid var(--ink); }
+.word-footnotes h3 { font-size: 12px; margin: 0 0 8px; color: var(--muted); }
+.word-footnotes p { display: flex; align-items: baseline; gap: 10px; font-size: 12px; line-height: 1.6; }
+.word-footnotes span { white-space: pre-wrap; }
+.word-footnotes small { color: #b65c40; }
+@media(max-width: 560px) { .office-two-columns { grid-template-columns: 1fr; }.office-page-demo { display: none; } }
+@media(prefers-reduced-motion: reduce) { :is(.transition-fade,.transition-push,.transition-wipe) { animation: none !important; } }
+/* Keep confirmation actions visible while long settings scroll inside the sheet. */
+.hcd-surface dialog.office-feature-dialog[open] { display: flex; flex-direction: column; overflow: hidden; }
+.office-feature-dialog > header { flex: none; }
+.office-feature-dialog > form { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.office-feature-dialog .office-feature-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.office-feature-dialog form > footer { flex: none; background: var(--surface, #fff); }
+.hcd-surface[data-theme] dialog.office-feature-dialog button.primary { background: var(--accent, #216d5d); color: var(--on-accent, #fff); border-color: transparent; }
+.hcd-surface[data-theme] dialog.office-feature-dialog button.primary:hover { background: color-mix(in srgb, var(--accent, #216d5d) 85%, var(--ink, #22282e)); }
+.office-page-demo, .office-transition-demo { background: var(--stage, var(--surface, #f3f5f6)); }

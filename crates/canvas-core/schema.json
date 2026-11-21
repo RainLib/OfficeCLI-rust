@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "officecli-canvas/1",
+  "title": "OfficeCLI native canvas transaction",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "patchId",
+    "baseRevision",
+    "operations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "officecli-canvas/1"
+    },
+    "documentId": {
+      "$ref": "#/$defs/id"
+    },
+    "patchId": {
+      "$ref": "#/$defs/id"
+    },
+    "baseRevision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2000,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "element"
+            ],
+            "properties": {
+              "op": {
+                "const": "element.add"
+              },
+              "element": {
+                "$ref": "#/$defs/element"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "id",
+              "before",
+              "changes"
+            ],
+            "properties": {
+              "op": {
+                "const": "element.update"
+              },
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "before": {
+                "type": "object"
+              },
+              "changes": {
+                "type": "object",
+                "minProperties": 1
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "id",
+              "update"
+            ],
+            "properties": {
+              "op": {
+                "const": "spec.update"
+              },
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "update": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1400000
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "id",
+              "block",
+              "start",
+              "end",
+              "expected",
+              "insert"
+            ],
+            "properties": {
+              "op": {
+                "const": "spec.splice"
+              },
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "block": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "start": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "end": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "expected": {
+                "type": "string",
+                "maxLength": 64000
+              },
+              "insert": {
+                "type": "string",
+                "maxLength": 64000
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "id",
+              "expectedHash"
+            ],
+            "properties": {
+              "op": {
+                "const": "element.remove"
+              },
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "expectedHash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "id",
+              "file"
+            ],
+            "properties": {
+              "op": {
+                "const": "file.add"
+              },
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "file": {
+                "type": "object"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "before",
+              "changes"
+            ],
+            "properties": {
+              "op": {
+                "const": "scene.update"
+              },
+              "before": {
+                "type": "object"
+              },
+              "changes": {
+                "type": "object",
+                "minProperties": 1
+              }
+            }
+          }
+        ]
+      }
+    },
+    "vacantRegions": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "$ref": "#/$defs/region"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "element": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "type": {
+          "enum": [
+            "rectangle",
+            "diamond",
+            "ellipse",
+            "line",
+            "arrow",
+            "freedraw",
+            "text",
+            "image",
+            "frame",
+            "magicframe",
+            "embeddable"
+          ]
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        }
+      }
+    },
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,2 @@
+figcraft MCP server (headless (in-process engine session; no window)) on stdio
+file access confined to {"read":["/Users/will/Project/rainy/projects/OfficeCLI-rust","/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v1"],"write":["/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v1"]}

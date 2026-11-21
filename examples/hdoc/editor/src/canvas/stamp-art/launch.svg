@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M9 55 13 43 10 41 14 31 22 29 Q31 13 49 7L55 6 55 12Q54 31 39 40L38 48 28 53 24 49 15 55Z" fill="#a99ab0" stroke="#a99ab0" stroke-width="5" transform="translate(0.3 1.5)"/>
+  <path d="M9 55 13 43 10 41 14 31 22 29 Q31 13 49 7L55 6 55 12Q54 31 39 40L38 48 28 53 24 49 15 55Z" fill="#fffdf8" stroke="#fffdf8" stroke-width="6.4"/>
+  <path d="M9 55 13 43 10 41 14 31 22 29 Q31 13 49 7L55 6 55 12Q54 31 39 40L38 48 28 53 24 49 15 55Z" fill="#F8E8BD" stroke="#69536C" stroke-width="2.45"/>
+  <path d="M11 54 16 40 25 47 15 53Z" fill="#F6AF56" stroke="#996849" stroke-width="1.3"/>
+  <path d="M13 39 16 32 26 29 22 40Z M27 44 38 35 36 47 29 51Z" fill="#E68D89" stroke="#845B70" stroke-width="1.7"/>
+  <path d="M19 36Q30 16 50 8L54 7Q54 26 33 44L29 45Z" fill="#AEDBD1" stroke="#586B70" stroke-width="1.8"/>
+  <path d="M43 11 54 7 51 20Q46 18 43 11Z" fill="#EB9585" stroke="#986B72" stroke-width="1.35"/>
+  <path d="M 31.4 26 a 5.6 5.6 0 1 0 11.2 0 a 5.6 5.6 0 1 0 -11.2 0 Z" fill="#8C7CB4" stroke="#5C5472" stroke-width="1.65"/>
+  <path d="M 36.9 24.2 a 1.7 1.7 0 1 0 3.4 0 a 1.7 1.7 0 1 0 -3.4 0 Z" fill="#F5E9F6"/>
+</svg>

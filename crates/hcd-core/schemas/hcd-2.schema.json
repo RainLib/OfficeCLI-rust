@@ -34,7 +34,8 @@
         "semantic-flow",
         "grid",
         "slide-canvas",
-        "fixed-layout"
+        "fixed-layout",
+        "canvas"
       ]
     },
     "revision": {
@@ -68,7 +69,18 @@
       "minimum": 0
     },
     "stylesHref": {
-      "const": "styles.css"
+      "anyOf": [
+        {
+          "const": "styles.css"
+        },
+        {
+          "type": "string",
+          "pattern": "^styles/[A-Za-z0-9._-]+\\.css$"
+        }
+      ]
+    },
+    "themeRevisionId": {
+      "$ref": "#/$defs/sha256"
     },
     "capabilities": {
       "$ref": "#/$defs/capabilities"
@@ -118,7 +130,12 @@
             "pdf",
             "html",
             "md",
-            "txt"
+            "txt",
+            "png",
+            "jpg",
+            "jpeg",
+            "webp",
+            "excalidraw"
           ]
         },
         "sha256": {
@@ -197,7 +214,8 @@
             "sheet",
             "slide",
             "note",
-            "page"
+            "page",
+            "canvas"
           ]
         },
         "htmlHref": {
@@ -247,6 +265,20 @@
         },
         "grid": {
           "$ref": "#/$defs/gridChunkAddress"
+        },
+        "pdfLayout": {
+          "$ref": "#/$defs/pdfPageLayout"
+        }
+      }
+    },
+    "pdfPageLayout": {
+      "type": "array", "minItems": 1, "maxItems": 100000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["rotation"],
+        "properties": {
+          "sourcePage": { "type": "integer", "minimum": 1, "maximum": 100000 },
+          "rotation": { "enum": [0, 90, 180, 270] }
         }
       }
     },
@@ -317,7 +349,403 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 100000000
+        },
+        "sheetPart": {
+          "type": "string",
+          "pattern": "^xl/(worksheets|chartsheets)/[^/]+\\.xml$"
+        },
+        "autoFilter": { "$ref": "#/$defs/gridAutoFilter" },
+        "charts": { "type": "array", "items": { "$ref": "#/$defs/worksheetChart" } },
+        "conditions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/worksheetCondition" } },
+        "pivots": { "type": "array", "maxItems": 12, "items": { "$ref": "#/$defs/worksheetPivot" } }
+      }
+    },
+    "worksheetPivot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "config"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "config": {
+          "$ref": "#/$defs/pivotConfig"
+        },
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sourceRevision",
+            "sourceConfig",
+            "report"
+          ],
+          "properties": {
+            "sourceRevision": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "sourceConfig": {
+              "$ref": "#/$defs/pivotConfig"
+            },
+            "report": {
+              "$ref": "#/$defs/pivotReport"
+            }
+          }
+        },
+        "origin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "part",
+            "range"
+          ],
+          "properties": {
+            "part": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "range": {
+              "$ref": "#/$defs/chartRange"
+            }
+          }
+        },
+        "removed": {
+          "type": "boolean"
         }
+      }
+    },
+    "pivotConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "sourceSheetId",
+        "sourceRange",
+        "anchorRow",
+        "anchorColumn",
+        "rows",
+        "columns",
+        "values"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "sourceSheetId": {
+          "type": "string",
+          "pattern": "^s_[0-9a-f]{32}$"
+        },
+        "sourceRange": {
+          "$ref": "#/$defs/chartRange"
+        },
+        "anchorRow": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "anchorColumn": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "rows": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 63
+          }
+        },
+        "columns": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 63
+          }
+        },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "field",
+              "aggregate"
+            ],
+            "properties": {
+              "field": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 63
+              },
+              "aggregate": {
+                "enum": [
+                  "sum",
+                  "count",
+                  "average",
+                  "min",
+                  "max"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "pivotReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headerRows",
+        "labelColumns",
+        "cells"
+      ],
+      "properties": {
+        "headerRows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "labelColumns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cells": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4096,
+            "items": {
+              "$ref": "#/$defs/pivotCell"
+            }
+          }
+        }
+      }
+    },
+    "pivotCell": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "blank"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "text",
+                "number",
+                "error"
+              ]
+            },
+            "value": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "value"
+          ],
+          "properties": {
+            "type": {
+              "const": "boolean"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          }
+        }
+      ]
+    },
+    "worksheetCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "config"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+        "config": { "$ref": "#/$defs/worksheetConditionConfig" },
+        "sourcePriority": { "type": "integer", "minimum": 1 },
+        "edited": { "type": "boolean" },
+        "removed": { "type": "boolean" }
+      }
+    },
+    "worksheetConditionConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["range", "operator", "values"],
+      "properties": {
+        "range": { "$ref": "#/$defs/chartRange" },
+        "operator": { "enum": ["greaterThan", "greaterThanOrEqual", "lessThan", "lessThanOrEqual", "equal", "notEqual", "between", "notBetween"] },
+        "values": {
+          "type": "array", "minItems": 1, "maxItems": 2,
+          "items": { "type": "string", "minLength": 1, "maxLength": 40 }
+        },
+        "fill": { "type": "string", "pattern": "^#[a-fA-F0-9]{6}$" },
+        "color": { "type": "string", "pattern": "^#[a-fA-F0-9]{6}$" },
+        "stopIfTrue": { "type": "boolean" }
+      },
+      "anyOf": [{ "required": ["fill"] }, { "required": ["color"] }],
+      "if": { "properties": { "operator": { "enum": ["between", "notBetween"] } } },
+      "then": { "properties": { "values": { "minItems": 2 } } },
+      "else": { "properties": { "values": { "maxItems": 1 } } }
+    },
+    "worksheetChart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "config"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "config": {
+          "$ref": "#/$defs/chartConfig"
+        },
+        "sourceMissing": {
+          "type": "boolean"
+        },
+        "imported": {
+          "type": "boolean"
+        },
+        "edited": {
+          "type": "boolean"
+        },
+        "removed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "chartRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "startRow",
+        "endRow",
+        "startColumn",
+        "endColumn"
+      ],
+      "properties": {
+        "startRow": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "endRow": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "startColumn": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "endColumn": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        }
+      }
+    },
+    "chartConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "title",
+        "range",
+        "anchorRow",
+        "anchorColumn"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "column",
+            "bar",
+            "line",
+            "pie"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "range": {
+          "$ref": "#/$defs/chartRange"
+        },
+        "anchorRow": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "anchorColumn": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        }
+      }
+    },
+    "gridAutoFilter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startRow", "endRow", "startColumn", "endColumn", "column", "query"],
+      "properties": {
+        "startRow": { "type": "integer", "minimum": 1, "maximum": 1048575 },
+        "endRow": { "type": "integer", "minimum": 2, "maximum": 1048576 },
+        "startColumn": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "endColumn": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "column": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "query": { "type": "string", "minLength": 1, "maxLength": 253 },
+        "additionalCriteria": {
+          "type": "array", "maxItems": 99,
+          "items": { "$ref": "#/$defs/gridFilterCriterion" }
+        }
+      }
+    },
+    "gridFilterCriterion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["column", "query"],
+      "properties": {
+        "column": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "query": { "type": "string", "minLength": 1, "maxLength": 253 }
       }
     },
     "sourceAnchor": {
@@ -332,7 +760,7 @@
       "properties": {
         "part": {
           "type": "string",
-          "pattern": "^(word|xl|ppt|pdf|html|markdown|text)/"
+          "pattern": "^(word|xl|ppt|pdf|html|markdown|text|image)/"
         },
         "textOrdinal": {
           "type": "integer",

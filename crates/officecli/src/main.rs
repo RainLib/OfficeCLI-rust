@@ -4,6 +4,7 @@
     clippy::let_and_return
 )]
 
+mod capabilities;
 mod commands;
 mod hdoc_remote;
 mod hdoc_server;
@@ -171,6 +172,10 @@ fn main() {
         commands::Command::Info(cmd) => commands::handle_info(cmd, format),
         commands::Command::Merge(cmd) => commands::handle_merge(cmd, format),
         commands::Command::Help(cmd) => commands::handle_help(cmd, cli.json),
+        commands::Command::Capabilities => Ok(commands::json_data_envelope(
+            crate::capabilities::runtime().clone(),
+            true,
+        )),
         commands::Command::Import(cmd) => commands::handle_import(cmd, format),
         commands::Command::Hdoc(cmd) => {
             commands::handle_hdoc(cmd, format).map(|(output, succeeded)| {
@@ -307,7 +312,7 @@ fn handle_unwatch(cmd: commands::UnwatchCommand) -> Result<String, HandlerError>
 fn handle_mcp(cmd: commands::McpCommand) -> Result<String, HandlerError> {
     match cmd.args.as_slice() {
         [] => mcp::run_server()
-            .map(|_| "MCP server stopped".to_string())
+            .map(|_| String::new())
             .map_err(|e| HandlerError::OperationFailed(e.to_string())),
         [action] if action.eq_ignore_ascii_case("list") => mcp_list(),
         [target] => mcp_install(target),
@@ -513,6 +518,9 @@ pub(crate) fn open_handler_direct(
     file: &str,
     editable: bool,
 ) -> Result<Box<dyn DocumentHandler>, HandlerError> {
+    if let Some(handler) = office_engine::try_open_document(file, editable)? {
+        return Ok(handler);
+    }
     let path = PathBuf::from(file);
     let ext = path
         .extension()
@@ -520,41 +528,12 @@ pub(crate) fn open_handler_direct(
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
 
-    match ext.as_str() {
-        // Macro-enabled OOXML packages share the same WordprocessingML model.
-        // OxmlPackage preserves unknown parts (including vbaProject.bin), so
-        // routing .docm here enables safe structured edits without stripping
-        // the macro payload.
-        "docx" | "docm" => {
-            let handler = docx_handler::WordHandler::open(file, editable)?;
-            Ok(Box::new(handler))
-        }
-        // .xlsm uses the same SpreadsheetML handler; macro parts are retained
-        // untouched by the package read/write cycle.
-        "xlsx" | "xlsm" => {
-            let handler = xlsx_handler::ExcelHandler::open(file, editable)?;
-            Ok(Box::new(handler))
-        }
-        // .pptm likewise shares PresentationML with .pptx.
-        "pptx" | "pptm" => {
-            let handler = pptx_handler::PptxHandler::open(file, editable)?;
-            Ok(Box::new(handler))
-        }
-        "pdf" => {
-            let handler = pdf_handler::PdfHandler::open(file, editable)?;
-            Ok(Box::new(handler))
-        }
-        other => {
-            // Last-resort: any installed format-handler plugin that owns
-            // this extension (e.g. .hwpx). See plugins/plugin-protocol.md §2.3.
-            if commands::resolve_format_handler(other).is_some() {
-                let proxy = commands::FormatHandlerProxy::open(file)?;
-                return Ok(Box::new(proxy));
-            }
-            Err(HandlerError::OpenError(format!(
-                "unsupported format: {}",
-                other
-            )))
-        }
+    // External format-handler plugins remain the host's fallback.
+    if commands::resolve_format_handler(&ext).is_some() {
+        let proxy = commands::FormatHandlerProxy::open(file)?;
+        return Ok(Box::new(proxy));
     }
+    Err(HandlerError::OpenError(format!(
+        "unsupported format: {ext}"
+    )))
 }

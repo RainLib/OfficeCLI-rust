@@ -1,0 +1,18 @@
+(node:28449) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+  VITE v7.1.11  ready in 70 ms
+
+  ➜  Local:   http://127.0.0.1:58264/
+11:18:37 AM [vite] http proxy error: /v1/documents/grid-batch-live/auth
+Error: connect EADDRNOTAVAIL 127.0.0.1:58262 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:18:37 AM [vite] http proxy error: /v1/documents/grid-batch-live
+Error: connect EADDRNOTAVAIL 127.0.0.1:58262 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)

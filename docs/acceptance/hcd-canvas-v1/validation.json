@@ -1,0 +1,32 @@
+{
+  "status": "passed",
+  "model": "local-scripted-fixture",
+  "checks": [
+    "packaged Workspace creates and opens a native free canvas with local fonts",
+    "host-owned actor delegates a scoped AI task through the real durable runner and the local scripted model; outside objects survive",
+    "native PNG export and font loading work with all external HTTP traffic blocked",
+    "business publication downloads an editable native scene rather than flattening it to HTML",
+    "anonymous visitors draw collaboratively, cannot invoke AI, and become read-only after permission downgrade"
+  ],
+  "verification": {
+    "rustWorkspaceTests": 1096,
+    "rustWorkspaceFailures": 0,
+    "canvasBrowserTests": 8,
+    "workspaceUnitTests": 12,
+    "cargoFmt": "passed",
+    "cargoClippy": "passed",
+    "editorAndEmbedBuild": "passed",
+    "adminBuild": "passed",
+    "nativeCliCommands": 8,
+    "modelWhitelistPolicy": "passed"
+  },
+  "localWorkspace": {
+    "url": "http://127.0.0.1:7400",
+    "loadedCanvasProtocol": "officecli-canvas/1",
+    "aiEnabled": false,
+    "checks": [
+      "web responds",
+      "engine advertises canvas protocol"
+    ]
+  }
+}

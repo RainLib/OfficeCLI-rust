@@ -1,0 +1,81 @@
+{
+  "status": "failed",
+  "result": "协同版本持续变化，Agent 未能完成全部修改；已提交修订保留，请核对后重试。",
+  "task": "• HW1 数值全部 +1。\n  • HW2 仅偶数值 +5。\n  • Rank 保留原公式并 ×2。",
+  "revision": 2,
+  "units": [
+    {
+      "title": "HW1 +1",
+      "status": "failed"
+    },
+    {
+      "title": "HW2 even +5",
+      "status": "completed"
+    },
+    {
+      "title": "Rank ×2",
+      "status": "completed"
+    }
+  ],
+  "issues": [
+    {
+      "at": 1794707843154,
+      "error": "invalid HCD patch: nodeId \"sheet-column:s_261d2a6f71c6356b382d4ad0d9aff041:4\" must match n_[0-9a-f]{32}",
+      "formulas": null,
+      "name": "hcd_activity",
+      "ok": false,
+      "status": 400,
+      "type": "tool_result"
+    },
+    {
+      "at": 1794707844086,
+      "error": "invalid HCD patch: nodeId \"s_261d2a6f71c6356b382d4ad0d9aff041\" must match n_[0-9a-f]{32}",
+      "formulas": null,
+      "name": "hcd_activity",
+      "ok": false,
+      "status": 400,
+      "type": "tool_result"
+    },
+    {
+      "at": 1794707844957,
+      "error": "invalid activity target; use a read nodeId, blockId or chunkSequence",
+      "formulas": null,
+      "name": "hcd_activity",
+      "ok": false,
+      "status": 400,
+      "type": "tool_result"
+    },
+    {
+      "at": 1794707851637,
+      "error": "revision conflict: expected head 0, actual 1",
+      "formulas": null,
+      "name": "hcd_patch",
+      "ok": false,
+      "status": 409,
+      "type": "tool_result"
+    },
+    {
+      "at": 1794707855069,
+      "error": "revision conflict: expected head 0, actual 1",
+      "formulas": null,
+      "name": "hcd_patch",
+      "ok": false,
+      "status": 409,
+      "type": "tool_result"
+    },
+    {
+      "at": 1794707863936,
+      "error": "revision conflict: expected head 1, actual 2",
+      "formulas": null,
+      "name": "hcd_patch",
+      "ok": false,
+      "status": 409,
+      "type": "tool_result"
+    }
+  ],
+  "verifiedCurrentValues": {
+    "HW1Unchanged": true,
+    "HW2MatchesEvenPlus5": false,
+    "RankAlreadyDoubled": true
+  }
+}

@@ -1,0 +1,26 @@
+.hcd-surface dialog.hcd-dialog.pdf-ocr-dialog {
+  width: min(430px, calc(100vw - 28px));
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+}
+.pdf-ocr-dialog::backdrop { background: #18202060; }
+.pdf-ocr-dialog header,
+.pdf-ocr-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.hcd-surface .pdf-ocr-dialog h2 { margin: 0; }
+.pdf-ocr-dialog footer { justify-content: flex-end; margin-top: 18px; }
+.pdf-ocr-dialog footer button { display: inline-flex; align-items: center; gap: 6px; }
+.pdf-ocr-options,
+.pdf-ocr-progress { display: grid; gap: 12px; margin-top: 14px; }
+.pdf-ocr-options select {
+  min-height: 36px;
+  padding: 6px 8px;
+  color: var(--ink);
+  background: var(--stage);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.pdf-ocr-progress progress { width: 100%; accent-color: var(--accent); }
+.hcd-surface .pdf-ocr-dialog p { color: var(--muted); }
+.hcd-surface .pdf-ocr-dialog [role="alert"] { margin-top: 10px; color: var(--danger, #ac3636); }

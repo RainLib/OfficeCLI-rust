@@ -1,0 +1,51 @@
+(node:37227) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 40 tests using 1 worker
+
+(node:37249) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+[1/40] e2e/agent-harness.spec.ts:563:69 › OpenAI harness edits and verifies txt
+[2/40] e2e/agent-harness.spec.ts:563:69 › OpenAI harness edits and verifies md
+[3/40] e2e/agent-harness.spec.ts:563:69 › OpenAI harness edits and verifies html
+[4/40] e2e/agent-harness.spec.ts:563:69 › OpenAI harness edits and verifies docx
+[5/40] e2e/agent-harness.spec.ts:563:69 › OpenAI harness edits and verifies xlsx
+[6/40] e2e/agent-harness.spec.ts:563:69 › OpenAI harness edits and verifies pptx
+[7/40] e2e/agent-harness.spec.ts:563:69 › OpenAI harness edits and verifies pdf
+[8/40] e2e/agent-harness.spec.ts:576:1 › Word mixed inline edits preserve cover styles, preview nodes and native source export
+(node:37249) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+
+[9/40] e2e/workspace.spec.ts:232:1 › calculation contract agrees across native CLI MCP and the selected browser cell
+[10/40] e2e/workspace.spec.ts:289:1 › XLSX rich strings retain painted runs through human and MCP collaboration and native export
+[11/40] e2e/workspace.spec.ts:387:1 › XLSX native text selections save format-only edits and synchronize undo without replacing canvas
+[12/40] e2e/workspace.spec.ts:474:1 › XLSX rich clipboard saves existing and blank cells with numbers and formulas as one undoable revision
+[13/40] e2e/workspace.spec.ts:553:60 › XLSX batch input journal ready preserves exact writes and reconciles without automatic replay
+[14/40] e2e/workspace.spec.ts:553:60 › XLSX batch input journal lost preserves exact writes and reconciles without automatic replay
+[15/40] e2e/workspace.spec.ts:553:60 › XLSX batch input journal stale preserves exact writes and reconciles without automatic replay
+[16/40] e2e/workspace.spec.ts:640:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+[17/40] e2e/workspace.spec.ts:680:1 › XLSX canvas mouse navigation survives intervening toolbar clicks and native double click still edits
+[18/40] e2e/workspace.spec.ts:717:1 › XLSX batch input journal remote refresh keeps a newer canvas selection while the index is in flight
+[19/40] e2e/workspace.spec.ts:755:1 › XLSX batch input journal storage failure blocks submission and allows full live download and discard
+[20/40] e2e/workspace.spec.ts:799:1 › XLSX batch input journal keeps a corrupt intent downloadable and never sends it to review or apply
+[21/40] e2e/workspace.spec.ts:827:1 › XLSX rich input journal recovers uncommitted selection formatting after offline page closure
+[22/40] e2e/workspace.spec.ts:870:1 › XLSX rich blank-cell input journal restores new formatted text without creating a cell before application
+[23/40] e2e/workspace.spec.ts:910:1 › verified grid caches follow local and remote dependencies without extra writes or canvas replacement
+[24/40] e2e/workspace.spec.ts:974:1 › native literal types agree across the grid MCP CLI and exported workbook after editing
+[25/40] e2e/workspace.spec.ts:1100:1 › protocol preflight rejects an old operation table without submitting a patch
+[26/40] e2e/workspace.spec.ts:1121:1 › protocol fingerprint changes reject before JSON deserialization and leave the document unchanged
+[27/40] e2e/workspace.spec.ts:1783:1 › HTML inline fidelity survives human undo, peer sync, MCP edits and canonical export
+[28/40] e2e/workspace.spec.ts:1860:1 › HTML and Markdown source tables edit inline and preserve their source format
+[29/40] e2e/workspace.spec.ts:1928:1 › Word pagination preserves sections, running regions, table rows and unsaved Unicode drafts
+[30/40] e2e/workspace.spec.ts:2061:1 › a grid agent highlights its cell without changing the local selection
+[31/40] e2e/workspace.spec.ts:2227:1 › workbook preview keeps its canvas and refuses to discard an unapplied formula
+[32/40] e2e/workspace.spec.ts:2246:1 › all seven formats use the content shell and enforce read-only preview
+[33/40] e2e/workspace.spec.ts:2504:1 › grid input journal keeps unapplied text bound to its cell across selections and page closure
+[34/40] e2e/workspace.spec.ts:2542:1 › grid input journal protects native cell typing before confirmation and restores it into the formula field
+[35/40] e2e/workspace.spec.ts:2578:1 › grid input journal leaves changed workbooks untouched and retains the original expression
+[36/40] e2e/workspace.spec.ts:2893:1 › export menus use source-aware methods and prepare real TXT, XLSX and PDF artifacts
+[37/40] e2e/workspace.spec.ts:2944:1 › export capabilities follow the selected PDF revision and block historical HCD archives
+[38/40] e2e/workspace.spec.ts:3443:1 › table hover controls edit rows and columns with merges and retain canvas nodes and scroll
+[39/40] e2e/workspace.spec.ts:3563:1 › insert ribbon creates blank paragraphs and editable tables that survive collaboration and DOCX export
+[40/40] e2e/workspace.spec.ts:3646:1 › editor deletion supports undo redo and retains only twenty local history steps
+  40 passed (3.0m)

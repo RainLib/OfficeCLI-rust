@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-7.68 -7.68 79.36 79.36" width="79.36" height="79.36" role="img" aria-label="萤火微光"><title>萤火微光</title><style>.canvas-sticker-motion { transform-box: fill-box; transform-origin: center; }
+[data-motion=float] .canvas-sticker-motion{animation:sticker-float 4.8s ease-in-out infinite}[data-motion=wiggle] .canvas-sticker-motion{animation:sticker-wiggle 6s ease-in-out infinite}[data-motion=twinkle] .canvas-sticker-motion{animation:sticker-twinkle 4s ease-in-out infinite}
+@keyframes sticker-float{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-3px) rotate(2deg)}}
+@keyframes sticker-wiggle{0%,65%,100%{transform:rotate(0)}72%{transform:rotate(-6deg)}80%{transform:rotate(5deg)}88%{transform:rotate(-3deg)}}
+@keyframes sticker-twinkle{0%,100%{transform:scale(.98);opacity:.88}50%{transform:scale(1.05);opacity:1}}
+[data-motion=drift] :is([data-sticker-layer=petal-near], [data-sticker-layer=petal-far]) {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: petal-drift 5.6s ease-in-out infinite;
+}
+[data-motion=drift] [data-sticker-layer=petal-far] {
+  animation: petal-turn 7s ease-in-out infinite;
+}
+@keyframes petal-drift {
+  0%, 100% { transform: translate(-1px,-1px) rotate(-9deg); }
+  41% { transform: translate(2.8px,1.6px) rotate(13deg); }
+  70% { transform: translate(1px,3.6px) rotate(4deg); }
+}
+@keyframes petal-turn {
+  0%, 100% { transform: translate(0,0) rotate(5deg); }
+  54% { transform: translate(-2.2px,3.2px) rotate(-17deg); }
+}
+[data-motion=flutter] :is([data-sticker-layer=wing-left], [data-sticker-layer=wing-right]) {
+  transform-box: view-box;
+  transform-origin: 50% 53%;
+  animation: sticker-wing 4.8s ease-in-out infinite;
+}
+[data-motion=flutter] [data-sticker-layer=wing-left] { --wing-tilt: 3deg; }
+[data-motion=flutter] [data-sticker-layer=wing-right] { --wing-tilt: -3deg; }
+@keyframes sticker-wing {
+  0%, 36%, 70%, 100% { transform: scaleX(1); }
+  48% { transform: scaleX(.64) rotate(var(--wing-tilt)); }
+  59% { transform: scaleX(.90); }
+  64% { transform: scaleX(.83); }
+}
+[data-motion=flight] [data-sticker-layer=plane] {
+  transform-box: fill-box;
+  transform-origin: 68% 36%;
+  animation: sticker-glide 5.4s ease-in-out infinite;
+}
+[data-motion=flight] [data-sticker-layer=trail] { animation: sticker-trail 5.4s ease-in-out infinite; }
+@keyframes sticker-glide {
+  0%, 100% { transform: translate(-1px,1px) rotate(-2deg); }
+  48% { transform: translate(2.5px,-1.8px) rotate(2deg); }
+  78% { transform: translate(.6px,-.6px) rotate(0deg); }
+}
+@keyframes sticker-trail {
+  0%, 100% { stroke-dashoffset: 0; opacity: .82; }
+  48% { stroke-dashoffset: -4; opacity: 1; }
+}
+[data-motion] :is(.canvas-sticker-motion, [data-sticker-layer]) { animation-delay: var(--sticker-phase, 0s); }
+[data-motion=blink] [data-sticker-layer=eyes], [data-motion=gleam] [data-sticker-layer=eyes] {
+  transform-box: fill-box; transform-origin: center; animation: journal-blink 5.8s ease-in-out infinite;
+}
+[data-motion=gleam] [data-sticker-layer=glint], [data-motion=glow] [data-sticker-layer=glint], [data-motion=blink] [data-sticker-layer=glint] {
+  transform-box: fill-box; transform-origin: center; animation: journal-gleam 4.4s ease-in-out infinite;
+}
+[data-motion=glow] [data-sticker-layer=lantern] { animation: firefly-glow 4.8s ease-in-out infinite; }
+[data-motion=glow] :is([data-sticker-layer=wing-left],[data-sticker-layer=wing-right]) {
+  transform-box: view-box; transform-origin: 46% 44%; animation: firefly-hover 4.8s ease-in-out infinite;
+}
+@keyframes journal-blink { 0%,71%,78%,100% { transform:scaleY(1); } 74% { transform:scaleY(.18); } }
+@keyframes journal-gleam { 0%,100% { transform:scale(.78);opacity:.64; } 55% { transform:scale(1.1);opacity:1; } }
+@keyframes firefly-glow { 0%,100% { opacity:.57; } 53% { opacity:1; } }
+@keyframes firefly-hover { 0%,100% { transform:scaleX(1); } 50% { transform:scaleX(.86); } }
+@media (prefers-reduced-motion: reduce), print {
+  .canvas-sticker-motion, [data-sticker-layer] { animation: none !important; }
+}
+[data-paused=true] :is(.canvas-sticker-motion, [data-sticker-layer]) { animation: none !important; }
+</style><svg width="64" height="64" viewBox="0 0 64 64" overflow="visible" data-motion="glow"><g class="canvas-sticker-motion"><g data-sticker-layer="wing-left"><polyline points="20,29 16.6,26 13.8,23.1 11.8,20.3 10.5,17.8 9.9,15.5 10.2,13.5 11.2,12 13,11 15.6,10.8 18.2,11.7 20.7,13.3 23,15.5 25.1,18.1 27.1,20.8 28.7,23.6 30,26 20,29" fill="#BCDCD6" stroke="#FFFCF4" stroke-width="2.4" opacity="1" stroke-linejoin="round" stroke-linecap="round"/></g><g data-sticker-layer="wing-right"><polyline points="31,26 31.7,21.7 32.9,18 34.6,14.9 36.5,12.4 38.6,10.6 40.8,9.5 43,9.3 45,10 46.5,11.6 47.1,13.6 46.9,15.9 45.9,18.4 44.4,21.1 42.5,23.8 40.2,26.4 37.6,28.8 35,31 31,26" fill="#DFEAD4" stroke="#FFFCF4" stroke-width="2.5" opacity="1" stroke-linejoin="round" stroke-linecap="round"/></g><g data-sticker-layer="wing-left"><polyline points="16,14 18.8,16.9 21.2,19.5 23.3,21.9 25,24" fill="transparent" stroke="#7DA6A3" stroke-width="1" opacity="1" stroke-linejoin="round" stroke-linecap="round"/></g><g data-sticker-layer="lantern"><ellipse cx="40.5" cy="42" rx="11.5" ry="12" fill="#F2BC5C" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><ellipse cx="41" cy="42.5" rx="7" ry="7.5" fill="#FFE19A" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round"/></g><g><polyline points="22,22 24.5,20.8 27.1,20.6 29.9,21.2 32.9,22.6 36,25 43,34 40.8,36.9 38.4,39.3 35.6,41.1 32.4,42.3 29,43 21,34 19.6,30.6 19.2,27.5 20.1,24.6 22,22" fill="#587C6F" stroke="#FFFCF4" stroke-width="2.4" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><ellipse cx="22.5" cy="25" rx="6.5" ry="7" fill="#51483D" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><polyline points="19,21 15.9,17.8 13.2,16.1 11,16" fill="transparent" stroke="#635143" stroke-width="1.6" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><ellipse cx="19.30000000000001" cy="22.3" rx="1.5" ry="1.5" fill="#FFF6D9" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round"/></g><g data-sticker-layer="glint"><polyline points="48,27 50,24 51,27 54,28 51,30 50,33 49,30 46,29 48,27" fill="#F5CC72" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><ellipse cx="51.75" cy="48.75" rx="1.75" ry="1.75" fill="#E7A765" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round"/></g></g></svg></svg>

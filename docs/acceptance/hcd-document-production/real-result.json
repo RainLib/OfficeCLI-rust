@@ -1,0 +1,101 @@
+{
+  "documentId": "accept-pronunciation",
+  "runId": "9c5ac4ec-b89e-40d6-88f1-1e3d9be2b869",
+  "status": "completed",
+  "model": "gpt-6.1-sol",
+  "imageModel": "gpt-image-2",
+  "agentCount": 4,
+  "durationSeconds": 296.768,
+  "revision": 84,
+  "pageCount": 10,
+  "illustrationCount": 10,
+  "editableNativeText": true,
+  "nativeXmlParsed": true,
+  "titlesBold": true,
+  "leasesReleased": true,
+  "titles": [
+    "开口说中文",
+    "声音从哪里来？",
+    "03 声母①：先分清气流",
+    "04 声母②：把舌头放对位置",
+    "韵母①：口型与滑动",
+    "韵母②：听见鼻音的收尾",
+    "四声：同一个音节，四条旋律",
+    "轻声：读得轻，也读得短",
+    "变调：连起来，声调会调整",
+    "每天5分钟：听、看、读、比"
+  ],
+  "images": [
+    {
+      "part": "ppt/media/hcd-n_15d82d6035007c75a1cc40b744fabf59.png",
+      "width": 1536,
+      "height": 1024,
+      "sha256": "70800f1c4cc1ce5a43253de4a0e0beb81017e87ea55979977610b51360f1c26b",
+      "bytes": 1421211
+    },
+    {
+      "part": "ppt/media/hcd-n_21152f82f43b89fd7763c7cfd2a84a20.png",
+      "width": 1536,
+      "height": 1024,
+      "sha256": "beb86c5914d579ef28f9990068dd7ec96a04d46a70ac0384a0c3f83965d617ef",
+      "bytes": 1125154
+    },
+    {
+      "part": "ppt/media/hcd-n_3c230ce7d62e3a794b27a48febf9857f.png",
+      "width": 1536,
+      "height": 1024,
+      "sha256": "6b1cc47787d04a39d5e08179fb0a15c0b3114e38ea03b8087c64dba153ab5230",
+      "bytes": 1311304
+    },
+    {
+      "part": "ppt/media/hcd-n_3dbc212d0830c360f2dbb4c94f8a0231.png",
+      "width": 1536,
+      "height": 1024,
+      "sha256": "b3c4635e5a3d990393a62bd850ebbd406df74e94298461e6cfb0564a1766bd7c",
+      "bytes": 1509016
+    },
+    {
+      "part": "ppt/media/hcd-n_40126689ba3d1cc27d51b075b29e82c0.png",
+      "width": 1536,
+      "height": 1024,
+      "sha256": "3b698c7a736a66269e6c1826c7c7c3680adebb7eb12659f8f3dbc39ab5764aec",
+      "bytes": 1384695
+    },
+    {
+      "part": "ppt/media/hcd-n_50af3a1d54381058baf58dd58d94abe4.png",
+      "width": 1536,
+      "height": 1024,
+      "sha256": "581f52305d48f65e20320af789998fd16fac40e95f861eaaa12b9074824e0e70",
+      "bytes": 1522441
+    },
+    {
+      "part": "ppt/media/hcd-n_7c8d0aa422335498d8d88caf6c3bf4f9.png",
+      "width": 1536,
+      "height": 1024,
+      "sha256": "e61d122d16a9b71cb83e9ed51b42ece4846fdc05c3724d44ac1a7e3c8043a8dd",
+      "bytes": 1367388
+    },
+    {
+      "part": "ppt/media/hcd-n_7d14a9b4bb0a313a5ef292f8f4424404.png",
+      "width": 1536,
+      "height": 1024,
+      "sha256": "b218b4847e1f89a4d7f2573edeb4fe2b2cabc8c5c65ca5022b3b3921230eabab",
+      "bytes": 1341406
+    },
+    {
+      "part": "ppt/media/hcd-n_a4690ab757ab65663c9086908596a97e.png",
+      "width": 1536,
+      "height": 1024,
+      "sha256": "996ecb86e23ce598882ab50f1314cec62f8663a32c3ffe6c2d01a8b6df84dd9d",
+      "bytes": 1329662
+    },
+    {
+      "part": "ppt/media/hcd-n_e94d70c99b1efe9691233cc8f8a87b17.png",
+      "width": 1536,
+      "height": 1024,
+      "sha256": "faf0797af0ce011e0811905ad4b57c0025003499790009a24e2f8db4629a9379",
+      "bytes": 1214733
+    }
+  ],
+  "pptxSha256": "8b01a3cfe2c7437496595a5d9cf6384e5ee1ad82a015b474acbbdcebd6cda608"
+}

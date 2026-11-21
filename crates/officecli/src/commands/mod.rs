@@ -10,8 +10,8 @@ mod format_handler_session;
 mod get;
 pub(crate) mod hdoc;
 mod hdoc_raster_pdf;
+pub(crate) mod hdoc_word_pdf;
 mod help;
-mod html_convert;
 mod import;
 mod info;
 mod install;
@@ -372,6 +372,8 @@ pub enum Command {
     Merge(MergeCommand),
     /// Show schema-driven capability reference
     Help(HelpCommand),
+    /// Print runtime operation, patch-version and calculation capabilities
+    Capabilities,
     /// Import CSV/TSV data into an Excel sheet
     Import(ImportCommand),
     /// Convert supported documents to and from the chunked HTML Canonical Document format

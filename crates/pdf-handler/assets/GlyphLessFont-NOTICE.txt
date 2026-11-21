@@ -1,0 +1,5 @@
+GlyphLessFont (tessdata/pdf.ttf)
+Copyright 2020 Google Inc.
+Licensed under Apache License 2.0.
+Source: https://github.com/tesseract-ocr/tesseract/blob/5.5.1/tessdata/pdf.ttf
+SHA-256: c7845420925a23d88ed830a63957b8af85a66a8daf8d9fc90e843673b2ef1a59

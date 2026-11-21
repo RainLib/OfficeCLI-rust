@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120" role="img" aria-labelledby="title">
+  <title id="title">成功提交反馈</title>
+  <style>.tick{stroke-dasharray:76;stroke-dashoffset:76;animation:draw 320ms 100ms ease forwards}.halo{transform-origin:60px 60px;animation:halo 650ms ease-out forwards}@keyframes draw{to{stroke-dashoffset:0}}@keyframes halo{from{opacity:.65;transform:scale(.7)}to{opacity:0;transform:scale(1.35)}}@media(prefers-reduced-motion:reduce){.tick{stroke-dashoffset:0;animation:none}.halo{display:none}}</style>
+  <circle class="halo" cx="60" cy="60" r="37" fill="#dae7d5"/>
+  <circle cx="60" cy="60" r="33" fill="#e8efe3"/>
+  <path class="tick" d="M40 61L54 75L81 46" fill="none" stroke="#587153" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

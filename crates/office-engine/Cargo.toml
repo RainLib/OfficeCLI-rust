@@ -1,0 +1,23 @@
+[package]
+name = "office-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+handler-common = { path = "../handler-common" }
+oxml = { path = "../oxml" }
+docx-handler = { path = "../docx-handler" }
+xlsx-handler = { path = "../xlsx-handler" }
+pptx-handler = { path = "../pptx-handler" }
+pdf-handler = { path = "../pdf-handler" }
+hcd-core = { path = "../hcd-core" }
+hcd-formats = { path = "../hcd-formats" }
+serde = { workspace = true }
+lopdf = { workspace = true }
+tempfile = { workspace = true }
+uuid = { workspace = true }
+unicode-segmentation = { workspace = true }
+ironpress = { version = "=1.6.0", default-features = false }
+base64 = "0.22"
+regex = "1"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }

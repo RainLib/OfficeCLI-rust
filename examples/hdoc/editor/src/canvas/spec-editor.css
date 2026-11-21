@@ -1,0 +1,339 @@
+.board-block-spec.board-block-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  max-height: calc(100% - 18px);
+  background: var(--surface);
+}
+.board-block-spec.board-block-editor header,
+.board-block-spec.board-block-editor footer {
+  padding: 7px 12px;
+}
+.board-block-spec header {
+  border-bottom: 1px solid var(--line);
+}
+.spec-format-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.spec-format-tools select {
+  font: inherit;
+  color: var(--ink);
+  padding: 4px 3px;
+  border: 0;
+  background: transparent;
+}
+.board-block-spec .spec-format-tools button {
+  width: 29px;
+  height: 29px;
+  min-height: 0;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+.board-block-spec .spec-format-tools button[aria-pressed='true'] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.spec-writing {
+  overflow: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+  max-height: 44vh;
+  padding: 15px 23px;
+}
+.board-block-spec[data-full='true'] .spec-writing {
+  flex: 1;
+  max-height: none;
+  width: min(760px, 100%);
+  margin: 0 auto;
+  padding: clamp(14px, 3vw, 42px);
+  box-sizing: border-box;
+}
+.hcd-surface .spec-prose {
+  font:
+    16px/1.55 system-ui,
+    sans-serif;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.spec-prose[contenteditable] {
+  outline: 0;
+  min-height: 100px;
+}
+.hcd-surface .spec-prose :is(p, h2, h3, pre, ol, ul, blockquote) {
+  margin: 0 0 0.42em;
+}
+.hcd-surface .spec-prose > :last-child {
+  margin-bottom: 0;
+}
+.hcd-surface .spec-prose h2 {
+  font:
+    650 1.45em/1.35 system-ui,
+    sans-serif;
+}
+.hcd-surface .spec-prose h3 {
+  font:
+    650 1.17em/1.4 system-ui,
+    sans-serif;
+}
+.hcd-surface .spec-prose p:empty::before {
+  content: '\200b';
+}
+.hcd-surface .spec-prose :is(ol, ul) {
+  padding-left: 1.55em;
+}
+.hcd-surface .spec-prose blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.8em;
+  color: var(--muted);
+}
+.hcd-surface .spec-prose pre,
+.hcd-surface .spec-prose code {
+  background: var(--stage);
+  border-radius: 4px;
+  font-family: ui-monospace, monospace;
+}
+.hcd-surface .spec-prose pre {
+  padding: 0.5em 0.8em;
+}
+.canvas-spec-previews {
+  /* Above the native paper, below Excalidraw's interactive selection canvas. */
+  z-index: 1;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.spec-paper-prose {
+  position: absolute;
+  pointer-events: none;
+  margin: 0;
+  padding: 0;
+}
+
+.board-block-spec[data-full='true'] ~ .board-dock-shell {
+  display: none;
+}
+.board-block-editor.board-block-spec[data-full='true'] {
+  padding: 0;
+  z-index: 12;
+}
+.board-block-spec .spec-writing:focus-within {
+  outline: none;
+}
+.spec-peer-range {
+  background: color-mix(in srgb, var(--spec-peer) 21%, transparent);
+  box-decoration-break: clone;
+}
+.spec-peer-caret {
+  display: inline-block;
+  width: 2px;
+  height: 0.95em;
+  margin-right: -2px;
+  vertical-align: -0.08em;
+  position: relative;
+  pointer-events: none;
+  user-select: none;
+}
+.spec-peer-caret::before {
+  content: '';
+  position: absolute;
+  bottom: -0.12em;
+  height: 1.18em;
+  border-left: 2px solid var(--spec-peer);
+}
+.spec-peer-caret::after {
+  content: attr(data-spec-peer);
+  position: absolute;
+  z-index: 2;
+  bottom: calc(100% + 1px + 16px * var(--spec-tier, 0));
+  left: 0;
+  padding: 2px 5px;
+  border-radius: 4px 4px 4px 0;
+  background: var(--spec-peer);
+  color: #fff;
+  font:
+    600 10px/1.2 system-ui,
+    sans-serif;
+  white-space: nowrap;
+  max-width: 12em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.board-block-spec .spec-writing .spec-prose {
+  padding-top: 1em;
+}
+.board-block-spec footer .spec-ai-action {
+  margin-right: auto;
+  color: var(--accent);
+}
+.board-block-spec footer button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.spec-peer-caret[data-below='true']::after {
+  bottom: auto;
+  top: calc(100% + 2px + 16px * var(--spec-tier, 0));
+  border-radius: 0 4px 4px 4px;
+}
+.spec-title-field {
+  position: relative;
+  font: 650 23px/1.4 system-ui, sans-serif;
+}
+.spec-title-overlay {
+  pointer-events: none;
+  user-select: none;
+}
+.spec-title-ink {
+  color: transparent;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.hcd-surface .board-block-spec .spec-title-field textarea {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  resize: none;
+  overflow: hidden;
+  outline: none;
+  color: inherit;
+  background: transparent;
+  box-shadow: none;
+  font: inherit;
+  letter-spacing: normal;
+}
+.spec-peer-caret[data-agent='true'] { color:var(--spec-peer); }
+.spec-peer-caret[data-agent='true']::after {
+  content:'AI  ' attr(data-spec-peer); left:8px; border-radius:999px; padding:1px 6px;
+  color:var(--spec-peer); background:color-mix(in srgb,var(--spec-peer) 9%,var(--panel,#fffdfb));
+  border:1px solid color-mix(in srgb,var(--spec-peer) 34%,transparent);
+}
+.spec-peer-caret > .agent-nib { width:17px; height:17px; position:absolute; left:-4px; top:-5px; z-index:2; }
+.spec-peer-caret[data-below='true'] > .agent-nib { top:calc(100% - 3px); }
+.canvas-peer-agent { position:absolute; pointer-events:none; color:#73558a; transform:translate(-5.8px,-5.8px); }
+.canvas-peer-agent .agent-name-chip { position:absolute; left:18px; top:15px; }
+.board-cursor-chat .board-chat-bubble[data-agent='true'] { border-radius:13px; background:#f6f1f8; color:#5e466e; border:1px solid #d1bfd9; }
+.spec-drag-layer{position:absolute;inset:0;pointer-events:none;z-index:8;overflow:hidden}
+.spec-drop-ring{position:absolute;border:2px solid #7152ca;box-shadow:inset 0 0 0 3px #a28ae62e;border-radius:12px;box-sizing:border-box}
+.spec-drop-ring span{position:absolute;top:8px;right:8px;border-radius:8px;padding:4px 8px;background:#6144a6;color:white;font:12px system-ui}
+.board-block-spec[data-full=true][data-exporting=true]{pointer-events:none!important;opacity:.26;max-width:260px!important;max-height:68px!important;left:12px!important;top:12px!important;right:auto!important;bottom:auto!important;transform:none!important;overflow:hidden}
+.spec-attachment{display:grid;justify-items:center;position:relative;width:fit-content;max-width:100%;margin:10px auto;padding:4px}
+.spec-attachment[draggable=true],.board-block-spec header [draggable=true]{cursor:grab}
+.spec-attachment img{display:block;max-width:min(100%,340px);max-height:200px;object-fit:contain}
+.spec-attachment figcaption{position:absolute;bottom:5px;left:50%;transform:translateX(-50%);white-space:nowrap;display:flex;align-items:center;gap:3px;padding:3px 6px;border-radius:5px;color:white;background:#302b39d9;font:11px system-ui;opacity:0}
+.spec-attachment:hover figcaption{opacity:1}
+.spec-note-preview{display:flex;flex-direction:column;justify-content:space-between;box-sizing:border-box;max-width:100%;padding:15px;white-space:pre-wrap;overflow-wrap:anywhere;box-shadow:0 3px 6px #24212422}
+.spec-note-preview small{margin-top:12px;font:12px system-ui;opacity:.65}
+
+.board-spec-inline {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font: 13px system-ui, sans-serif;
+}
+.board-spec-inline .spec-writing {
+  display: contents;
+}
+.canvas-surface:has(.board-spec-inline) > .canvas-selection-actions { visibility: hidden; }
+.board-spec-inline .spec-edit-part {
+  position: absolute;
+  z-index: 2;
+  margin: 0;
+  font: 16px/1.55 system-ui, sans-serif;
+}
+.board-spec-inline .spec-edit-part :is(.spec-title-field, .spec-prose) {
+  pointer-events: auto;
+  font: inherit;
+  color: inherit;
+}
+.hcd-surface .board-spec-inline .spec-prose[contenteditable] {
+  padding: 0;
+  min-height: 1.55em;
+}
+.board-spec-inline[data-exporting=true] .spec-edit-part * {
+  pointer-events: none;
+}
+.spec-new-paper {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid #dcdde2;
+  border-radius: 10px;
+  background: white;
+}
+.board-spec-inline .spec-edit-rail {
+  position: absolute;
+  z-index: 9;
+  container-type: inline-size;
+  display: grid;
+  justify-items: center;
+  pointer-events: none;
+}
+.board-block-spec .spec-edit-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 3px 5px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.board-spec-inline .spec-edit-bar {
+  pointer-events: auto;
+  max-width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 4px 16px #25212e19, 0 1px 3px #25212e0d;
+}
+.board-block-spec[data-full=true] .spec-edit-bar { border-bottom: 1px solid var(--line); }
+.hcd-surface .board-block-spec .spec-edit-bar :is(header, footer, .spec-format-tools) {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  border: none;
+  margin: 0;
+}
+.board-block-spec .spec-edit-bar strong { margin-inline: 7px; white-space: nowrap; }
+.board-block-spec .spec-edit-bar .spec-format-tools { border-inline: 1px solid var(--line); }
+.hcd-surface .spec-edit-bar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  height: 29px;
+  min-height: 0;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 6px;
+  color: inherit;
+  background: transparent;
+  box-shadow: none;
+  font: 12px system-ui, sans-serif;
+  cursor: pointer;
+}
+.hcd-surface .spec-edit-bar button:hover { background: var(--stage); }
+.hcd-surface .spec-edit-bar button[aria-pressed=true] { background: var(--accent-soft); color: var(--accent); }
+.hcd-surface .spec-edit-bar footer button:last-child { color: var(--surface); background: var(--ink); }
+.spec-edit-bar [draggable=true] { cursor: grab; }
+.spec-edit-error { margin: 3px 0; padding: 5px 9px; border-radius: 6px; color: var(--ink); background: var(--surface); pointer-events: auto; }
+@container (max-width: 540px) {
+  .spec-edit-bar footer button span { position: absolute; clip-path: inset(50%); }
+}

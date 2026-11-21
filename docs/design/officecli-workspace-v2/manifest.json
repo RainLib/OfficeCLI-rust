@@ -1,0 +1,80 @@
+{
+  "source": "../officecli-workspace-v2.pen",
+  "canvas": {
+    "width": 1600,
+    "height": 1040
+  },
+  "screens": [
+    {
+      "file": "00-design-system.png",
+      "id": "jJ153",
+      "name": "设计系统"
+    },
+    {
+      "file": "01-library.png",
+      "id": "F3GGns",
+      "name": "文档工作台"
+    },
+    {
+      "file": "02-docx-edit.png",
+      "id": "pVsuJ",
+      "name": "DOCX 编辑"
+    },
+    {
+      "file": "03-xlsx-edit.png",
+      "id": "nXhA1",
+      "name": "XLSX 编辑"
+    },
+    {
+      "file": "04-pptx-edit.png",
+      "id": "K87KMM",
+      "name": "PPTX 编辑"
+    },
+    {
+      "file": "05-pdf-annotate.png",
+      "id": "iDPmn",
+      "name": "PDF 阅读与批注"
+    },
+    {
+      "file": "06-markdown-edit.png",
+      "id": "b26npj",
+      "name": "Markdown 编辑"
+    },
+    {
+      "file": "07-html-preview.png",
+      "id": "mlLRr",
+      "name": "HTML 内容预览"
+    },
+    {
+      "file": "08-txt-edit.png",
+      "id": "NPARS",
+      "name": "TXT 纯文本编辑"
+    },
+    {
+      "file": "09-focus.png",
+      "id": "XNTdh",
+      "name": "收起与专注"
+    },
+    {
+      "file": "10-agent-collaboration.png",
+      "id": "CtYHd",
+      "name": "多 Agent 协作与冲突"
+    },
+    {
+      "file": "11-docx-preview.png",
+      "id": "sY24X",
+      "name": "DOCX 阅读预览"
+    },
+    {
+      "file": "12-xlsx-preview.png",
+      "id": "UUIcO",
+      "name": "XLSX 只读预览"
+    },
+    {
+      "file": "13-pptx-preview.png",
+      "id": "XpAUW",
+      "name": "PPTX 演示预览"
+    }
+  ],
+  "edition": "Soft Canvas · V2"
+}

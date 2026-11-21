@@ -1,0 +1,238 @@
+{
+  "uiUrl": "http://127.0.0.1:58402",
+  "readOnlyProbe": true,
+  "documents": [
+    {
+      "id": "accept-docx",
+      "format": "docx",
+      "profile": "semantic-flow",
+      "revision": 13,
+      "capabilities": {
+        "annotations": true,
+        "exactPagination": false,
+        "structurePatch": true,
+        "stylePatch": false,
+        "textPatch": true
+      },
+      "defaultExport": "docx",
+      "exportFormats": [
+        "docx",
+        "xlsx",
+        "pptx",
+        "pdf",
+        "html",
+        "md",
+        "txt",
+        "hcd"
+      ],
+      "warnings": [
+        "OPAQUE_OFFICE_OBJECTS_PRESERVED",
+        "HCD_STRUCTURE_SEMANTIC_REBUILD",
+        "HCD_STRUCTURE_SEMANTIC_REBUILD",
+        "HCD_STRUCTURE_SEMANTIC_REBUILD",
+        "HCD_STRUCTURE_SEMANTIC_REBUILD",
+        "HCD_STRUCTURE_SEMANTIC_REBUILD",
+        "HCD_STRUCTURE_SEMANTIC_REBUILD",
+        "HCD_STRUCTURE_SEMANTIC_REBUILD",
+        "HCD_STRUCTURE_SEMANTIC_REBUILD"
+      ],
+      "agent": {
+        "available": true,
+        "model": "gpt-6.1-sol",
+        "imageModel": "gpt-image-2"
+      }
+    },
+    {
+      "id": "accept-pronunciation",
+      "format": "pptx",
+      "profile": "slide-canvas",
+      "revision": 86,
+      "capabilities": {
+        "annotations": true,
+        "exactPagination": false,
+        "structurePatch": false,
+        "stylePatch": false,
+        "textPatch": true
+      },
+      "defaultExport": "pptx",
+      "exportFormats": [
+        "docx",
+        "xlsx",
+        "pptx",
+        "pdf",
+        "html",
+        "md",
+        "txt",
+        "hcd"
+      ],
+      "warnings": [
+        "PPTX_PARTIAL_VISUAL_LAYOUT"
+      ],
+      "agent": {
+        "available": true,
+        "model": "gpt-6.1-sol",
+        "imageModel": "gpt-image-2"
+      }
+    },
+    {
+      "id": "accept-xlsx",
+      "format": "xlsx",
+      "profile": "grid",
+      "revision": 3,
+      "capabilities": {
+        "annotations": true,
+        "exactPagination": false,
+        "structurePatch": false,
+        "stylePatch": false,
+        "textPatch": true
+      },
+      "defaultExport": "xlsx",
+      "exportFormats": [
+        "docx",
+        "xlsx",
+        "pptx",
+        "pdf",
+        "html",
+        "md",
+        "txt",
+        "hcd"
+      ],
+      "warnings": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "agent": {
+        "available": true,
+        "model": "gpt-6.1-sol",
+        "imageModel": "gpt-image-2"
+      }
+    },
+    {
+      "id": "accept-md",
+      "format": "md",
+      "profile": "semantic-flow",
+      "revision": 0,
+      "capabilities": {
+        "annotations": true,
+        "exactPagination": false,
+        "structurePatch": false,
+        "stylePatch": false,
+        "textPatch": true
+      },
+      "defaultExport": "md",
+      "exportFormats": [
+        "docx",
+        "xlsx",
+        "pptx",
+        "pdf",
+        "html",
+        "md",
+        "txt",
+        "hcd"
+      ],
+      "warnings": [
+        "MARKDOWN_SANITIZED_HTML"
+      ],
+      "agent": {
+        "available": true,
+        "model": "gpt-6.1-sol",
+        "imageModel": "gpt-image-2"
+      }
+    },
+    {
+      "id": "accept-txt",
+      "format": "txt",
+      "profile": "semantic-flow",
+      "revision": 0,
+      "capabilities": {
+        "annotations": true,
+        "exactPagination": false,
+        "structurePatch": false,
+        "stylePatch": false,
+        "textPatch": true
+      },
+      "defaultExport": "txt",
+      "exportFormats": [
+        "docx",
+        "xlsx",
+        "pptx",
+        "pdf",
+        "html",
+        "md",
+        "txt",
+        "hcd"
+      ],
+      "warnings": [],
+      "agent": {
+        "available": true,
+        "model": "gpt-6.1-sol",
+        "imageModel": "gpt-image-2"
+      }
+    },
+    {
+      "id": "accept-html",
+      "format": "html",
+      "profile": "semantic-flow",
+      "revision": 0,
+      "capabilities": {
+        "annotations": true,
+        "exactPagination": false,
+        "structurePatch": false,
+        "stylePatch": false,
+        "textPatch": true
+      },
+      "defaultExport": "html",
+      "exportFormats": [
+        "docx",
+        "xlsx",
+        "pptx",
+        "pdf",
+        "html",
+        "md",
+        "txt",
+        "hcd"
+      ],
+      "warnings": [
+        "HTML_ACTIVE_CONTENT_EXCLUDED"
+      ],
+      "agent": {
+        "available": true,
+        "model": "gpt-6.1-sol",
+        "imageModel": "gpt-image-2"
+      }
+    },
+    {
+      "id": "demo-pdf-raster-quality",
+      "format": "pdf",
+      "profile": "fixed-layout",
+      "revision": 0,
+      "capabilities": {
+        "annotations": true,
+        "exactPagination": false,
+        "structurePatch": false,
+        "stylePatch": false,
+        "textPatch": true
+      },
+      "defaultExport": "pdf",
+      "exportFormats": [
+        "docx",
+        "xlsx",
+        "pptx",
+        "pdf",
+        "html",
+        "md",
+        "txt",
+        "hcd"
+      ],
+      "warnings": [
+        "PDF_OBJECT_GRAPH_IN_MEMORY",
+        "PDF_RASTER_BACKEND",
+        "PDF_SOURCE_VISUAL_LAYER_READ_ONLY"
+      ],
+      "agent": {
+        "available": true,
+        "model": "gpt-6.1-sol",
+        "imageModel": "gpt-image-2"
+      }
+    }
+  ]
+}

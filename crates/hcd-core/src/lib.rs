@@ -1,9 +1,22 @@
 mod archive;
 mod bundle;
+pub mod canvas;
+mod catalog;
+mod docx_inline;
+pub mod docx_review;
 mod error;
 mod hash;
 mod html;
+mod image_codec;
+mod image_insert;
+pub mod image_layers;
+pub mod office_features;
 mod patch;
+mod pdf_layout;
+pub mod pdf_ocr;
+pub mod pptx_animation;
+pub mod pptx_design;
+pub mod pptx_group;
 mod presentation;
 mod restore;
 mod search;
@@ -12,36 +25,64 @@ mod structure;
 mod types;
 mod validate;
 mod xlsx_formula;
+mod xlsx_grid;
+mod xlsx_inline;
 
 pub use archive::{inspect_archive, pack_archive, unpack_archive, ArchiveReport};
 pub use bundle::{Bundle, BundleWriter, INDEX_PAGE_SIZE};
+pub use catalog::{
+    audit_action, detect_font_format, is_audit_calendar_day, list_documents, pin_document_theme,
+    resolve_document_theme, set_document_theme_at_revision, theme_document_css, theme_documents,
+    theme_font_plan, theme_font_report, theme_presentation_css, unpin_document_theme, AuditEntry,
+    AuditPage, AuditRecord, AuditWindow, DiskCatalog, DocumentSummary, DocumentThemeResolution,
+    FontDeleteReport, FontFace, FontFileFormat, FontLicense, FontRef, FontRevision, FontScript,
+    FontStretch, FontStyle, ResolvedFace, ResolvedTheme, ThemeDocumentRef, ThemeEmbedKind,
+    ThemeFontAction, ThemeFontDecision, ThemeFontReport, ThemeFontSlots, ThemeRevision,
+    FONT_CATALOG_SCHEMA, LICENSE_WARN_WINDOW_DAYS, MAX_AUDIT_LIMIT, MAX_FONT_BYTES, THEME_SCHEMA,
+};
+pub use docx_inline::{extract_docx_inline_runs, DocxInlineRun};
 pub use error::HcdError;
 pub use hash::{
     hash_bytes, hash_file, hash_reader, node_bloom, node_bloom_might_contain, stable_node_id,
 };
 pub use html::{
-    extract_html_image_nodes, extract_html_text_nodes, image_visual_hash, validate_css_text,
-    HtmlImageNode,
+    extract_html_font_nodes, extract_html_image_nodes, extract_html_text_nodes, image_visual_hash,
+    is_safe_hyperlink, validate_css_text, HtmlFontNode, HtmlImageNode,
 };
 pub use patch::{
-    apply_patch, extract_image_page, extract_text_page, get_image_node, get_text_node,
+    apply_patch, apply_patch_with_pivot, extract_image_page, extract_text_page, get_image_node,
+    get_text_node, pivot_output_range, sort_grid, valid_worksheet_chart_id,
+    validate_docx_picture_layout, validate_worksheet_chart, validate_worksheet_condition,
+    validate_worksheet_pivot, worksheet_charts, worksheet_filter, worksheet_pivots,
+    xlsx_added_literals, GridFilterView, GridSortDirection, GridSortRequest, XlsxAddedLiteral,
+};
+pub use pdf_layout::{
+    pdf_page_count, pdf_page_layout, validate_pdf_placements, PDF_BLANK_HEIGHT_PT,
+    PDF_BLANK_WIDTH_PT,
 };
 pub use presentation::{
     manifest_at_revision, render_standalone_html, render_standalone_html_with_transform,
     HtmlPresentationOptions, HtmlPresentationReport, DEFAULT_HTML_PRESENTATION_MAX_BYTES,
 };
 pub use restore::restore_revision;
-pub use search::{search_bundle, SearchHit, SearchResult};
+pub use search::{search_bundle, search_workspace, SearchHit, SearchResult};
 pub use stats::{bundle_stats, remove_orphan_objects, BundleStats, StorageCategory};
 pub use structure::{
-    apply_structure_patch, editor_projection, project_editor, BlockPrecondition,
-    EditorBlockContent, EditorBlockKind, EditorBlockView, EditorInline, EditorProjection,
-    StructureOperation, StructurePatchBatch,
+    apply_structure_patch, editor_projection, project_editor, word_review_anchors,
+    BlockPrecondition, EditorAlignment, EditorBlockContent, EditorBlockKind, EditorBlockView,
+    EditorInline, EditorProjection, EditorTextFormat, StructureOperation, StructurePatchBatch,
+    TableCellRange, TableEditAction, TableRestorePrecondition,
 };
 pub use types::*;
 pub use validate::validate_bundle;
 pub use xlsx_formula::{
-    delete_formula_references, insert_formula_references, FormulaDeletion, FormulaInsertion,
+    delete_formula_references, drop_formula_sheet_references, insert_formula_references,
+    rename_formula_sheet_references, FormulaDeletion, FormulaInsertion,
+};
+pub use xlsx_grid::{sheet_grid_id, sheet_window_chunk_id, XlsxSheetSection};
+pub use xlsx_inline::{
+    extract_xlsx_inline_runs, render_xlsx_inline_runs, splice_xlsx_inline_runs,
+    validate_xlsx_run_properties, XlsxInlineRun, XlsxRunProperties,
 };
 
 pub const HCD_SCHEMA_VERSION: &str = "hcd/2";
@@ -75,6 +116,29 @@ pub const HCD_PATCH_SCHEMA_VERSION_26: &str = "hcd-patch/26";
 pub const HCD_PATCH_SCHEMA_VERSION_27: &str = "hcd-patch/27";
 pub const HCD_PATCH_SCHEMA_VERSION_28: &str = "hcd-patch/28";
 pub const HCD_PATCH_SCHEMA_VERSION_29: &str = "hcd-patch/29";
+pub const HCD_PATCH_SCHEMA_VERSION_30: &str = "hcd-patch/30";
+pub const HCD_PATCH_SCHEMA_VERSION_31: &str = "hcd-patch/31";
+pub const HCD_PATCH_SCHEMA_VERSION_32: &str = "hcd-patch/32";
+pub const HCD_PATCH_SCHEMA_VERSION_33: &str = "hcd-patch/33";
+pub const HCD_PATCH_SCHEMA_VERSION_34: &str = "hcd-patch/34";
+pub const HCD_PATCH_SCHEMA_VERSION_35: &str = "hcd-patch/35";
+pub const HCD_PATCH_SCHEMA_VERSION_36: &str = "hcd-patch/36";
+/// Approved band for the PPTX slide-structure line: 41 adds a slide, 42 deletes
+/// one, 43 reorder, 44 copy. Numbers 37 to 40 belong to other lines and to the
+/// pending remap, so this line does not take them.
+pub const HCD_PATCH_SCHEMA_VERSION_41: &str = "hcd-patch/41";
+pub const HCD_PATCH_SCHEMA_VERSION_42: &str = "hcd-patch/42";
+pub const HCD_PATCH_SCHEMA_VERSION_43: &str = "hcd-patch/43";
+pub const HCD_PATCH_SCHEMA_VERSION_44: &str = "hcd-patch/44";
+/// 45 is this line's first XLSX window op: freeze panes on a worksheet.
+/// 46 is this line's first PPTX paragraph op: align a slide text shape.
+pub const HCD_PATCH_SCHEMA_VERSION_45: &str = "hcd-patch/45";
+pub const HCD_PATCH_SCHEMA_VERSION_47: &str = "hcd-patch/47";
+pub const HCD_PATCH_SCHEMA_VERSION_48: &str = "hcd-patch/48";
+pub const HCD_PATCH_SCHEMA_VERSION_49: &str = "hcd-patch/49";
+pub const HCD_PATCH_SCHEMA_VERSION_50: &str = "hcd-patch/50";
+pub const HCD_PATCH_SCHEMA_VERSION_46: &str = "hcd-patch/46";
+pub const HCD_PATCH_SCHEMA_VERSION_37: &str = "hcd-patch/37";
 pub const HCD_SCHEMA_JSON: &str = include_str!("../schemas/hcd-2.schema.json");
 pub const HCD_SCHEMA_V1_JSON: &str = include_str!("../schemas/hcd-1.schema.json");
 pub const HCD_PATCH_SCHEMA_JSON: &str = include_str!("../schemas/hcd-patch-1.schema.json");
@@ -106,6 +170,21 @@ pub const HCD_PATCH_SCHEMA_V26_JSON: &str = include_str!("../schemas/hcd-patch-2
 pub const HCD_PATCH_SCHEMA_V27_JSON: &str = include_str!("../schemas/hcd-patch-27.schema.json");
 pub const HCD_PATCH_SCHEMA_V28_JSON: &str = include_str!("../schemas/hcd-patch-28.schema.json");
 pub const HCD_PATCH_SCHEMA_V29_JSON: &str = include_str!("../schemas/hcd-patch-29.schema.json");
+pub const HCD_PATCH_SCHEMA_V30_JSON: &str = include_str!("../schemas/hcd-patch-30.schema.json");
+pub const HCD_PATCH_SCHEMA_V31_JSON: &str = include_str!("../schemas/hcd-patch-31.schema.json");
+pub const HCD_PATCH_SCHEMA_V32_JSON: &str = include_str!("../schemas/hcd-patch-32.schema.json");
+pub const HCD_PATCH_SCHEMA_V33_JSON: &str = include_str!("../schemas/hcd-patch-33.schema.json");
+pub const HCD_PATCH_SCHEMA_V34_JSON: &str = include_str!("../schemas/hcd-patch-34.schema.json");
+pub const HCD_PATCH_SCHEMA_V35_JSON: &str = include_str!("../schemas/hcd-patch-35.schema.json");
+pub const HCD_PATCH_SCHEMA_V36_JSON: &str = include_str!("../schemas/hcd-patch-36.schema.json");
+pub const HCD_PATCH_SCHEMA_V41_JSON: &str = include_str!("../schemas/hcd-patch-41.schema.json");
+pub const HCD_PATCH_SCHEMA_V42_JSON: &str = include_str!("../schemas/hcd-patch-42.schema.json");
+pub const HCD_PATCH_SCHEMA_V43_JSON: &str = include_str!("../schemas/hcd-patch-43.schema.json");
+pub const HCD_PATCH_SCHEMA_V48_JSON: &str = include_str!("../schemas/hcd-patch-48.schema.json");
+pub const HCD_PATCH_SCHEMA_V44_JSON: &str = include_str!("../schemas/hcd-patch-44.schema.json");
+pub const HCD_PATCH_SCHEMA_V45_JSON: &str = include_str!("../schemas/hcd-patch-45.schema.json");
+pub const HCD_PATCH_SCHEMA_V46_JSON: &str = include_str!("../schemas/hcd-patch-46.schema.json");
+pub const HCD_PATCH_SCHEMA_V37_JSON: &str = include_str!("../schemas/hcd-patch-37.schema.json");
 pub const DEFAULT_CHUNK_SOFT_BYTES: usize = 512 * 1024;
 pub const DEFAULT_CHUNK_BLOCKS: usize = 256;
 pub const MAX_CHUNK_BYTES: usize = 2 * 1024 * 1024;
@@ -113,6 +192,40 @@ pub const MAX_CONTROL_PART_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_PATCH_JSON_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_STAGED_ASSET_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_REVISION: u64 = 100_000;
+
+pub const HCD_PATCH_SCHEMA_VERSION_51: &str = "hcd-patch/51";
+pub const HCD_PATCH_SCHEMA_V51_JSON: &str = include_str!("../schemas/hcd-patch-51.schema.json");
+
+pub const HCD_PATCH_SCHEMA_VERSION_52: &str = "hcd-patch/52";
+pub const HCD_PATCH_SCHEMA_V52_JSON: &str = include_str!("../schemas/hcd-patch-52.schema.json");
+
+pub const HCD_PATCH_SCHEMA_VERSION_53: &str = "hcd-patch/53";
+pub const HCD_PATCH_SCHEMA_V53_JSON: &str = include_str!("../schemas/hcd-patch-53.schema.json");
+
+pub const HCD_PATCH_SCHEMA_VERSION_54: &str = "hcd-patch/54";
+pub const HCD_PATCH_SCHEMA_V54_JSON: &str = include_str!("../schemas/hcd-patch-54.schema.json");
+
+pub const HCD_PATCH_SCHEMA_VERSION_55: &str = "hcd-patch/55";
+pub const HCD_PATCH_SCHEMA_V55_JSON: &str = include_str!("../schemas/hcd-patch-55.schema.json");
+
+pub const HCD_PATCH_SCHEMA_VERSION_56: &str = "hcd-patch/56";
+pub const HCD_PATCH_SCHEMA_V56_JSON: &str = include_str!("../schemas/hcd-patch-56.schema.json");
+
+pub const HCD_PATCH_SCHEMA_VERSION_57: &str = "hcd-patch/57";
+pub const HCD_PATCH_SCHEMA_V57_JSON: &str = include_str!("../schemas/hcd-patch-57.schema.json");
+pub const HCD_PATCH_SCHEMA_VERSION_58: &str = "hcd-patch/58";
+pub const HCD_PATCH_SCHEMA_V58_JSON: &str = include_str!("../schemas/hcd-patch-58.schema.json");
+pub const HCD_PATCH_SCHEMA_VERSION_59: &str = "hcd-patch/59";
+pub const HCD_PATCH_SCHEMA_VERSION_60: &str = "hcd-patch/60";
+pub const HCD_PATCH_SCHEMA_VERSION_61: &str = "hcd-patch/61";
+pub const HCD_PATCH_SCHEMA_VERSION_62: &str = "hcd-patch/62";
+pub const HCD_PATCH_SCHEMA_VERSION_63: &str = "hcd-patch/63";
+pub const HCD_PATCH_SCHEMA_VERSION_64: &str = "hcd-patch/64";
+pub const HCD_PATCH_SCHEMA_VERSION_65: &str = "hcd-patch/65";
+pub const HCD_PATCH_SCHEMA_VERSION_66: &str = "hcd-patch/66";
+pub const HCD_PATCH_SCHEMA_VERSION_67: &str = "hcd-patch/67";
+pub const HCD_PATCH_SCHEMA_V65_JSON: &str = include_str!("../schemas/hcd-patch-65.schema.json");
+pub const HCD_PATCH_SCHEMA_V59_JSON: &str = include_str!("../schemas/hcd-patch-59.schema.json");
 
 #[cfg(test)]
 mod schema_tests {
@@ -176,6 +289,34 @@ mod schema_tests {
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V28_JSON).unwrap();
         let patch_v29: serde_json::Value =
             serde_json::from_str(super::HCD_PATCH_SCHEMA_V29_JSON).unwrap();
+        let patch_v30: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V30_JSON).unwrap();
+        let patch_v31: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V31_JSON).unwrap();
+        let patch_v32: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V32_JSON).unwrap();
+        let patch_v33: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V33_JSON).unwrap();
+        let patch_v34: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V34_JSON).unwrap();
+        let patch_v35: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V35_JSON).unwrap();
+        let patch_v36: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V36_JSON).unwrap();
+        let patch_v41: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V41_JSON).unwrap();
+        let patch_v42: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V42_JSON).unwrap();
+        let patch_v43: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V43_JSON).unwrap();
+        let patch_v44: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V44_JSON).unwrap();
+        let patch_v45: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V45_JSON).unwrap();
+        let patch_v46: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V46_JSON).unwrap();
+        let patch_v37: serde_json::Value =
+            serde_json::from_str(super::HCD_PATCH_SCHEMA_V37_JSON).unwrap();
         assert_eq!(hcd["$id"], "urn:officecli:hcd:2");
         assert_eq!(patch["$id"], "urn:officecli:hcd-patch:1");
         assert_eq!(patch_v2["$id"], "urn:officecli:hcd-patch:2");
@@ -206,6 +347,20 @@ mod schema_tests {
         assert_eq!(patch_v27["$id"], "urn:officecli:hcd-patch:27");
         assert_eq!(patch_v28["$id"], "urn:officecli:hcd-patch:28");
         assert_eq!(patch_v29["$id"], "urn:officecli:hcd-patch:29");
+        assert_eq!(patch_v30["$id"], "urn:officecli:hcd-patch:30");
+        assert_eq!(patch_v31["$id"], "urn:officecli:hcd-patch:31");
+        assert_eq!(patch_v32["$id"], "urn:officecli:hcd-patch:32");
+        assert_eq!(patch_v33["$id"], "urn:officecli:hcd-patch:33");
+        assert_eq!(patch_v34["$id"], "urn:officecli:hcd-patch:34");
+        assert_eq!(patch_v35["$id"], "urn:officecli:hcd-patch:35");
+        assert_eq!(patch_v36["$id"], "urn:officecli:hcd-patch:36");
+        assert_eq!(patch_v41["$id"], "urn:officecli:hcd-patch:41");
+        assert_eq!(patch_v42["$id"], "urn:officecli:hcd-patch:42");
+        assert_eq!(patch_v43["$id"], "urn:officecli:hcd-patch:43");
+        assert_eq!(patch_v44["$id"], "urn:officecli:hcd-patch:44");
+        assert_eq!(patch_v45["$id"], "urn:officecli:hcd-patch:45");
+        assert_eq!(patch_v46["$id"], "urn:officecli:hcd-patch:46");
+        assert_eq!(patch_v37["$id"], "urn:officecli:hcd-patch:37");
     }
 
     #[test]

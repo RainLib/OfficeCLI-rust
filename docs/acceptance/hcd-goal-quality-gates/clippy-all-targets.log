@@ -1,0 +1,6 @@
+    Checking hcd-core v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/hcd-core)
+    Checking hcd-docx v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/hcd-docx)
+    Checking hcd-formats v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/hcd-formats)
+    Checking office-engine v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/office-engine)
+    Checking officecli v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/officecli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.06s

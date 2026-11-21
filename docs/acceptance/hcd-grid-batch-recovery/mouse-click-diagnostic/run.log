@@ -1,0 +1,343 @@
+(node:14838) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 16 tests using 1 worker
+
+(node:14839) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+(node:14839) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+
+[1/16] e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+[2/16] e2e/workspace.spec.ts:2502:1 › grid input journal keeps unapplied text bound to its cell across selections and page closure
+(node:15651) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+(node:15651) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+
+[3/16] e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+[4/16] e2e/workspace.spec.ts:2502:1 › grid input journal keeps unapplied text bound to its cell across selections and page closure
+(node:16454) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+(node:16454) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+
+[5/16] e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+  1) e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+
+    Error: expect(locator).toHaveText(expected) failed
+
+    Locator:  getByLabel('选中单元格', { exact: true })
+    Expected: "B1"
+    Received: "A1"
+    Timeout:  20000ms
+
+    Call log:
+      - Expect "toHaveText" getByLabel('选中单元格', { exact: true }) with timeout 20000ms
+      - waiting for getByLabel('选中单元格', { exact: true })
+        44 × locator resolved to <span aria-label="选中单元格" class="xlsx-formula-address">A1</span>
+           - unexpected value "A1"
+
+
+      700 |   await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>resolve())))
+      701 |   await nativeEditor.press('ArrowRight')
+    > 702 |   await expect(page.getByLabel('选中单元格',{exact:true})).toHaveText('B1')
+          |                                                       ^
+      703 |   await expect(page.getByLabel('单元格内容或公式',{exact:true})).toHaveValue('2')
+      704 |   await page.getByLabel('单元格内容或公式',{exact:true}).fill('11')
+      705 |   await page.getByRole('button',{name:'应用内容',exact:true}).click()
+        at /Users/will/Project/rainy/projects/OfficeCLI-rust/examples/hdoc/editor/e2e/workspace.spec.ts:702:55
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat2/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #3: service-0.log (text/plain) ──────────────────────────────────────────────────────
+    HCD core API listening on http://127.0.0.1:55252
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #4: service-1.log (text/plain) ──────────────────────────────────────────────────────
+    (node:17167) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+    (Use `node --trace-warnings ...` to show where the warning was created)
+    (node:17169) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+    (Use `node --trace-warnings ...` to show whe...
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #5: service-2.log (text/plain) ──────────────────────────────────────────────────────
+    (node:17168) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+    (Use `node --trace-warnings ...` to show where the warning was created)
+
+      VITE v7.1.11  ready in 70 ms
+
+      ➜  Local:   http://127.0.0.1:55254/
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat2/error-context.md
+
+    Error Context: test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat2/error-context.md
+
+    attachment #8: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat2/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat2/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+(node:17432) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+(node:17432) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+
+[6/16] e2e/workspace.spec.ts:2502:1 › grid input journal keeps unapplied text bound to its cell across selections and page closure
+(node:18193) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+(node:18193) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+
+[7/16] e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+[8/16] e2e/workspace.spec.ts:2502:1 › grid input journal keeps unapplied text bound to its cell across selections and page closure
+(node:19002) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+(node:19002) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+
+[9/16] e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+  2) e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+
+    Error: expect(locator).toHaveText(expected) failed
+
+    Locator:  getByLabel('选中单元格', { exact: true })
+    Expected: "B1"
+    Received: "A1"
+    Timeout:  20000ms
+
+    Call log:
+      - Expect "toHaveText" getByLabel('选中单元格', { exact: true }) with timeout 20000ms
+      - waiting for getByLabel('选中单元格', { exact: true })
+        44 × locator resolved to <span aria-label="选中单元格" class="xlsx-formula-address">A1</span>
+           - unexpected value "A1"
+
+
+      700 |   await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>resolve())))
+      701 |   await nativeEditor.press('ArrowRight')
+    > 702 |   await expect(page.getByLabel('选中单元格',{exact:true})).toHaveText('B1')
+          |                                                       ^
+      703 |   await expect(page.getByLabel('单元格内容或公式',{exact:true})).toHaveValue('2')
+      704 |   await page.getByLabel('单元格内容或公式',{exact:true}).fill('11')
+      705 |   await page.getByRole('button',{name:'应用内容',exact:true}).click()
+        at /Users/will/Project/rainy/projects/OfficeCLI-rust/examples/hdoc/editor/e2e/workspace.spec.ts:702:55
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat4/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #3: service-0.log (text/plain) ──────────────────────────────────────────────────────
+    HCD core API listening on http://127.0.0.1:56000
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #4: service-1.log (text/plain) ──────────────────────────────────────────────────────
+    (node:19717) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+    (Use `node --trace-warnings ...` to show where the warning was created)
+    (node:19719) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+    (Use `node --trace-warnings ...` to show whe...
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #5: service-2.log (text/plain) ──────────────────────────────────────────────────────
+    (node:19718) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+    (Use `node --trace-warnings ...` to show where the warning was created)
+
+      VITE v7.1.11  ready in 72 ms
+
+      ➜  Local:   http://127.0.0.1:56002/
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat4/error-context.md
+
+    Error Context: test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat4/error-context.md
+
+    attachment #8: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat4/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat4/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+(node:19993) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+(node:19993) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+
+[10/16] e2e/workspace.spec.ts:2502:1 › grid input journal keeps unapplied text bound to its cell across selections and page closure
+(node:20847) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+(node:20847) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+
+[11/16] e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+  3) e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+
+    Error: expect(locator).toHaveText(expected) failed
+
+    Locator:  getByLabel('选中单元格', { exact: true })
+    Expected: "B1"
+    Received: "A1"
+    Timeout:  20000ms
+
+    Call log:
+      - Expect "toHaveText" getByLabel('选中单元格', { exact: true }) with timeout 20000ms
+      - waiting for getByLabel('选中单元格', { exact: true })
+        44 × locator resolved to <span aria-label="选中单元格" class="xlsx-formula-address">A1</span>
+           - unexpected value "A1"
+
+
+      700 |   await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>resolve())))
+      701 |   await nativeEditor.press('ArrowRight')
+    > 702 |   await expect(page.getByLabel('选中单元格',{exact:true})).toHaveText('B1')
+          |                                                       ^
+      703 |   await expect(page.getByLabel('单元格内容或公式',{exact:true})).toHaveValue('2')
+      704 |   await page.getByLabel('单元格内容或公式',{exact:true}).fill('11')
+      705 |   await page.getByRole('button',{name:'应用内容',exact:true}).click()
+        at /Users/will/Project/rainy/projects/OfficeCLI-rust/examples/hdoc/editor/e2e/workspace.spec.ts:702:55
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat5/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #3: service-0.log (text/plain) ──────────────────────────────────────────────────────
+    HCD core API listening on http://127.0.0.1:56550
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #4: service-1.log (text/plain) ──────────────────────────────────────────────────────
+    (node:21601) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+    (Use `node --trace-warnings ...` to show where the warning was created)
+    (node:21603) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+    (Use `node --trace-warnings ...` to show whe...
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #5: service-2.log (text/plain) ──────────────────────────────────────────────────────
+    (node:21602) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+    (Use `node --trace-warnings ...` to show where the warning was created)
+
+      VITE v7.1.11  ready in 73 ms
+
+      ➜  Local:   http://127.0.0.1:56552/
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat5/error-context.md
+
+    Error Context: test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat5/error-context.md
+
+    attachment #8: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat5/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat5/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+(node:21878) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+(node:21878) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+
+[12/16] e2e/workspace.spec.ts:2502:1 › grid input journal keeps unapplied text bound to its cell across selections and page closure
+(node:22662) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+(node:22662) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+
+[13/16] e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+  4) e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+
+    Error: expect(locator).toHaveText(expected) failed
+
+    Locator:  getByLabel('选中单元格', { exact: true })
+    Expected: "B1"
+    Received: "A1"
+    Timeout:  20000ms
+
+    Call log:
+      - Expect "toHaveText" getByLabel('选中单元格', { exact: true }) with timeout 20000ms
+      - waiting for getByLabel('选中单元格', { exact: true })
+        44 × locator resolved to <span aria-label="选中单元格" class="xlsx-formula-address">A1</span>
+           - unexpected value "A1"
+
+
+      700 |   await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>resolve())))
+      701 |   await nativeEditor.press('ArrowRight')
+    > 702 |   await expect(page.getByLabel('选中单元格',{exact:true})).toHaveText('B1')
+          |                                                       ^
+      703 |   await expect(page.getByLabel('单元格内容或公式',{exact:true})).toHaveValue('2')
+      704 |   await page.getByLabel('单元格内容或公式',{exact:true}).fill('11')
+      705 |   await page.getByRole('button',{name:'应用内容',exact:true}).click()
+        at /Users/will/Project/rainy/projects/OfficeCLI-rust/examples/hdoc/editor/e2e/workspace.spec.ts:702:55
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat6/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #3: service-0.log (text/plain) ──────────────────────────────────────────────────────
+    HCD core API listening on http://127.0.0.1:56994
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #4: service-1.log (text/plain) ──────────────────────────────────────────────────────
+    (node:23353) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+    (Use `node --trace-warnings ...` to show where the warning was created)
+    (node:23355) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+    (Use `node --trace-warnings ...` to show whe...
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    attachment #5: service-2.log (text/plain) ──────────────────────────────────────────────────────
+    (node:23354) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+    (Use `node --trace-warnings ...` to show where the warning was created)
+
+      VITE v7.1.11  ready in 72 ms
+
+      ➜  Local:   http://127.0.0.1:56996/
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat6/error-context.md
+
+    Error Context: test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat6/error-context.md
+
+    attachment #8: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat6/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat6/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+(node:23640) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+(node:23640) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+
+[14/16] e2e/workspace.spec.ts:2502:1 › grid input journal keeps unapplied text bound to its cell across selections and page closure
+(node:24421) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+(node:24421) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+
+[15/16] e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+[16/16] e2e/workspace.spec.ts:2502:1 › grid input journal keeps unapplied text bound to its cell across selections and page closure
+  4 failed
+    e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+    e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+    e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+    e2e/workspace.spec.ts:642:1 › XLSX batch input journal live retry keeps identity and new edits follow the epoch after undo
+  12 passed (3.7m)

@@ -1,0 +1,23 @@
+
+> @officecli/workspace@0.1.0 test
+> node --test src/*.test.mjs
+
+✔ competing publications preserve the immutable source and reject a stale business head (71.4195ms)
+✔ commit rechecks authorization after prepare and upload (55.980875ms)
+✔ signed callbacks bind exact bytes and path, and nonce replay is rejected (28.754125ms)
+✔ logout invalidates live document authorization while preserving committed status recovery (41.24025ms)
+✔ encrypted exchange recovery rejects altered ciphertext and another deployment key (0.493291ms)
+✔ private files and link shares never appear in the public directory (38.377542ms)
+✔ anonymous visitors receive distinct server-assigned identities and browser recovery preserves identity (54.838083ms)
+✔ guest editing uses Provider permissions without acquiring publish, restore or management access (46.490792ms)
+✔ permission downgrade fences old editing sessions before a reader rejoins (51.469833ms)
+✔ rotation, stopping and expiration invalidate old links and grants (25.804542ms)
+✔ public access requires no link secret and expired temporary identities cannot resume (14.638459ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 273.791083

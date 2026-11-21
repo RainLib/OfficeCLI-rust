@@ -1,0 +1,50 @@
+[
+  {
+    "time": 980.5,
+    "type": "focus-call",
+    "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); color: transparent; outline: none; z-index:",
+    "stack": "Error\n    at HTMLElement.focus (<anonymous>:11:16)\n    at pa.focus (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:30044)\n    at bmr.focus (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:294:21416)\n    at L1e.focus (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:295:3355)\n    at iG.setEditCell (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:330:53275)\n    at handler (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:330:61496)\n    at qle.invoke (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:12:11625)\n    at aue._execute (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:18:9035)\n    at aue.executeCommand (http://fold.localhost:61620/embed-ex"
+  },
+  {
+    "time": 987.3000000119209,
+    "type": "focus-call",
+    "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); color: transparent; outline: none; z-index:",
+    "pane": "442d8e64-e4ae-45a3-b34c-c7537c967d43",
+    "stack": "Error\n    at HTMLElement.focus (<anonymous>:11:16)\n    at pa.focus (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:30044)\n    at pa.activate (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:29961)\n    at pa._updateInputPosition (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:294:3313)\n    at pa.addDocRanges (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:29083)\n    at Object.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:311:50739)\n    at e.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:3134)\n    at t._next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:2801)\n    at t.next (http://fold.localhost:61620/embed-exa"
+  },
+  {
+    "time": 987.3000000119209,
+    "type": "focus-call",
+    "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); color: transparent; outline: none; z-index:",
+    "pane": "442d8e64-e4ae-45a3-b34c-c7537c967d43",
+    "stack": "Error\n    at HTMLElement.focus (<anonymous>:11:16)\n    at pa.focus (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:30044)\n    at pa.activate (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:29961)\n    at Object.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:330:103147)\n    at e.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:3134)\n    at t._next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:2801)\n    at t.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:2450)\n    at t._subscribe (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:9680)\n    at e._trySubscribe (http://fold.localhost:61620/embed-example/assets/U"
+  },
+  {
+    "time": 990.9000000357628,
+    "type": "focus-call",
+    "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); color: transparent; outline: none; z-index:",
+    "pane": "442d8e64-e4ae-45a3-b34c-c7537c967d43",
+    "stack": "Error\n    at HTMLElement.focus (<anonymous>:11:16)\n    at pa.focus (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:30044)\n    at pa.activate (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:29961)\n    at pa._updateInputPosition (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:294:3313)\n    at pa.addDocRanges (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:29083)\n    at Object.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:311:50739)\n    at e.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:3134)\n    at t._next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:2801)\n    at t.next (http://fold.localhost:61620/embed-exa"
+  },
+  {
+    "time": 991,
+    "type": "focus-call",
+    "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); color: transparent; outline: none; z-index:",
+    "pane": "442d8e64-e4ae-45a3-b34c-c7537c967d43",
+    "stack": "Error\n    at HTMLElement.focus (<anonymous>:11:16)\n    at pa.focus (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:30044)\n    at pa.activate (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:29961)\n    at Object.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:330:103147)\n    at e.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:3134)\n    at t._next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:2801)\n    at t.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:2450)\n    at http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:7308\n    at hH (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W"
+  },
+  {
+    "time": 991.8000000119209,
+    "type": "focus-call",
+    "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); color: transparent; outline: none; z-index:",
+    "pane": "442d8e64-e4ae-45a3-b34c-c7537c967d43",
+    "stack": "Error\n    at HTMLElement.focus (<anonymous>:11:16)\n    at pa.focus (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:30044)\n    at pa.activate (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:29961)\n    at pa._updateInputPosition (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:294:3313)\n    at pa.addDocRanges (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:29083)\n    at Object.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:311:50739)\n    at e.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:3134)\n    at t._next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:2801)\n    at t.next (http://fold.localhost:61620/embed-exa"
+  },
+  {
+    "time": 991.9000000357628,
+    "type": "focus-call",
+    "element": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); color: transparent; outline: none; z-index:",
+    "pane": "442d8e64-e4ae-45a3-b34c-c7537c967d43",
+    "stack": "Error\n    at HTMLElement.focus (<anonymous>:11:16)\n    at pa.focus (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:30044)\n    at pa.activate (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:278:29961)\n    at Object.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:330:103147)\n    at e.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:3134)\n    at t._next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:2801)\n    at t.next (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:2450)\n    at http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W0.js:16:7308\n    at hH (http://fold.localhost:61620/embed-example/assets/UniverViewer-CS_4CwBO-CffVA0W"
+  }
+]

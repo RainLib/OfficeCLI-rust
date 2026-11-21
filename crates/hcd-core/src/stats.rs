@@ -40,7 +40,7 @@ pub(crate) fn referenced_hrefs(bundle: &Bundle) -> Result<HashSet<String>, HcdEr
 
 pub fn bundle_stats(bundle: &Bundle) -> Result<BundleStats, HcdError> {
     let head = bundle.manifest()?;
-    let mut referenced = HashSet::from(["manifest.json".to_string(), "styles.css".to_string()]);
+    let mut referenced = HashSet::from(["manifest.json".to_string(), head.styles_href.clone()]);
     let mut previous_references = HashSet::new();
     let mut latest_revision_added_bytes = 0u64;
     for revision in 0..=head.revision {
@@ -151,6 +151,10 @@ fn collect_revision_references(
         }
     }
     referenced.insert(record.asset_index_href.clone());
+    referenced.insert(record.styles_href.clone());
+    if let Some(rewrite) = record.canvas_rewrite {
+        referenced.insert(rewrite.inverse_href);
+    }
     let index: Vec<AssetDescriptor> = crate::bundle::read_json_bounded(
         &bundle.resolve_href(&record.asset_index_href)?,
         MAX_CONTROL_PART_BYTES,
@@ -206,6 +210,7 @@ fn eligible_for_gc(href: &str) -> bool {
         "annotations/sha256/",
         "assets/sha256/",
         "assets/indexes/sha256/",
+        "canvas/inverses/sha256/",
     ]
     .iter()
     .any(|prefix| href.starts_with(prefix))

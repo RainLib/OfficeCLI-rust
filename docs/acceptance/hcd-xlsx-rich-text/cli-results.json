@@ -1,0 +1,17 @@
+{
+  "temporaryArtifacts": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/hcd-xlsx-rich-nxawdt44",
+  "inlineAndSharedRichRunsVerified": true,
+  "duplicateTextKeepsIndependentStyles": true,
+  "phoneticReadingExcluded": true,
+  "unicodeTextSpliceKeepsPropertiesAndAnchor": true,
+  "nativeSourceExportRunsAndUntouchedPartsVerified": true,
+  "readbackRunsVerified": true,
+  "sourceUnchanged": true,
+  "fidelity": "HIGH",
+  "sameSourceOfficeVisualReference": false,
+  "boundaries": [
+    "Theme/indexed colour and font scheme are preserved as native properties; resolved appearance is not certified.",
+    "In-cell selection formatting, arbitrary rich clipboard paste and cross-device rich input drafts remain incomplete.",
+    "Source-free conversion remains semantic and does not preserve every run property."
+  ]
+}

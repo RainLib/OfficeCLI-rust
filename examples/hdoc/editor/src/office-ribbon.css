@@ -1,0 +1,58 @@
+/* Office command surfaces share the workspace theme, including embedded hosts. */
+.hcd-surface :is(.workspace.semantic-workspace, .image-workspace) .ribbon.office-ribbon {
+  position: relative; isolation: isolate; display: flex; flex: none; align-items: flex-start;
+  min-height: 48px; max-height: none; width: 100%; min-width: 0; gap: 8px;
+  padding: 7px 10px; overflow: visible; border: 0; border-bottom: 1px solid var(--line);
+  border-radius: 0 0 16px 16px; background: var(--surface, #fff); color: var(--ink);
+}
+.office-ribbon .ribbon-sections { display: flex; flex: 1; min-width: 0; align-items: stretch; gap: 5px; overflow: clip; }
+.office-ribbon[data-expanded="true"] .ribbon-sections { flex-wrap: wrap; row-gap: 10px; }
+.office-ribbon .ribbon-section-slot { display: flex; flex: none; min-width: 0; }
+.office-ribbon .ribbon-section-slot[hidden] { display: none; }
+.office-ribbon .ribbon-section-host { display: flex; width: max-content; max-width: 100%; min-width: 0; }
+.office-ribbon .ribbon-group { display: flex; flex-direction: column; min-width: 0; padding: 0 9px 0 4px; border-right: 1px solid var(--line); gap: 4px; }
+.office-ribbon .ribbon-group-controls { display: flex; align-items: center; gap: 3px; min-height: 32px; }
+.office-ribbon .ribbon-group-caption { display: none; color: var(--muted); font-size: 11px; line-height: 18px; text-align: center; }
+.office-ribbon .ribbon-section-host[data-expanded="true"] .ribbon-group { max-width: 360px; }
+.office-ribbon .ribbon-section-host[data-expanded="true"] .ribbon-group-controls { flex-wrap: wrap; max-width: 340px; min-height: 68px; align-content: flex-start; }
+.office-ribbon .ribbon-section-host[data-expanded="true"] .ribbon-group-caption { display: block; }
+.hcd-surface :is(.workspace.semantic-workspace, .image-workspace) .ribbon.office-ribbon button,
+.hcd-surface :is(.workspace.semantic-workspace, .image-workspace) .ribbon.office-ribbon select,
+.hcd-surface :is(.workspace.semantic-workspace, .image-workspace) .ribbon.office-ribbon input { font-family: inherit; font-size: 12px; }
+.hcd-surface :is(.workspace.semantic-workspace, .image-workspace) .ribbon.office-ribbon button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 32px; min-height: 32px; padding: 0 7px; border: 1px solid transparent; border-radius: 6px; color: var(--ink); background: transparent; white-space: nowrap; box-shadow: none; }
+.hcd-surface :is(.workspace.semantic-workspace, .image-workspace) .ribbon.office-ribbon button:not(:disabled):hover { background: var(--hover, #f1f4f5); border-color: var(--line); }
+.hcd-surface :is(.workspace.semantic-workspace, .image-workspace) .ribbon.office-ribbon button[aria-pressed="true"] { color: var(--accent, #216d5d); background: var(--accent-soft, #e8f2ee); border-color: color-mix(in srgb, var(--accent, #216d5d) 22%, transparent); }
+.hcd-surface :is(.workspace.semantic-workspace, .image-workspace) .ribbon.office-ribbon button:disabled { opacity: .38; cursor: default; }
+.office-ribbon svg { width: 17px; height: 17px; flex: none; stroke-width: 1.65; }
+.office-ribbon .ribbon-icon-command { width: 32px; min-width: 32px; padding: 0 !important; }
+.office-ribbon .ribbon-icon-command .ribbon-command-label { display: none; }
+.hcd-surface :is(.workspace.semantic-workspace, .image-workspace) .ribbon.office-ribbon :is(select, input:not([type="checkbox"]):not([type="color"])) { height: 30px; min-height: 30px; max-width: 180px; padding: 3px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface, #fff); color: var(--ink); box-shadow: none; }
+.hcd-surface :is(.workspace.semantic-workspace, .image-workspace) .ribbon.office-ribbon select { max-width: 150px; }
+.office-ribbon label { display: inline-flex; align-items: center; flex: none; gap: 5px; margin: 0; color: var(--muted); white-space: nowrap; }
+.hcd-surface :is(.workspace.semantic-workspace, .image-workspace) .ribbon.office-ribbon input[type="color"] { padding: 5px; width: 32px; min-width: 32px; height: 30px; border: 1px solid var(--line); border-radius: 6px; background: transparent; }
+.office-ribbon .ribbon-density-controls { display: flex; flex: none; align-items: center; gap: 2px; padding-left: 3px; border-left: 1px solid var(--line); }
+.office-ribbon .ribbon-density-controls button { width: 28px; padding: 0 !important; }
+.office-ribbon .ribbon-measure-bin { position: fixed; left: -100000px; top: 0; display: flex; width: max-content; visibility: hidden; pointer-events: none; z-index: -1; }
+.office-ribbon .ribbon-measure-bin .ribbon-section-host { max-width: none; }
+.office-ribbon .ribbon-more-panel { position: fixed; margin: 0; inset: auto; padding: 12px; max-width: calc(100vw - 24px); max-height: min(620px, 72dvh); overflow: auto; border: 1px solid var(--line); border-radius: 14px; background: var(--surface, #fff); color: var(--ink); box-shadow: 0 12px 40px #111a2426, 0 2px 8px #111a2410; }
+.office-ribbon .ribbon-more-panel:popover-open { display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; }
+.office-ribbon .ribbon-more-heading { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 0 0 8px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.office-ribbon .ribbon-more-heading button { width: 28px; height: 28px !important; min-height: 28px !important; }
+.office-ribbon .ribbon-more-panel .ribbon-section-host { max-width: 100%; width: auto; }
+.office-ribbon .ribbon-more-panel .ribbon-group { max-width: 100%; padding: 0; border: 0; }
+.office-ribbon .ribbon-more-panel .ribbon-group-controls { flex-wrap: wrap; max-width: 100%; }
+.office-ribbon .ribbon-more-panel .ribbon-group-caption { display: block; text-align: left; }
+.office-ribbon .ribbon-note { display: block; max-width: 300px; white-space: normal; line-height: 1.6; color: var(--muted); }
+.office-ribbon :is(.word-font-tools, .word-paragraph-tools) .ribbon-group-controls { gap: 3px; }
+.office-ribbon .ribbon-group-controls > .tool-group { display: flex !important; flex-wrap: wrap !important; gap: 4px !important; border: 0 !important; padding: 0 !important; }
+.office-ribbon :is(button, select, input):focus-visible { outline: 2px solid var(--accent, #216d5d); outline-offset: 2px; }
+@media (prefers-reduced-motion: no-preference) { .office-ribbon button { transition: background .12s ease, border-color .12s ease, color .12s ease; } }
+@media (max-width: 600px) { .hcd-surface :is(.workspace.semantic-workspace, .image-workspace) .ribbon.office-ribbon { padding-inline: 6px; gap: 4px; } .office-ribbon .ribbon-group { padding-inline: 3px 6px; } }
+
+.hcd-surface .image-toolbar:has(.office-ribbon) { overflow: visible; }
+.hcd-surface .image-toolbar-row:has(.office-ribbon) { align-items: flex-start; }
+
+.office-ribbon .ribbon-control-row { display: contents; }
+.office-ribbon .ribbon-section-host[data-expanded="true"] .ribbon-group-controls:has(> .ribbon-control-row) { flex-direction: column; align-items: flex-start; }
+.office-ribbon .ribbon-section-host[data-expanded="true"] .ribbon-control-row { display: flex; align-items: center; gap: 3px; }
+.office-ribbon .ribbon-more-panel .ribbon-control-row { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; }

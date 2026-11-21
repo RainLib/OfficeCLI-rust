@@ -1,0 +1,274 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-agent-workflow:1",
+  "additionalProperties": false,
+  "description": "Immutable dependency plan. Same-document steps must be ordered. Consume initial facts or ancestor outputs only; declare at most 64 total fact keys. Steps plus consumed facts must fit the 8000-character task limit.",
+  "properties": {
+    "documents": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "access": {
+            "enum": [
+              "read",
+              "write"
+            ]
+          },
+          "collaborationEpoch": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "documentId": {
+            "pattern": "^[A-Za-z0-9_-]{1,128}$",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "documentId",
+          "access",
+          "expectedRevision",
+          "collaborationEpoch"
+        ],
+        "type": "object"
+      },
+      "maxItems": 16,
+      "minItems": 2,
+      "type": "array"
+    },
+    "facts": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "documentId": {
+            "pattern": "^[A-Za-z0-9_-]{1,128}$",
+            "type": "string"
+          },
+          "key": {
+            "pattern": "^[A-Za-z0-9_-]{1,128}$",
+            "type": "string"
+          },
+          "nodeId": {
+            "pattern": "^n_[0-9a-f]{32}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "number": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "pointer": {
+            "description": "JSON Pointer into the selected real hcd_read response; value must be <=8 KiB. Formula calculation/value requires status=calculated.",
+            "maxLength": 512,
+            "pattern": "^/",
+            "type": "string"
+          },
+          "resource": {
+            "enum": [
+              "manifest",
+              "editor",
+              "sheet",
+              "index",
+              "chunk",
+              "node"
+            ]
+          },
+          "identity": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "pointer": {
+                "type": "string",
+                "pattern": "^/",
+                "maxLength": 512
+              },
+              "value": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "pointer",
+              "value"
+            ],
+            "description": "Optional stable block/cell identity at a second JSON Pointer. Extraction stops if the selected position now refers to another object."
+          }
+        },
+        "required": [
+          "key",
+          "documentId",
+          "resource",
+          "pointer"
+        ],
+        "type": "object"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "name": {
+      "maxLength": 120,
+      "minLength": 1,
+      "type": "string"
+    },
+    "steps": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "agentCount": {
+            "default": 1,
+            "maximum": 4,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "consumes": {
+            "items": {
+              "pattern": "^[A-Za-z0-9_-]{1,128}$",
+              "type": "string"
+            },
+            "maxItems": 64,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "dependsOn": {
+            "items": {
+              "pattern": "^[A-Za-z0-9_-]{1,128}$",
+              "type": "string"
+            },
+            "maxItems": 32,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "documentId": {
+            "pattern": "^[A-Za-z0-9_-]{1,128}$",
+            "type": "string"
+          },
+          "generateImages": {
+            "default": false,
+            "type": "boolean"
+          },
+          "mode": {
+            "default": "edit",
+            "enum": [
+              "edit",
+              "rebuild"
+            ]
+          },
+          "produces": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "documentId": {
+                  "pattern": "^[A-Za-z0-9_-]{1,128}$",
+                  "type": "string"
+                },
+                "key": {
+                  "pattern": "^[A-Za-z0-9_-]{1,128}$",
+                  "type": "string"
+                },
+                "nodeId": {
+                  "pattern": "^n_[0-9a-f]{32}$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "number": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "pointer": {
+                  "description": "JSON Pointer into the selected real hcd_read response; value must be <=8 KiB. Formula calculation/value requires status=calculated.",
+                  "maxLength": 512,
+                  "pattern": "^/",
+                  "type": "string"
+                },
+                "resource": {
+                  "enum": [
+                    "manifest",
+                    "editor",
+                    "sheet",
+                    "index",
+                    "chunk",
+                    "node"
+                  ]
+                },
+                "identity": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "pointer": {
+                      "type": "string",
+                      "pattern": "^/",
+                      "maxLength": 512
+                    },
+                    "value": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    }
+                  },
+                  "required": [
+                    "pointer",
+                    "value"
+                  ],
+                  "description": "Optional stable block/cell identity at a second JSON Pointer. Extraction stops if the selected position now refers to another object."
+                }
+              },
+              "required": [
+                "key",
+                "documentId",
+                "resource",
+                "pointer"
+              ],
+              "type": "object"
+            },
+            "maxItems": 64,
+            "type": "array"
+          },
+          "stepId": {
+            "pattern": "^[A-Za-z0-9_-]{1,128}$",
+            "type": "string"
+          },
+          "target": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "task": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "stepId",
+          "documentId",
+          "task"
+        ],
+        "type": "object"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "name",
+    "documents",
+    "steps"
+  ],
+  "type": "object"
+}

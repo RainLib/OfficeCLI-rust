@@ -1,0 +1,27 @@
+{
+  "rustServerTests": {
+    "status": "passed",
+    "passed": 81,
+    "failed": 0,
+    "command": "cargo test -p officecli --bin officecli hdoc_server:: --offline"
+  },
+  "editorBuild": {
+    "status": "passed",
+    "targets": [
+      "standalone",
+      "embed"
+    ],
+    "command": "npm run build"
+  },
+  "strictClippy": {
+    "status": "failed",
+    "affectedExistingFiles": [
+      "crates/hcd-core/src/patch.rs",
+      "crates/officecli/src/commands/query.rs",
+      "crates/officecli/src/watch.rs",
+      "crates/oxml/src/xml_util.rs",
+      "crates/pdf-handler/src/content_stream.rs",
+      "crates/pdf-handler/src/reader.rs"
+    ]
+  }
+}

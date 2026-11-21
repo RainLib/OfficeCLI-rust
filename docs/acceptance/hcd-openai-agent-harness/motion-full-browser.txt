@@ -1,0 +1,250 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test --output=/tmp/officecli-agent-motion-final
+
+
+Running 68 tests using 1 worker
+
+(node:59343) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓   1 e2e/agent-harness.spec.ts:198:69 › OpenAI harness edits and verifies txt (233ms)
+  ✓   2 e2e/agent-harness.spec.ts:198:69 › OpenAI harness edits and verifies md (220ms)
+  ✓   3 e2e/agent-harness.spec.ts:198:69 › OpenAI harness edits and verifies html (210ms)
+  ✓   4 e2e/agent-harness.spec.ts:198:69 › OpenAI harness edits and verifies docx (814ms)
+  ✓   5 e2e/agent-harness.spec.ts:198:69 › OpenAI harness edits and verifies xlsx (774ms)
+  ✓   6 e2e/agent-harness.spec.ts:198:69 › OpenAI harness edits and verifies pptx (233ms)
+  ✓   7 e2e/agent-harness.spec.ts:198:69 › OpenAI harness edits and verifies pdf (359ms)
+scripted model tool rejection: hcd_patch collaboration generation changed; reload the editor
+scripted model tool rejection: hcd_patch collaboration generation changed; reload the editor
+  ✓   8 e2e/agent-harness.spec.ts:211:1 › two model agents preserve successive edits after a real revision conflict (709ms)
+  ✓   9 e2e/agent-harness.spec.ts:225:1 › full PPT rebuild uses the configured team, replaces every old page and exports native content (6.0s)
+  ✓  10 e2e/agent-harness.spec.ts:269:1 › slide workers repair invalid content using validator feedback before any deck commit (3.7s)
+  ✓  11 e2e/agent-harness.spec.ts:280:51 › full PPT rebuild rejects TITLE_ONLY without touching old pages (2.7s)
+  ✓  12 e2e/agent-harness.spec.ts:280:51 › full PPT rebuild rejects OMIT_PRICE without touching old pages (1.7s)
+scripted model tool rejection: hcd_patch collaboration generation changed; reload the editor
+  ✓  13 e2e/agent-harness.spec.ts:289:1 › team workers share facts and commit separate assigned blocks (713ms)
+scripted model tool rejection: hcd_patch 写入超出此 Agent 认领的范围。
+scripted model tool rejection: hcd_patch 写入超出此 Agent 认领的范围。
+  ✓  14 e2e/agent-harness.spec.ts:300:1 › team workers cannot escape their assigned region (205ms)
+  ✓  15 e2e/agent-harness.spec.ts:308:1 › a human edit during team drafting prevents the stale deck replacement (5.6s)
+  ✓  16 e2e/agent-harness.spec.ts:321:1 › team cancellation releases all claims and another principal cannot cancel it (4.6s)
+  ✓  17 e2e/agent-harness.spec.ts:333:1 › automatic full remake ignores an obsolete title selection (3.8s)
+  ✓  18 e2e/agent-harness.spec.ts:342:1 › native export preflight refuses an unsupported replacement before any live document mutation (1.7s)
+  ✓  19 e2e/agent-harness.spec.ts:352:1 › HTTP and stdio MCP can configure, inspect and cancel harness teams with owner isolation (1.9s)
+  ✓  20 e2e/agent-harness.spec.ts:373:1 › MCP Streamable HTTP negotiates, isolates sessions and rejects stale or read-only edits (82ms)
+  ✓  21 e2e/agent-harness.spec.ts:399:45 › two MCP agents collaborate on xlsx while the preview stays synchronized (2.1s)
+  ✓  22 e2e/agent-harness.spec.ts:399:45 › two MCP agents collaborate on pptx while the preview stays synchronized (1.5s)
+  ✓  23 e2e/agent-harness.spec.ts:399:45 › two MCP agents collaborate on pdf while the preview stays synchronized (1.6s)
+  ✓  24 e2e/agent-harness.spec.ts:446:1 › right-click and slash commands target real content and launch a visible Agent task (1.5s)
+scripted model tool rejection: hcd_patch collaborators have unsaved edits; wait for a checkpoint, reread and replan
+scripted model tool rejection: hcd_patch collaborators have unsaved edits; wait for a checkpoint, reread and replan
+  ✓  25 e2e/agent-harness.spec.ts:464:1 › human pending drafts block Agent writes and read-only users cannot start tasks (1.1s)
+  ✓  26 e2e/agent-harness.spec.ts:476:1 › task cancellation preserves commits and cannot be used by another principal (211ms)
+  ✓  27 e2e/agent-harness.spec.ts:485:1 › offline human edits survive a newer Agent epoch and can be downloaded for comparison (1.7s)
+  ✘  28 e2e/agent-harness.spec.ts:508:1 › Rank formulas double, total recalculates, and automatic canvas cursors survive model latency (41.1s)
+(node:59730) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  29 e2e/agent-harness.spec.ts:588:38 › Agent pointers follow a continuous path and preserve the pptx canvas (4.5s)
+  ✓  30 e2e/agent-harness.spec.ts:588:38 › Agent pointers follow a continuous path and preserve the xlsx canvas (5.0s)
+  ✓  31 e2e/agent-harness.spec.ts:657:43 › Agent operation queue and borderless animated areas on md (5.1s)
+  ✓  32 e2e/agent-harness.spec.ts:657:43 › Agent operation queue and borderless animated areas on docx (6.5s)
+  ✓  33 e2e/agent-harness.spec.ts:657:43 › Agent operation queue and borderless animated areas on xlsx (7.5s)
+  ✓  34 e2e/revision-diff.spec.ts:7:1 › revision diffs distinguish insertion, deletion, formatting, movement and complex content (1ms)
+  ✓  35 e2e/revision-diff.spec.ts:22:1 › inline diffs preserve Unicode offsets and bound long replacements (1ms)
+  ✓  36 e2e/workspace.spec.ts:112:1 › document tabs retain independent unsaved text and collaboration sessions (1.4s)
+  ✓  37 e2e/workspace.spec.ts:134:1 › workspace reload restores multiple tabs, active document, preview and independent canvas zoom (1.3s)
+  ✓  38 e2e/workspace.spec.ts:165:1 › workspace restoration reauthenticates every tab and isolates expired access (860ms)
+  ✓  39 e2e/workspace.spec.ts:194:58 › workspace connections remain usable with blocked browser storage (574ms)
+  ✓  40 e2e/workspace.spec.ts:194:58 › workspace connections remain usable with quota browser storage (579ms)
+  ✘  41 e2e/workspace.spec.ts:213:1 › two real MCP agents show moving cursors, conflict safely and commit successive edits (1.7s)
+(node:60160) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  42 e2e/workspace.spec.ts:256:1 › complex Word tables retain canonical read-only layout in the semantic editor (1.6s)
+(node:60367) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  43 e2e/workspace.spec.ts:277:1 › Word table text editing checkpoints shared drafts and preserves source runs and merged cells (7.2s)
+  ✓  44 e2e/workspace.spec.ts:323:1 › Word table drafts survive an MCP table edit and reject stale commits (7.2s)
+  ✓  45 e2e/workspace.spec.ts:359:1 › Word typography survives text checkpoints, reload and historical comparisons (2.7s)
+  ✓  46 e2e/workspace.spec.ts:407:1 › Word pagination preserves sections, running regions, table rows and unsaved Unicode drafts (1.9s)
+  ✓  47 e2e/workspace.spec.ts:469:1 › Word source grids preserve font metrics, opt-outs, fixed lines and header anchors (1.2s)
+  ✘  48 e2e/workspace.spec.ts:493:1 › Word agents locate visible paginated content across sections and keep moving cursors (1.3s)
+(node:61133) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  49 e2e/workspace.spec.ts:539:1 › a grid agent highlights its cell without changing the local selection (3.5s)
+  ✓  50 e2e/workspace.spec.ts:564:1 › an MCP agent cannot overwrite a collaborator with pending unsaved text (779ms)
+  ✓  51 e2e/workspace.spec.ts:583:1 › semantic MCP commits refresh the browser across collaboration epochs (3.3s)
+  ✓  52 e2e/workspace.spec.ts:603:1 › workspace drawers, focus mode and preview preserve document state (1.3s)
+  ✓  53 e2e/workspace.spec.ts:641:1 › workbook preview keeps its canvas and refuses to discard an unapplied formula (1.4s)
+  ✓  54 e2e/workspace.spec.ts:660:1 › all seven formats use the content shell and enforce read-only preview (6.1s)
+  ✓  55 e2e/workspace.spec.ts:681:1 › phone workspace provides reachable drawers without page overflow (947ms)
+  ✓  56 e2e/workspace.spec.ts:704:1 › history previews and real diffs preserve drafts and enforce read permissions (2.4s)
+  ✓  57 e2e/workspace.spec.ts:776:1 › failed and superseded history requests cannot replace the current editor (1.5s)
+  ✓  58 e2e/workspace.spec.ts:798:1 › canvas zoom handles all formats and frames without scaling the page (5.0s)
+  ✓  59 e2e/workspace.spec.ts:824:1 › historical Word tables keep canonical layout and comparisons fit phones (1.2s)
+  ✓  60 e2e/workspace.spec.ts:841:1 › agent commits preserve preview, focus, zoom and the selected historical comparison (2.1s)
+  ✓  61 e2e/workspace.spec.ts:884:1 › history uses the selected outline and closes the mobile drawer after selection (1.1s)
+  ✓  62 e2e/workspace.spec.ts:916:1 › fixed text box initial focus preserves immediate full-text replacements (1.2s)
+  ✓  63 e2e/workspace.spec.ts:929:1 › fixed history saves drafts, pins even the latest revision read-only and restores the live deck (2.0s)
+  ✓  64 e2e/workspace.spec.ts:978:1 › fixed snapshot failures can retry and delayed requests cannot replace the selected revision (1.8s)
+  ✓  65 e2e/workspace.spec.ts:1018:1 › export menus use source-aware methods and prepare real TXT, XLSX and PDF artifacts (2.6s)
+  ✓  66 e2e/workspace.spec.ts:1048:1 › missing workbook sources fall back explicitly to content conversion (1.1s)
+  ✓  67 e2e/workspace.spec.ts:1069:1 › export capabilities follow the selected PDF revision and block historical HCD archives (1.5s)
+  ✓  68 e2e/workspace.spec.ts:1111:1 › export option failures retry and conversion failures never expose a download link (716ms)
+
+
+  1) e2e/agent-harness.spec.ts:508:1 › Rank formulas double, total recalculates, and automatic canvas cursors survive model latency
+
+    Error: expect(received).toBeGreaterThan(expected)
+
+    Expected: > 80
+    Received:   0.1470947265625
+
+    Call Log:
+    - Timeout 20000ms exceeded while waiting on the predicate
+
+      568 |   await expect(page.locator('.xlsx-formula-address')).toHaveText('A1')
+      569 |   await expect(cursor).toBeVisible()
+    > 570 |   await expect.poll(async()=>Math.abs((await cursor.boundingBox())!.x-cursorBeforeLocate!.x)).toBeGreaterThan(80)
+          |                                                                                               ^
+      571 |   await expect.poll(()=>page.locator('.agent-region[data-agent-grid-row]').evaluateAll((elements,top)=>elements.filter(el=>Number(el.getAttribute('data-agent-grid-row'))>=4).every(el=>el.getBoundingClientRect().top>=top-2),firstDataTop)).toBe(true)
+      572 |   await page.locator('.agent-operation-log summary').first().click()
+      573 |   await page.screenshot({path:info.outputPath('rank-agent-workspace.png')})
+        at /Users/will/Project/rainy/projects/OfficeCLI-rust/examples/hdoc/editor/e2e/agent-harness.spec.ts:570:95
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../../../../../../tmp/officecli-agent-motion-final/agent-harness-Rank-formula-267a7-rsors-survive-model-latency/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../../../../../../tmp/officecli-agent-motion-final/agent-harness-Rank-formula-267a7-rsors-survive-model-latency/error-context.md
+
+    Error Context: ../../../../../../../../../tmp/officecli-agent-motion-final/agent-harness-Rank-formula-267a7-rsors-survive-model-latency/error-context.md
+
+    attachment #4: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../../../../../../tmp/officecli-agent-motion-final/agent-harness-Rank-formula-267a7-rsors-survive-model-latency/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../../../../../../tmp/officecli-agent-motion-final/agent-harness-Rank-formula-267a7-rsors-survive-model-latency/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) e2e/workspace.spec.ts:213:1 › two real MCP agents show moving cursors, conflict safely and commit successive edits
+
+    Error: locator.boundingBox: Error: strict mode violation: locator('[data-agent-id="Agent A"]') resolved to 2 elements:
+        1) <div data-agent-id="Agent A" data-operation-replay="false" data-operation-phase="pending" class="agent-region phase-pending" data-agent-node-id="n_b13346ee577a9663bc1494ca0a4b30b0"></div> aka locator('.agent-workspace > div:nth-child(3)')
+        2) <div data-agent-id="Agent A" data-operation-replay="false" data-operation-phase="pending" class="agent-region phase-pending agent-cursor" data-agent-node-id="n_b13346ee577a9663bc1494ca0a4b30b0">…</div> aka locator('div').filter({ hasText: /^Agent A$/ })
+
+    Call log:
+      - waiting for locator('[data-agent-id="Agent A"]')
+
+
+      226 |     expect((await call(b,'hcd_activity',focus(nodes[1].nodeId))).error).toBeFalsy()
+      227 |     await expect(page.locator('.agent-cursor')).toHaveCount(2)
+    > 228 |     const first = await page.locator('[data-agent-id="Agent A"]').boundingBox()
+          |                                                                   ^
+      229 |     await page.screenshot({path:info.outputPath('agents-before-move.png')})
+      230 |     await call(a,'hcd_activity',focus(nodes[1].nodeId))
+      231 |     await expect.poll(async () => { const next = await page.locator('[data-agent-id="Agent A"]').boundingBox(); return next ? Math.abs(next.x-first!.x)+Math.abs(next.y-first!.y) : 0 }).toBeGreaterThan(8)
+        at /Users/will/Project/rainy/projects/OfficeCLI-rust/examples/hdoc/editor/e2e/workspace.spec.ts:228:67
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-two-real-MCP-age-b08b8-and-commit-successive-edits/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-two-real-MCP-age-b08b8-and-commit-successive-edits/error-context.md
+
+    Error Context: ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-two-real-MCP-age-b08b8-and-commit-successive-edits/error-context.md
+
+    attachment #4: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-two-real-MCP-age-b08b8-and-commit-successive-edits/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-two-real-MCP-age-b08b8-and-commit-successive-edits/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  3) e2e/workspace.spec.ts:256:1 › complex Word tables retain canonical read-only layout in the semantic editor
+
+    Error: expect(locator).toBeVisible() failed
+
+    Locator: locator('[data-agent-id="Word Agent"]')
+    Expected: visible
+    Error: strict mode violation: locator('[data-agent-id="Word Agent"]') resolved to 2 elements:
+        1) <div data-agent-id="Word Agent" data-operation-phase="active" data-operation-replay="false" class="agent-region phase-active">…</div> aka locator('.agent-region').first()
+        2) <div data-agent-id="Word Agent" data-operation-phase="active" data-operation-replay="false" class="agent-region phase-active agent-cursor">…</div> aka locator('div').filter({ hasText: /^Word Agent$/ })
+
+    Call log:
+      - Expect "toBeVisible" locator('[data-agent-id="Word Agent"]') with timeout 20000ms
+      - waiting for locator('[data-agent-id="Word Agent"]')
+
+
+      270 |     const opaque = projection.blocks.find((block: {readOnly:boolean}) => block.readOnly)
+      271 |     await call(client,'hcd_activity',{document_id:'complex-word',status:'reading',block_id:opaque.blockId,expected_revision:projection.revision,collaboration_epoch:auth.collaborationEpoch})
+    > 272 |     await expect(page.locator('[data-agent-id="Word Agent"]')).toBeVisible()
+          |                                                                ^
+      273 |     await page.screenshot({path:info.outputPath('word-agent-focus.png')})
+      274 |   } finally { await client.close() }
+      275 | })
+        at /Users/will/Project/rainy/projects/OfficeCLI-rust/examples/hdoc/editor/e2e/workspace.spec.ts:272:64
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-complex-Word-tab-24edd-yout-in-the-semantic-editor/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-complex-Word-tab-24edd-yout-in-the-semantic-editor/error-context.md
+
+    Error Context: ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-complex-Word-tab-24edd-yout-in-the-semantic-editor/error-context.md
+
+    attachment #4: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-complex-Word-tab-24edd-yout-in-the-semantic-editor/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-complex-Word-tab-24edd-yout-in-the-semantic-editor/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  4) e2e/workspace.spec.ts:493:1 › Word agents locate visible paginated content across sections and keep moving cursors
+
+    Error: expect(locator).toBeVisible() failed
+
+    Locator: locator('.document-tab-panel:not([hidden])').locator('[data-agent-id="Pages Agent A"]')
+    Expected: visible
+    Error: strict mode violation: locator('.document-tab-panel:not([hidden])').locator('[data-agent-id="Pages Agent A"]') resolved to 2 elements:
+        1) <div data-agent-id="Pages Agent A" data-operation-phase="active" data-operation-replay="false" class="agent-region phase-active">…</div> aka locator('.agent-region').first()
+        2) <div data-agent-id="Pages Agent A" data-operation-phase="active" data-operation-replay="false" class="agent-region phase-active agent-cursor">…</div> aka locator('div').filter({ hasText: /^Pages Agent A$/ })
+
+    Call log:
+      - Expect "toBeVisible" locator('.document-tab-panel:not([hidden])').locator('[data-agent-id="Pages Agent A"]') with timeout 20000ms
+      - waiting for locator('.document-tab-panel:not([hidden])').locator('[data-agent-id="Pages Agent A"]')
+
+
+      504 |     const focus = (blockId:string)=>({document_id:id,status:'reading',block_id:blockId,expected_revision:projection.revision,collaboration_epoch:auth.collaborationEpoch})
+      505 |     expect((await call(a,'hcd_activity',focus(blocks[0].blockId))).error).toBe(false)
+    > 506 |     await expect(active.locator('[data-agent-id="Pages Agent A"]')).toBeVisible()
+          |                                                                     ^
+      507 |     const target = blocks.find((block:{content:{inlines:Array<{text:string}>}})=>block.content.inlines.some(run=>run.text==='LANDSCAPE START'))
+      508 |     expect((await call(b,'hcd_activity',focus(target.blockId))).error).toBe(false)
+      509 |     const card = active.locator('.agent-activity').filter({hasText:'Pages Agent B'})
+        at /Users/will/Project/rainy/projects/OfficeCLI-rust/examples/hdoc/editor/e2e/workspace.spec.ts:506:69
+
+    attachment #1: screenshot (image/png) ──────────────────────────────────────────────────────────
+    ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-Word-agents-loca-9e242-ons-and-keep-moving-cursors/test-failed-1.png
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Error Context: ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-Word-agents-loca-9e242-ons-and-keep-moving-cursors/error-context.md
+
+    Error Context: ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-Word-agents-loca-9e242-ons-and-keep-moving-cursors/error-context.md
+
+    attachment #4: trace (application/zip) ─────────────────────────────────────────────────────────
+    ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-Word-agents-loca-9e242-ons-and-keep-moving-cursors/trace.zip
+    Usage:
+
+        npx playwright show-trace ../../../../../../../../../tmp/officecli-agent-motion-final/workspace-Word-agents-loca-9e242-ons-and-keep-moving-cursors/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  4 failed
+    e2e/agent-harness.spec.ts:508:1 › Rank formulas double, total recalculates, and automatic canvas cursors survive model latency
+    e2e/workspace.spec.ts:213:1 › two real MCP agents show moving cursors, conflict safely and commit successive edits
+    e2e/workspace.spec.ts:256:1 › complex Word tables retain canonical read-only layout in the semantic editor
+    e2e/workspace.spec.ts:493:1 › Word agents locate visible paginated content across sections and keep moving cursors
+  64 passed (3.5m)

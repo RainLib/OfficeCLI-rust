@@ -1,0 +1,15 @@
+{
+  "focusBefore": {
+    "active": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); color: transparent; outline: none; z-index: -2; caret-color: transparent; white-space: pre-wrap; user-select: text;\"></div>",
+    "editing": false,
+    "blocked": false,
+    "mode": "editable",
+    "revision": 2
+  },
+  "focusAfter": {
+    "tag": "DIV",
+    "role": null,
+    "cls": ""
+  },
+  "address": "B1"
+}

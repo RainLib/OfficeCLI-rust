@@ -1,377 +1,63 @@
-# OfficeCLI (Rust)
+<p align="center"><img src="docs/assets/readme/foldly-logo.svg" width="280" alt="Foldly · 折页" /></p>
 
-> **AI エージェント向けの純 Rust CLI — Office 文書と PDF の作成・読み取り・修正・レンダリング。**
+<h1 align="center">人と AI が、同じファイルで共同作業。</h1>
 
-**あらゆる AI エージェントに Word、Excel、PowerPoint、PDF の構造化制御を — たった一行のコードで。**
+<p align="center"><a href="README.md">English</a> · <a href="README_zh.md">中文</a> · <b>日本語</b> · <a href="README_ko.md">한국어</a></p>
 
-オープンソース。単一バイナリ。Office 不要。ランタイム依存なし。macOS、Linux、Windows 対応。
+![Foldly collaborative workspace](docs/assets/readme/foldly-banner.svg)
 
-[![GitHub Release](https://img.shields.io/github/v/release/RainLib/OfficeCli-rust)](https://github.com/RainLib/OfficeCli-rust/releases)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
+**Foldly は、文書、表計算、プレゼンテーション、ホワイトボードを一つにまとめた共同編集ワークスペースです。** 複数のファイルをタブで開き、人と AI が指定されたファイルや選択範囲を編集できます。Rust 製 CLI、MCP ツール、React 埋め込みコンポーネントも提供します。
 
-[English](README.md) | [中文](README_zh.md) | **日本語** | [한국어](README_ko.md)
-
-## 本リポジトリについて
-
-これは **[RainLib/OfficeCli-rust](https://github.com/RainLib/OfficeCli-rust)** — [OfficeCLI](https://github.com/iOfficeAI/OfficeCLI) の **Rust 再実装**です。OfficeCLI は [iOfficeAI](https://github.com/iOfficeAI) による C#/.NET 製のオープンソース Office 自動化 CLI です。
-
-| | **本リポジトリ (Rust)** | **[上流 (C#)](https://github.com/iOfficeAI/OfficeCLI)** |
-|---|---|---|
-| リポジトリ | [RainLib/OfficeCli-rust](https://github.com/RainLib/OfficeCli-rust) | [iOfficeAI/OfficeCLI](https://github.com/iOfficeAI/OfficeCLI) |
-| 言語 | 純 Rust | C# / .NET（自己完結バイナリ） |
-| バージョン | v0.1.x（コマンドパリティ） | v1.0.x（成熟、6k+ stars） |
-| ランタイム | なし — ネイティブバイナリ | バイナリ内蔵 .NET |
-| PDF サポート | ✅ 読み取り / 修正 / プレビュー | プラグイン経由 |
-| 目的 | 軽量・監査可能・埋め込み可能な Rust コア | フル機能の本番 CLI + エコシステム |
-
-Rust 版は同じ **CLI 思想** — パスベース DOM 操作、JSON 出力、TextOffsetMap、三層アーキテクチャ、MCP サーバー、ライブ HTML プレビュー — を共有し、C# 上流との**コマンドレベルパリティ**に到達しました。残りの差異はエッジケースの忠実度とエコシステムツールにあり、コマンドカバレッジにはありません。最大のエコシステム統合（AionUi、プラグインマーケット）が必要な場合は上流を、**依存関係ゼロの Rust バイナリ**や Rust 実装への貢献が必要な場合は本リポジトリをご利用ください。
-
-## 対応フォーマット
-
-| フォーマット | 読み取り | 修正 | 作成 | テキスト/オフセットマッピング | レガシー変換 |
-|-------------|---------|------|------|---------------------------|-------------|
-| Word (.docx) | ✅ | ✅ | ✅ | ✅ | ✅ .doc → .docx |
-| Excel (.xlsx) | ✅ | ✅ | ✅ | ✅ | ✅ .xls → .xlsx |
-| PowerPoint (.pptx) | ✅ | ✅ | ✅ | ✅ | ✅ .ppt → .pptx |
-| PDF (.pdf) | ✅ | ✅（テキスト置換、ページ削除） | ✅ | ✅ | — |
-
-## AI エージェント向け — テキスト/オフセット → パスマッピング
-
-対応フォーマットすべてが **TextOffsetMap** を出力 — 全テキストと文字オフセット→パスマッピング。エージェントはマップを読み、変更箇所を特定し、正確なパス（例: `/body/p[3]/r[1]`）で `set` を呼び出します。正規表現の推測は不要です。
-
-```bash
-officecli extract-text report.docx --with-offsets --json
-```
-
-```json
-{
-  "full_text": "こんにちは世界\n二番目の段落",
-  "spans": [
-    { "start": 0, "end": 5, "path": "/body/p[1]/r[1]", "text": "こんにちは", "element_type": "run" },
-    { "start": 5, "end": 7, "path": "/body/p[1]/r[2]", "text": "世界", "element_type": "run" },
-    { "start": 7, "end": 13, "path": "/body/p[2]/r[1]", "text": "二番目の段落", "element_type": "run" }
-  ],
-  "meta": { "format": "docx", "total_chars": 13, "total_spans": 3 }
-}
-```
-
-**エージェント設定** — スキルファイルをコーディングエージェントに渡す：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/SKILL.md
-```
-
-またはワンステップでバイナリとスキルをインストール（[インストール](#インストール)参照）。
-
-## クイックスタート
-
-```bash
-# 1. インストール（macOS / Linux）
-curl -fsSL https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.sh | bash
-# Windows (PowerShell):
-#   irm https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.ps1 | iex
-
-# 2. 空の PowerPoint を作成
-officecli create deck.pptx
-
-# 3. スライドを追加
-officecli add deck.pptx / --type slide --prop title="Hello, World!"
-
-# 4. HTML プレビュー
-officecli view deck.pptx --mode html
-
-# 5. ライブプレビュー — 編集のたびに自動更新
-officecli watch deck.pptx
-```
-
-別ターミナルで `add` / `set` / `remove` のたびに `http://localhost:26315` のブラウザが更新されます。
-
-## なぜ OfficeCLI？
-
-50 行の Python と 3 つのライブラリが必要だった作業が：
-
-```python
-from pptx import Presentation
-prs = Presentation()
-slide = prs.slides.add_slide(prs.slide_layouts[0])
-slide.shapes.title.text = "Q4 レポート"
-# ... さらに数十行 ...
-prs.save("deck.pptx")
-```
-
-1 コマンドに：
-
-```bash
-officecli add deck.pptx / --type slide --prop title="Q4 レポート"
-```
-
-**本 Rust ビルドの主要機能：**
-
-- **作成** 空白文書または構造化コンテンツの追加
-- **読み取り** テキスト、アウトライン、統計、注釈ビュー — プレーンテキストまたは `--json`
-- **修正** パスベースの `set` / `add` / `remove` / `move`
-- **検証** 文書構造と問題の検出
-- **抽出** オフセット→パスマッピング付きテキスト
-- **レンダリング** HTML/SVG による視覚的フィードバック
-- **変換** レガシー `.doc` / `.xls` / `.ppt` を現行形式へ
-- **PDF** — 読み取り、プレビュー、テキスト置換、ページ削除
-- **バッチ** — 1 サイクルで複数操作
-- **MCP** — JSON-RPC で全操作を AI ツールとして公開
-
-## インストール
-
-単一のネイティブバイナリとして配布。純 Rust — .NET、Python、Office 不要。
-
-**ワンライナーインストール：**
-
-```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.sh | bash
-
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.ps1 | iex
-```
-
-特定バージョンを指定：
-
-```bash
-OFFICECLI_VERSION=v0.1.2 curl -fsSL https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.sh | bash
-```
-
-**手動ダウンロード** [GitHub Releases](https://github.com/RainLib/OfficeCli-rust/releases)：
-
-| プラットフォーム | バイナリ |
-|----------------|---------|
-| macOS Apple Silicon | `officecli-mac-arm64` |
-| macOS Intel | `officecli-mac-x64` |
-| Linux x64 | `officecli-linux-x64` |
-| Linux ARM64 | `officecli-linux-arm64` |
-| Linux Alpine x64 | `officecli-linux-alpine-x64` |
-| Windows x64 | `officecli-win-x64.exe` |
-| Windows ARM64 | `officecli-win-arm64.exe` |
-
-```bash
-./scripts/download.sh
-./scripts/download.sh v0.1.2 all
-gh release download v0.1.2 --repo RainLib/OfficeCli-rust --pattern 'officecli-*'
-```
-
-> **リリース注意：** `v*` タグのプッシュで CI がバイナリを **Draft** Release にアップロードします。[Releases](https://github.com/RainLib/OfficeCli-rust/releases) で Publish してから `latest` URL を使用してください。タグは `github` リモート（`git push github v0.1.2`）にプッシュしてください。
-
-インストール確認：`officecli --version`
+このページは概要です。起動手順、コード例、対応範囲は [English](README.md) または [中文](README_zh.md) の完全版をご覧ください。
 
 ## 主な機能
 
-### 三層アーキテクチャ
+- **複数ファイルの管理：** ファイルライブラリ、共有プロジェクト、タブの並べ替え・グループ化・再開。選択範囲、表示位置、未送信 AI 下書きをファイルごとに保持します。
+- **人とエージェントの共同作業：** テキスト共同編集、名前付きカーソル、エージェントの操作状態、コメントと履歴。ホワイトボード内の Spec は人と AI が同じ文章を共同編集できます。
+- **ファイルをまたぐ AI：** 文章、セル範囲、図形を指定し、変更案を確認して適用。保存済みリビジョンの結果を次のステップに渡します。
+- **コンテンツの連携：** 文書や表の範囲をボードに参照として配置し、元ファイルを開くことや、ボードの内容を文書へ整理することができます。
+- **任意の UI：** チャットを非表示にして個別エディターを埋め込み、外部エージェントを MCP で接続できます。
 
-シンプルに始め、必要な時だけ深く。
+![Running workspace with file library and optional global AI](docs/assets/readme/workspace-home.png)
 
-| レイヤー | 用途 | コマンド |
-|---------|------|---------|
-| **L1：読み取り** | セマンティックビュー | `view`（text、annotated、outline、stats、issues、html、svg、screenshot、pdf、forms） |
-| **L2：DOM** | 構造化要素操作 | `get`、`query`、`set`、`add`、`add-part`、`remove`、`move`、`swap` |
-| **L3：生 XML** | XPath 直接アクセス | `raw`、`raw-set`、`validate` |
+## 対応する編集画面
 
-```bash
-officecli view report.docx --mode annotated
-officecli query report.docx paragraph
-officecli raw deck.pptx 'ppt/slides/slide1.xml'
-```
+| 種類 | 機能の例 |
+| --- | --- |
+| Word / DOCX | リッチテキスト、表、画像、コメント、変更履歴の確認、余白、見出しにリンクする目次、脚注。 |
+| XLSX / CSV / TSV | 仮想化グリッド、数式、セル書式、グラフ、並べ替え・フィルター、XLSX 印刷設定。 |
+| PowerPoint / PPTX | テキストと図形の編集、配置・グループ化、スライド並べ替え、ノート、対応するアニメーションと画面切り替え。 |
+| ホワイトボード | 付箋、コネクター、マインドマップ、フローチャート、Spec、参照、コメント、メンション、スタンプ。 |
+| PDF・テキスト・画像 | PDF の対応する文字・ページ操作と OCR、Markdown / HTML / TXT、PNG / JPEG / WebP の編集フロー。 |
 
-### ライブプレビューとレンダリング
+![Actual editable whiteboard](docs/assets/readme/whiteboard.jpg)
 
-```bash
-officecli view deck.pptx --mode html
-officecli view deck.pptx --mode svg
-officecli watch deck.pptx
-```
+## 起動と AI 接続
 
-### フォーマット変換
+CLI はネイティブ Rust バイナリです。Web ワークスペースには Node.js 24.13+ とアプリケーション・共同編集サービスも必要です。[ソースからの起動手順](README.md#run-the-workspace)を参照してください。
 
 ```bash
-officecli convert old.doc
-officecli convert old.xls -o new.xlsx
-officecli convert old.ppt --engine oxide
+cargo build --release -p officecli --bin officecli
+./target/release/officecli mcp
 ```
 
-| エンジン | 忠実度 | 速度 | 依存関係 |
-|---------|--------|------|---------|
-| `libreoffice`（デフォルト） | ~1:1 | 遅い | LibreOffice（~700MB） |
-| `oxide` | 低め | 高速 | なし（純 Rust） |
+MCP クライアントで、実際のバイナリの絶対パスと `mcp` 引数を登録します。クライアントごとに設定書式は異なります。文書サービスへの接続には別途サービス設定と権限が必要です。
 
-### レジデントモードとバッチ
+ワークスペースで選択範囲を指定して MCP 設定をコピーすると、外部エージェントは短期の Streamable HTTP 接続を使えます。`read_selection` と許可された編集ツールだけを利用し、バックエンドがファイル権限、選択範囲、リビジョンを確認します。[実行可能なコード例](README.md#connect-ai-and-coding-agents)。
 
-```bash
-officecli open report.docx
-officecli set report.docx /body/p[1]/r[1] --prop text="更新済み"
-officecli save report.docx
-officecli close report.docx
-```
+![Real cross-file AI review](docs/assets/readme/ai-collaboration.jpg)
 
-### PDF サポート
+## 開発資料
 
-```bash
-officecli view report.pdf --mode text
-officecli extract-text report.pdf --with-offsets --json
-officecli set report.pdf '/page[1]' --prop text="新しいコンテンツ"
-officecli remove report.pdf '/page[3]'
-officecli save report.pdf
-```
+- [ワークスペースの設定・権限・共有・デプロイ](apps/workspace/README.zh.md)
+- [埋め込み・外部エージェント・実行例](examples/hdoc/embed-host/README.md)
+- [HCD のインポート・変更・エクスポート](examples/hdoc/README.md)
+- [エージェント向けガイド](SKILL.md) · [形式別スキル](skills/)
+- [実際のスクリーンショットと出典](docs/assets/readme/screenshots.json)
+- [貢献方法](CONTRIBUTING.md)
 
-## AI 統合
-
-### MCP サーバー
-
-```bash
-officecli mcp
-```
-
-### 組み込みヘルプ
-
-```bash
-officecli --help
-officecli help docx paragraph
-officecli help xlsx cell --json
-```
-
-## 比較
-
-### 従来ツールとの比較
-
-| | OfficeCLI (Rust) | [OfficeCLI (C#)](https://github.com/iOfficeAI/OfficeCLI) | Microsoft Office | python-docx / openpyxl |
-|---|---|---|---|---|
-| オープンソース＆無料 | ✅ | ✅ | ✗ | ✅ |
-| AI ネイティブ CLI + JSON | ✅ | ✅ | ✗ | ✗ |
-| ゼロランタイム（単一バイナリ） | ✅ (Rust) | ✅ (.NET 内蔵) | ✗ | ✗ |
-| Word + Excel + PowerPoint + PDF | ✅ | ✅ | ✅ | 複数ライブラリ |
-| テキスト/オフセット → パス | ✅ | ✅ | ✗ | ✗ |
-| ライブ HTML プレビュー | ✅ | ✅ | ✗ | ✗ |
-| MCP サーバー | ✅ | ✅ | ✗ | ✗ |
-| ヘッドレス / CI / Docker | ✅ | ✅ | ✗ | ✅ |
-
-### 上流 OfficeCLI (C#) との比較
-
-| 機能 | 上流 (C#) | 本リポジトリ (Rust) |
-|------|-----------|-------------------|
-本 Rust 移植版は C# 上流と**API 互換**（同じコマンド名、パス構文、`--prop` 規約）であり、**コマンドレベルパリティ**に到達しました。残りの差異はエッジケースの忠実度とエコシステムツールにあり、コマンドカバレッジにはありません。
-
-| 機能 | 上流 (C#) | 本リポジトリ (Rust) |
-|------|-----------|-------------------|
-| テンプレート `merge` | ✅ | ✅ |
-| `view screenshot`（PNG） | ✅ | ✅（ヘッドレス Chrome/Edge/Firefox） |
-| `view pdf`（PDF エクスポート） | ✅ | ✅（ヘッドレス Chromium `--print-to-pdf`） |
-| `view forms`（SDT フォームフィールド） | ✅ | ✅（docx SDT 解析） |
-| `swap`、`refresh`、`plugins` | ✅ | ✅ |
-| `add-part`（チャート/ヘッダー/フッター） | ✅ | ✅ |
-| `import`（CSV/TSV → xlsx） | ✅ | ✅ |
-| `mark/unmark/marks/goto`（watch） | ✅ | ✅（watch サーバールート） |
-| `officecli install` | ✅ | ✅（バイナリ + スキル + MCP） |
-| 数式エンジン（150+ 関数） | ✅ | ✅（80+ 関数） |
-| ピボットテーブル（一覧） | ✅ | ✅（一覧 + ソース範囲） |
-| Morph トランジション（レポート） | ✅ | ✅（検出 + 候補カウント） |
-| 3D モデル | ✅ | ✅（HTML プレビュー） |
-| Python SDK | ✅ | ✅（Unix ドメインソケット IPC） |
-| CLI スモーク＆統合テスト | ✅ | ✅（39 CLI + 32 ユニットテスト） |
-| `cargo clippy -D warnings` クリーン | 該当なし | ✅ |
-| AionUi GUI | ✅ | 該当なし |
-| Wiki と成熟したエコシステム | ✅ | 初期段階 |
-
-詳細は [iOfficeAI/OfficeCLI Wiki](https://github.com/iOfficeAI/OfficeCLI/wiki) を参照。
-
-## コマンドリファレンス
-
-| コマンド | 説明 |
-|---------|------|
-| `create` | 空白 `.docx` / `.xlsx` / `.pptx` / `.pdf` を作成 |
-| `view` | コンテンツ表示（text、annotated、outline、stats、issues、html、svg、screenshot、pdf、forms） |
-| `get` | 要素と子要素を取得（`--depth N`、`--json`） |
-| `query` | CSS 風クエリ |
-| `set` | 要素のプロパティを変更 |
-| `add` | 要素を追加 |
-| `add-part` | ドキュメントパート（チャート/ヘッダー/フッター）を作成し rel ID を返す |
-| `remove` | 要素を削除 |
-| `move` | 要素を移動 |
-| `swap` | 2つの要素を交換（段落/スライド/セル） |
-| `save` | 変更をファイルに保存 |
-| `validate` | ドキュメント構造を検証 |
-| `extract-text` | テキストとオフセット→パスマッピングを抽出 |
-| `convert` | 旧形式を変換（`.doc`/`.xls`/`.ppt`）（`--engine libreoffice|oxide`） |
-| `batch` | 複数操作を1サイクルで実行 |
-| `dump` | ドキュメント構造を再生可能 JSON にシリアライズ |
-| `raw` | 生 XML を表示 |
-| `raw-set` | XPath で生 XML を変更（`setattr`、`remove`） |
-| `import` | CSV/TSV データを Excel シートにインポート |
-| `merge` | テンプレートプレースホルダー（`{{key}}`）と JSON データをマージ |
-| `refresh` | 派生フィールドを更新（目次、相互参照） |
-| `watch` | ライブプレビュー（自動リフレッシュ） |
-| `unwatch` | watch サーバーを停止 |
-| `open` / `close` | レジデントモード（Unix） |
-| `plugins` | プラグインの一覧/検査/リント（`list`、`info`、`lint`） |
-| `install` | バイナリ、スキル、MCP 設定をインストール（`--dry-run`、`--prefix`） |
-| `info` | ツールまたはドキュメントトピックの情報 |
-| `mcp` | MCP サーバーを起動（AI ツール統合） |
-
-グローバルフラグ：`--json`
-
-## ユースケース
-
-**開発者** — CI/CD 自動化、Docker ヘッドレス処理、軽量 Rust バイナリの埋め込み
-
-**AI エージェント** — TextOffsetMap による精密編集、`watch` による視覚フィードバック、MCP 統合
-
-**チーム** — 監査可能な Rust コードによる内部自動化、上流からの段階的移行
-
-## ソースからビルド
-
-[Rust](https://rustup.rs/) 1.75+（CI は 1.90.0）が必要。
-
-```bash
-git clone https://github.com/RainLib/OfficeCli-rust.git
-cd OfficeCli-rust
-cargo build --release
-```
-
-```bash
-make dist
-make download VERSION=v0.1.2 PLATFORM=all
-make smoke
-```
-
-## プロジェクト構成
-
-```
-OfficeCli-rust/
-├── Cargo.toml
-├── install.sh / install.ps1
-├── scripts/download.sh
-├── SKILL.md
-├── crates/（officecli, handler-common, oxml, docx/xlsx/pptx/pdf-handler）
-├── examples/
-└── skills/
-```
-
-## コントリビューション
-
-[CONTRIBUTING.md](CONTRIBUTING.md) を参照。Issue：[GitHub Issues](https://github.com/RainLib/OfficeCli-rust/issues)
-
-上流参考実装：[iOfficeAI/OfficeCLI](https://github.com/iOfficeAI/OfficeCLI)
+対応機能は形式とファイルにより異なります。すべての Office 機能やピクセル単位の一致を保証するものではありません。複数ファイルは個別にコミットされ、互いに矛盾する編集は再計画が必要です。詳細は [現在の制限](README.md#current-boundaries)をご確認ください。
 
 ## ライセンス
 
-[Apache License 2.0](LICENSE)
-
----
-
-[GitHub — RainLib/OfficeCli-rust](https://github.com/RainLib/OfficeCli-rust) | [上流 — iOfficeAI/OfficeCLI](https://github.com/iOfficeAI/OfficeCLI) | [Releases](https://github.com/RainLib/OfficeCli-rust/releases)
-
-<!-- LLM/agent discovery metadata
-tool: officecli
-repo: RainLib/OfficeCli-rust
-upstream: iOfficeAI/OfficeCLI
-type: cli
-language: rust
-formats: docx, xlsx, pptx, pdf
-license: Apache-2.0
-skill-file: SKILL.md
--->
+[Apache License 2.0](LICENSE)。コマンドモデルの原点は [iOfficeAI/OfficeCLI](https://github.com/iOfficeAI/OfficeCLI) です。Excalidraw、Yjs、Tiptap、Univer などの各ライセンスを尊重します。

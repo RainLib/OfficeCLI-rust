@@ -1,0 +1,65 @@
+{
+  "status": "passed",
+  "root": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1",
+  "commands": [
+    [
+      "create",
+      "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1/board.excalidraw"
+    ],
+    [
+      "hdoc",
+      "import",
+      "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1/board.excalidraw",
+      "--output",
+      "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1/board.hcd",
+      "--document-id",
+      "cli-board"
+    ],
+    [
+      "hdoc",
+      "canvas",
+      "--bundle",
+      "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1/board.hcd",
+      "--patch",
+      "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1/patch.json",
+      "--author",
+      "local-user",
+      "--json"
+    ],
+    [
+      "hdoc",
+      "canvas",
+      "--bundle",
+      "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1/board.hcd",
+      "--json"
+    ],
+    [
+      "hdoc",
+      "validate",
+      "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1/board.hcd",
+      "--json"
+    ],
+    [
+      "hdoc",
+      "export",
+      "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1/board.hcd",
+      "--output",
+      "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1/export.excalidraw"
+    ],
+    [
+      "hdoc",
+      "pack",
+      "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1/board.hcd",
+      "--output",
+      "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1/portable.hcd"
+    ],
+    [
+      "hdoc",
+      "unpack",
+      "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1/portable.hcd",
+      "--output",
+      "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-canvas-cli-rw2v6wk1/restored"
+    ]
+  ],
+  "nativeElements": 1
+}

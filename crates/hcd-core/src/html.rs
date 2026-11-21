@@ -1,7 +1,20 @@
-use crate::{hash_bytes, HcdError, ImageGeometry, ImageGeometryUnit};
+use crate::{hash_bytes, DocxPictureLayout, HcdError, ImageGeometry, ImageGeometryUnit};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::collections::BTreeMap;
+
+/// Navigable links in canonical HTML and semantic edits. Relative file URLs
+/// have no stable base inside a bundle. Length budgets belong to the caller.
+pub fn is_safe_hyperlink(value: &str) -> bool {
+    if value.is_empty() || value.contains('\\') || value.chars().any(char::is_control) {
+        return false;
+    }
+    let lower = value.to_ascii_lowercase();
+    value.starts_with('#')
+        || ["https://", "http://", "mailto:", "tel:"]
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+}
 
 /// Extracts canonical editable text from one bounded HCD HTML fragment.
 ///
@@ -11,7 +24,8 @@ pub fn extract_html_text_nodes(html: &str) -> Result<BTreeMap<String, String>, H
     let mut reader = Reader::from_str(html);
     reader.config_mut().check_end_names = true;
     let mut buffer = Vec::with_capacity(16 * 1024);
-    let mut current: Option<(String, Vec<u8>, String)> = None;
+    let mut current: Option<(String, Vec<u8>, String, usize)> = None;
+    let mut depth = 0usize;
     let mut nodes = BTreeMap::new();
 
     loop {
@@ -20,6 +34,7 @@ pub fn extract_html_text_nodes(html: &str) -> Result<BTreeMap<String, String>, H
             .map_err(|error| HcdError::InvalidBundle(format!("HTML XML parse error: {error}")))?;
         match event {
             Event::Start(start) => {
+                depth += 1;
                 let (node_id, has_node_hash) = node_attributes(&reader, &start)?;
                 if has_node_hash {
                     let node_id = node_id.ok_or_else(|| {
@@ -32,7 +47,12 @@ pub fn extract_html_text_nodes(html: &str) -> Result<BTreeMap<String, String>, H
                             "nested canonical text nodes are forbidden".to_string(),
                         ));
                     }
-                    current = Some((node_id, start.name().as_ref().to_vec(), String::new()));
+                    current = Some((
+                        node_id,
+                        start.name().as_ref().to_vec(),
+                        String::new(),
+                        depth,
+                    ));
                 }
             }
             Event::Empty(empty) => {
@@ -50,34 +70,34 @@ pub fn extract_html_text_nodes(html: &str) -> Result<BTreeMap<String, String>, H
                 }
             }
             Event::Text(text) => {
-                if let Some((_, _, value)) = &mut current {
+                if let Some((_, _, value, _)) = &mut current {
                     value.push_str(&text.unescape().map_err(|error| {
                         HcdError::InvalidBundle(format!("invalid HTML text: {error}"))
                     })?);
                 }
             }
             Event::CData(text) => {
-                if let Some((_, _, value)) = &mut current {
+                if let Some((_, _, value, _)) = &mut current {
                     value.push_str(&reader.decoder().decode(text.as_ref()).map_err(|error| {
                         HcdError::InvalidBundle(format!("invalid HTML CDATA: {error}"))
                     })?);
                 }
             }
             Event::End(end) => {
-                if current
-                    .as_ref()
-                    .is_some_and(|(_, name, _)| name.as_slice() == end.name().as_ref())
-                {
-                    let (node_id, _, text) = current.take().expect("checked current text node");
+                if current.as_ref().is_some_and(|(_, name, _, node_depth)| {
+                    *node_depth == depth && name.as_slice() == end.name().as_ref()
+                }) {
+                    let (node_id, _, text, _) = current.take().expect("checked current text node");
                     insert_unique(&mut nodes, node_id, text)?;
                 }
+                depth = depth.saturating_sub(1);
             }
             Event::Eof => break,
             _ => {}
         }
         buffer.clear();
     }
-    if let Some((node_id, _, _)) = current {
+    if let Some((node_id, _, _, _)) = current {
         return Err(HcdError::InvalidBundle(format!(
             "canonical text node {node_id} was not closed"
         )));
@@ -91,6 +111,19 @@ pub struct HtmlImageNode {
     pub visual_hash: String,
     pub asset_hash: Option<String>,
     pub geometry: Option<ImageGeometry>,
+    pub docx_drawing_id: Option<u32>,
+    pub docx_picture_layout: Option<DocxPictureLayout>,
+}
+
+pub(crate) fn image_visual_hash_with_layout(
+    asset: Option<&str>,
+    geometry: Option<&ImageGeometry>,
+    layout: Option<&DocxPictureLayout>,
+) -> String {
+    let base = image_visual_hash(asset, geometry);
+    let Some(layout) = layout else { return base };
+    let value = serde_json::to_string(layout).expect("layout serialization is infallible");
+    hash_bytes(format!("officecli-hcd-word-picture/1\0{base}\0{value}").as_bytes())
 }
 
 pub fn image_visual_hash(asset_hash: Option<&str>, geometry: Option<&ImageGeometry>) -> String {
@@ -141,7 +174,21 @@ pub fn extract_html_image_nodes(html: &str) -> Result<BTreeMap<String, HtmlImage
                 };
                 let asset_hash = attributes.get("data-hcd-asset-hash").cloned();
                 let geometry = image_geometry_from_attributes(&attributes)?;
-                let actual_hash = image_visual_hash(asset_hash.as_deref(), geometry.as_ref());
+                let docx_drawing_id = attributes
+                    .get("data-hcd-drawing-id")
+                    .and_then(|id| id.parse::<u32>().ok());
+                let docx_picture_layout = attributes
+                    .get("data-hcd-docx-picture-layout")
+                    .map(|config| serde_json::from_str::<DocxPictureLayout>(config))
+                    .transpose()?;
+                if let Some(layout) = docx_picture_layout.as_ref() {
+                    crate::validate_docx_picture_layout(layout)?;
+                }
+                let actual_hash = image_visual_hash_with_layout(
+                    asset_hash.as_deref(),
+                    geometry.as_ref(),
+                    docx_picture_layout.as_ref(),
+                );
                 if actual_hash != *declared_hash {
                     return Err(HcdError::InvalidBundle(format!(
                         "image node {node_id} visual hash {declared_hash} does not match {actual_hash}"
@@ -154,6 +201,8 @@ pub fn extract_html_image_nodes(html: &str) -> Result<BTreeMap<String, HtmlImage
                             visual_hash: actual_hash,
                             asset_hash,
                             geometry,
+                            docx_drawing_id,
+                            docx_picture_layout,
                         },
                     )
                     .is_some()
@@ -169,6 +218,92 @@ pub fn extract_html_image_nodes(html: &str) -> Result<BTreeMap<String, HtmlImage
         buffer.clear();
     }
     Ok(nodes)
+}
+
+/// Script faces a `text.font` patch pinned onto one mapped node.
+///
+/// Only nodes carrying `data-hcd-font-patched="true"` are reported, so a face the
+/// source document already had (recorded on the run wrapper as `data-hcd-font*`
+/// without a patch marker) stays out of this map and out of any rewrite.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HtmlFontNode {
+    pub latin: Option<String>,
+    pub east_asia: Option<String>,
+    pub bidi: Option<String>,
+}
+
+impl HtmlFontNode {
+    pub fn is_empty(&self) -> bool {
+        self.latin.is_none() && self.east_asia.is_none() && self.bidi.is_none()
+    }
+}
+
+pub fn extract_html_font_nodes(html: &str) -> Result<BTreeMap<String, HtmlFontNode>, HcdError> {
+    let mut reader = Reader::from_str(html);
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::with_capacity(16 * 1024);
+    let mut nodes = BTreeMap::new();
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("HTML XML parse error: {error}")))?;
+        match event {
+            Event::Start(start) | Event::Empty(start) => {
+                let attributes = decoded_attributes(&reader, &start)?;
+                if attributes.get("data-hcd-font-patched").map(String::as_str) != Some("true") {
+                    buffer.clear();
+                    continue;
+                }
+                let node_id = attributes.get("data-hcd-id").ok_or_else(|| {
+                    HcdError::InvalidBundle(
+                        "patched font marker is present without data-hcd-id".to_string(),
+                    )
+                })?;
+                let font = HtmlFontNode {
+                    latin: slot(&attributes, "data-hcd-font-latin")?,
+                    east_asia: slot(&attributes, "data-hcd-font-east-asia")?,
+                    bidi: slot(&attributes, "data-hcd-font-bidi")?,
+                };
+                if font.is_empty() {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "patched font node {node_id} records no script face"
+                    )));
+                }
+                if nodes.insert(node_id.clone(), font).is_some() {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "duplicate canonical font node {node_id}"
+                    )));
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(nodes)
+}
+
+/// One `data-hcd-font-*` slot value. Family tokens written by `text.font` are
+/// already restricted to characters safe for an OOXML attribute, so a value that
+/// needs escaping is treated as a broken bundle rather than silently forwarded.
+fn slot(attributes: &BTreeMap<String, String>, name: &str) -> Result<Option<String>, HcdError> {
+    let Some(value) = attributes.get(name) else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return Err(HcdError::InvalidBundle(format!(
+            "invalid {name} value in a patched font node"
+        )));
+    }
+    if trimmed.contains(['<', '>', '"', '\'', ';', ':', '&'])
+        || trimmed.chars().any(|character| character.is_control())
+    {
+        return Err(HcdError::InvalidBundle(format!(
+            "{name} value in a patched font node contains a forbidden character"
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 fn decoded_attributes<B: std::io::BufRead>(
@@ -357,6 +492,7 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
                 | "unicode-bidi"
                 | "display"
                 | "text-align"
+                | "white-space"
                 | "margin-left"
                 | "margin-right"
                 | "margin-top"
@@ -367,6 +503,9 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
                 | "break-before"
                 | "width"
                 | "min-width"
+                | "max-width"
+                | "margin"
+                | "object-fit"
                 | "height"
                 | "min-height"
                 | "table-layout"
@@ -393,6 +532,8 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
                 | "text-orientation"
                 | "flex-direction"
                 | "justify-content"
+                | "--hcd-line-rule"
+                | "--hcd-snap-grid"
         ) {
             return Err(HcdError::InvalidBundle(format!(
                 "inline CSS property {property} is not allowed"
@@ -415,6 +556,14 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
             )));
         }
         let normalized_value = value.to_ascii_lowercase();
+        if (property == "--hcd-line-rule"
+            && !matches!(normalized_value.as_str(), "auto" | "exact" | "atleast"))
+            || (property == "--hcd-snap-grid" && !matches!(value, "0" | "1"))
+        {
+            return Err(HcdError::InvalidBundle(format!(
+                "inline CSS value for {property} is not allowed"
+            )));
+        }
         if normalized_value.contains("url(") {
             return Err(HcdError::InvalidBundle(format!(
                 "inline CSS value for {property} is unsafe"
@@ -477,20 +626,14 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
         if property == "transform-origin"
             && !matches!(
                 normalized_value.as_str(),
-                "center" | "top" | "bottom" | "left" | "right"
+                "center" | "top" | "bottom" | "left" | "right" | "top left"
             )
         {
             return Err(HcdError::InvalidBundle(format!(
                 "inline CSS transform-origin {value} is not allowed"
             )));
         }
-        if property == "transform"
-            && !(normalized_value.starts_with("rotate(")
-                && normalized_value.ends_with("deg)")
-                && normalized_value[7..normalized_value.len() - 4]
-                    .parse::<f64>()
-                    .is_ok())
-        {
+        if property == "transform" && !valid_transform(&normalized_value) {
             return Err(HcdError::InvalidBundle(format!(
                 "inline CSS transform {value} is not allowed"
             )));
@@ -513,6 +656,41 @@ pub(crate) fn validate_inline_style(style: &str) -> Result<(), HcdError> {
     Ok(())
 }
 
+fn valid_transform(value: &str) -> bool {
+    let number = |text: &str| {
+        text.parse::<f64>()
+            .is_ok_and(|number| number.is_finite() && number.abs() <= 1e12)
+    };
+    if let Some(angle) = value
+        .strip_prefix("rotate(")
+        .and_then(|text| text.strip_suffix("deg)"))
+    {
+        return number(angle);
+    }
+    let Some(matrix) = value
+        .strip_prefix("matrix(")
+        .and_then(|text| text.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let mut entries = matrix.split(',');
+    (0..6).all(|_| entries.next().is_some_and(number)) && entries.next().is_none()
+}
+
+/// Escapes text for an HTML or XML text run.
+pub(crate) fn escape_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Escapes text for a quoted attribute value.
+pub(crate) fn escape_attribute(text: &str) -> String {
+    escape_text(text)
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,6 +702,38 @@ mod tests {
         assert_eq!(nodes.get("n_1").unwrap(), "甲&😀");
         assert_eq!(nodes.get("n_2").unwrap(), "");
         assert!(!nodes.contains_key("block"));
+    }
+
+    #[test]
+    fn font_nodes_are_only_the_patched_ones() {
+        let html = concat!(
+            r#"<span class="hcd-run" data-hcd-font-latin="Calibri">"#,
+            r#"<span data-hcd-id="n_1" data-hcd-node-hash="h">plain</span>"#,
+            r#"<span data-hcd-id="n_2" data-hcd-node-hash="h" style="font-family:'Brand Serif'" "#,
+            r#"data-hcd-font="Brand Serif" data-hcd-font-latin="Brand Serif" "#,
+            r#"data-hcd-font-east-asia="Brand Gothic" data-hcd-font-patched="true">pinned</span>"#,
+            "</span>",
+        );
+        let nodes = extract_html_font_nodes(html).unwrap();
+        assert!(nodes.is_empty() || nodes.contains_key("n_2"));
+        assert_eq!(nodes.len(), 1);
+        let font = nodes.get("n_2").expect("patched node");
+        assert_eq!(font.latin.as_deref(), Some("Brand Serif"));
+        assert_eq!(font.east_asia.as_deref(), Some("Brand Gothic"));
+        assert_eq!(font.bidi, None);
+        assert!(!nodes.contains_key("n_1"));
+    }
+
+    #[test]
+    fn a_patched_font_node_without_a_face_or_with_markup_is_broken() {
+        let missing = r#"<span data-hcd-id="n_1" data-hcd-font-patched="true">x</span>"#;
+        assert!(extract_html_font_nodes(missing).is_err());
+        let no_id = r#"<span data-hcd-font-patched="true">x</span>"#;
+        assert!(extract_html_font_nodes(no_id).is_err());
+        let markup = r#"<span data-hcd-id="n_1" data-hcd-font-patched="true" data-hcd-font-latin="A<b">x</span>"#;
+        assert!(extract_html_font_nodes(markup).is_err());
+        let blank = r#"<span data-hcd-id="n_1" data-hcd-font-patched="true" data-hcd-font-latin="  ">x</span>"#;
+        assert!(extract_html_font_nodes(blank).is_err());
     }
 
     #[test]
@@ -557,5 +767,10 @@ mod tests {
         assert!(validate_inline_style("background-image:url(relative.png)").is_err());
         assert!(validate_inline_style("transform:translate(10px)").is_err());
         assert!(validate_inline_style("writing-mode:sideways-lr").is_err());
+        assert!(validate_inline_style("--hcd-line-rule:atLeast;--hcd-snap-grid:1").is_ok());
+        assert!(validate_inline_style("--hcd-line-rule:exact;--hcd-snap-grid:0").is_ok());
+        assert!(validate_inline_style("--hcd-line-rule:inherit").is_err());
+        assert!(validate_inline_style("--hcd-snap-grid:2").is_err());
+        assert!(validate_inline_style("--arbitrary-property:1").is_err());
     }
 }

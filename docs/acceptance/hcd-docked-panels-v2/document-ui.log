@@ -1,0 +1,23 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test workspace.spec.ts --output=/tmp/officecli-docked-doc-results --grep docked panels never|shared side panels match|mobile docked panels|PPT shape properties|all seven formats use|workspace drawers, focus|workspace reload restores|appearance follows|dark workspace keeps
+
+(node:65017) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 9 tests using 1 worker
+
+(node:65094) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:65094) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+  ✓  1 e2e/workspace.spec.ts:1520:1 › workspace reload restores multiple tabs, active document, preview and independent canvas zoom (2.2s)
+  ✓  2 e2e/workspace.spec.ts:2232:1 › workspace drawers, focus mode and export preserve document state (1.2s)
+  ✓  3 e2e/workspace.spec.ts:2286:1 › all seven formats use the content shell and enforce read-only preview (7.4s)
+  ✓  4 e2e/workspace.spec.ts:3161:1 › appearance follows the system, persists overrides and preserves the live editor (1.2s)
+  ✓  5 e2e/workspace.spec.ts:3196:1 › dark workspace keeps all seven document surfaces and native canvas instances (7.3s)
+  ✓  6 e2e/workspace.spec.ts:3247:1 › mobile docked panels replace the content column without a scrim and retain the composer draft (864ms)
+  ✓  7 e2e/workspace.spec.ts:3314:1 › docked panels never cover the document and restore space without replacing editors (6.3s)
+  ✓  8 e2e/workspace.spec.ts:3450:1 › PPT shape properties follow the design and commit real typography and geometry (1.6s)
+  ✓  9 e2e/workspace.spec.ts:3502:1 › shared side panels match the latest Pen components across document formats (11.2s)
+
+  9 passed (54.7s)

@@ -1,0 +1,1883 @@
+[
+  {
+    "from": "docx",
+    "to": "docx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 3 HCD chunks",
+        "in-process Rust output generation and target structure validation",
+        "block fonts pinned by text.font on 23 generated paragraph(s)"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .docx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <script> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 5843,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "docx",
+    "to": "xlsx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 3 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .xlsx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <script> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 5545,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "docx",
+    "to": "pptx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 3 HCD chunks",
+        "in-process Rust output generation and target structure validation",
+        "block fonts pinned by text.font on 6 generated paragraph(s); 1 slide paragraph(s) were split by line to carry them"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .pptx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <script> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 10892,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "docx",
+    "to": "pdf",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "HIGH",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 3 HCD chunks",
+        "in-process Rust output generation and target structure validation",
+        "canonical HCD HTML structure, stylesheet cascade, inline formatting, links, tables and paginated print layout rendered directly to PDF"
+      ],
+      "flattened": [
+        "semantic-flow source-format physical geometry outside canonical HCD HTML remains distinct from CSS print pagination",
+        "source-format opaque parts, annotations, JavaScript and unsupported browser-only CSS are not embedded in the PDF"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .pdf by OfficeCLI's in-process Rust rust-html-css-pdf handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "HTML/CSS was paginated by the in-process pure-Rust print layout engine; browser JavaScript and unsupported browser-only CSS remain inactive"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <script> content"
+        }
+      ]
+    },
+    "bytes": 135167,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "docx",
+    "to": "html",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "HIGH",
+      "preserved": [
+        "canonical HCD layout, text, styles and embedded assets"
+      ],
+      "flattened": [],
+      "dropped": [],
+      "warnings": []
+    },
+    "bytes": 103804,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "docx",
+    "to": "md",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 3 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .md by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <script> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 4204,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "docx",
+    "to": "txt",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 3 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .txt by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <script> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 3988,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "docx",
+    "to": "docx",
+    "sourceBacked": true,
+    "exportExit": 0,
+    "byteIdentical": false
+  },
+  {
+    "from": "xlsx",
+    "to": "docx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 3 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "grid profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .docx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact grid source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "1 of 1 images were represented by alt text because they were not trusted content-addressed assets or the target did not support their encoding"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <script> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline images were reflowed as standalone semantic blocks"
+        }
+      ]
+    },
+    "bytes": 6005,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "xlsx",
+    "to": "xlsx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 3 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "grid profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .xlsx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact grid source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "1 of 1 images were represented by alt text because they were not trusted content-addressed assets or the target did not support their encoding"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <script> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline images were reflowed as standalone semantic blocks"
+        }
+      ]
+    },
+    "bytes": 4658,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "xlsx",
+    "to": "pptx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 3 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "grid profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .pptx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact grid source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "1 of 1 images were represented by alt text because they were not trusted content-addressed assets or the target did not support their encoding"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "PPTX tables exceeding 18 rows or 12 columns were split into bounded native table slides with the first row repeated"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <script> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline images were reflowed as standalone semantic blocks"
+        }
+      ]
+    },
+    "bytes": 6177,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "xlsx",
+    "to": "pdf",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "HIGH",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 3 HCD chunks",
+        "in-process Rust output generation and target structure validation",
+        "canonical HCD HTML structure, stylesheet cascade, inline formatting, links, tables and paginated print layout rendered directly to PDF"
+      ],
+      "flattened": [
+        "grid source-format physical geometry outside canonical HCD HTML remains distinct from CSS print pagination",
+        "source-format opaque parts, annotations, JavaScript and unsupported browser-only CSS are not embedded in the PDF"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .pdf by OfficeCLI's in-process Rust rust-html-css-pdf handler; source-backed opaque parts and exact grid source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "1 of 1 images were represented by alt text because they were not trusted content-addressed assets or the target did not support their encoding"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "HTML/CSS was paginated by the in-process pure-Rust print layout engine; browser JavaScript and unsupported browser-only CSS remain inactive"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <script> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline images were reflowed as standalone semantic blocks"
+        }
+      ]
+    },
+    "bytes": 57911,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "xlsx",
+    "to": "html",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "HIGH",
+      "preserved": [
+        "canonical HCD layout, text, styles and embedded assets"
+      ],
+      "flattened": [],
+      "dropped": [],
+      "warnings": []
+    },
+    "bytes": 107709,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "xlsx",
+    "to": "md",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 3 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "grid profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .md by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact grid source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "1 of 1 images were represented by alt text because they were not trusted content-addressed assets or the target did not support their encoding"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <script> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline images were reflowed as standalone semantic blocks"
+        }
+      ]
+    },
+    "bytes": 2074,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "xlsx",
+    "to": "txt",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 3 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "grid profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .txt by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact grid source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "1 of 1 images were represented by alt text because they were not trusted content-addressed assets or the target did not support their encoding"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <script> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline images were reflowed as standalone semantic blocks"
+        }
+      ]
+    },
+    "bytes": 1709,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "xlsx",
+    "to": "xlsx",
+    "sourceBacked": true,
+    "exportExit": 0,
+    "byteIdentical": false
+  },
+  {
+    "from": "pptx",
+    "to": "docx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 4 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "slide-canvas profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .docx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact slide-canvas source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 3296,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "pptx",
+    "to": "xlsx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 4 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "slide-canvas profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .xlsx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact slide-canvas source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 3654,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "pptx",
+    "to": "pptx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 4 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "slide-canvas profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .pptx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact slide-canvas source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 4783,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "pptx",
+    "to": "pdf",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "HIGH",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 4 HCD chunks",
+        "in-process Rust output generation and target structure validation",
+        "canonical HCD HTML structure, stylesheet cascade, inline formatting, links, tables and paginated print layout rendered directly to PDF"
+      ],
+      "flattened": [
+        "slide-canvas source-format physical geometry outside canonical HCD HTML remains distinct from CSS print pagination",
+        "source-format opaque parts, annotations, JavaScript and unsupported browser-only CSS are not embedded in the PDF"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .pdf by OfficeCLI's in-process Rust rust-html-css-pdf handler; source-backed opaque parts and exact slide-canvas source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "HTML/CSS was paginated by the in-process pure-Rust print layout engine; browser JavaScript and unsupported browser-only CSS remain inactive"
+        }
+      ]
+    },
+    "bytes": 87751,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "pptx",
+    "to": "html",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "HIGH",
+      "preserved": [
+        "canonical HCD layout, text, styles and embedded assets"
+      ],
+      "flattened": [],
+      "dropped": [],
+      "warnings": []
+    },
+    "bytes": 21562,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "pptx",
+    "to": "md",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 4 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "slide-canvas profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .md by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact slide-canvas source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 1126,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "pptx",
+    "to": "txt",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 4 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "slide-canvas profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .txt by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact slide-canvas source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 1120,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "pptx",
+    "to": "pptx",
+    "sourceBacked": true,
+    "exportExit": 0,
+    "byteIdentical": false
+  },
+  {
+    "from": "pdf",
+    "to": "docx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation",
+        "1 of 1 content-addressed HCD image assets embedded in the target artifact; bounded source dimensions and direct slide coordinates are applied when present and target-compatible"
+      ],
+      "flattened": [
+        "fixed-layout profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .docx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact fixed-layout source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 70336,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "pdf",
+    "to": "xlsx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation",
+        "1 of 1 content-addressed HCD image assets embedded in the target artifact; bounded source dimensions and direct slide coordinates are applied when present and target-compatible"
+      ],
+      "flattened": [
+        "fixed-layout profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .xlsx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact fixed-layout source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 71666,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "pdf",
+    "to": "pptx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation",
+        "1 of 1 content-addressed HCD image assets embedded in the target artifact; bounded source dimensions and direct slide coordinates are applied when present and target-compatible"
+      ],
+      "flattened": [
+        "fixed-layout profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .pptx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact fixed-layout source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 70234,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "pdf",
+    "to": "pdf",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "VISUAL",
+      "preserved": [
+        "1 HCD page rasters and physical page dimensions"
+      ],
+      "flattened": [
+        "original PDF page text and vector structure are represented by page images"
+      ],
+      "dropped": [
+        "original selectable PDF text layer and object metadata"
+      ],
+      "warnings": [
+        {
+          "code": "HCD_PDF_RASTER_ONLY_EXPORT",
+          "message": "source-free PDF export embeds final HCD page images without decoding all pages at once; use the immutable source for selectable text and exact PDF structure"
+        }
+      ]
+    },
+    "bytes": 136788,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "pdf",
+    "to": "html",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "HIGH",
+      "preserved": [
+        "canonical HCD layout, text, styles and embedded assets"
+      ],
+      "flattened": [],
+      "dropped": [],
+      "warnings": []
+    },
+    "bytes": 219065,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "pdf",
+    "to": "md",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "fixed-layout profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .md by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact fixed-layout source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "1 of 1 images were represented by alt text because they were not trusted content-addressed assets or the target did not support their encoding"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 1010,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "pdf",
+    "to": "txt",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "fixed-layout profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .txt by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact fixed-layout source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "1 of 1 images were represented by alt text because they were not trusted content-addressed assets or the target did not support their encoding"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "inline CSS was ignored"
+        }
+      ]
+    },
+    "bytes": 1010,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "pdf",
+    "to": "pdf",
+    "sourceBacked": true,
+    "exportExit": 0,
+    "byteIdentical": true
+  },
+  {
+    "from": "html",
+    "to": "docx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .docx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 3140,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "html",
+    "to": "xlsx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .xlsx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 3425,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "html",
+    "to": "pptx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .pptx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 4319,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "html",
+    "to": "pdf",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "HIGH",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation",
+        "canonical HCD HTML structure, stylesheet cascade, inline formatting, links, tables and paginated print layout rendered directly to PDF"
+      ],
+      "flattened": [
+        "semantic-flow source-format physical geometry outside canonical HCD HTML remains distinct from CSS print pagination",
+        "source-format opaque parts, annotations, JavaScript and unsupported browser-only CSS are not embedded in the PDF"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .pdf by OfficeCLI's in-process Rust rust-html-css-pdf handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "HTML/CSS was paginated by the in-process pure-Rust print layout engine; browser JavaScript and unsupported browser-only CSS remain inactive"
+        }
+      ]
+    },
+    "bytes": 121806,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "html",
+    "to": "html",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "HIGH",
+      "preserved": [
+        "canonical HCD layout, text, styles and embedded assets"
+      ],
+      "flattened": [],
+      "dropped": [],
+      "warnings": []
+    },
+    "bytes": 5270,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "html",
+    "to": "md",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .md by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 478,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "html",
+    "to": "txt",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .txt by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 438,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "html",
+    "to": "html",
+    "sourceBacked": true,
+    "exportExit": 0,
+    "byteIdentical": true
+  },
+  {
+    "from": "md",
+    "to": "docx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .docx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 3145,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "md",
+    "to": "xlsx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .xlsx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 3389,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "md",
+    "to": "pptx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .pptx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 3685,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "md",
+    "to": "pdf",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "HIGH",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation",
+        "canonical HCD HTML structure, stylesheet cascade, inline formatting, links, tables and paginated print layout rendered directly to PDF"
+      ],
+      "flattened": [
+        "semantic-flow source-format physical geometry outside canonical HCD HTML remains distinct from CSS print pagination",
+        "source-format opaque parts, annotations, JavaScript and unsupported browser-only CSS are not embedded in the PDF"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .pdf by OfficeCLI's in-process Rust rust-html-css-pdf handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "HTML/CSS was paginated by the in-process pure-Rust print layout engine; browser JavaScript and unsupported browser-only CSS remain inactive"
+        }
+      ]
+    },
+    "bytes": 118587,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "md",
+    "to": "html",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "HIGH",
+      "preserved": [
+        "canonical HCD layout, text, styles and embedded assets"
+      ],
+      "flattened": [],
+      "dropped": [],
+      "warnings": []
+    },
+    "bytes": 8872,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "md",
+    "to": "md",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .md by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 481,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "md",
+    "to": "txt",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .txt by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 420,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "md",
+    "to": "md",
+    "sourceBacked": true,
+    "exportExit": 0,
+    "byteIdentical": true
+  },
+  {
+    "from": "txt",
+    "to": "docx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .docx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 2746,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "txt",
+    "to": "xlsx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .xlsx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 3148,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "txt",
+    "to": "pptx",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .pptx by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 2743,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "txt",
+    "to": "pdf",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "HIGH",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation",
+        "canonical HCD HTML structure, stylesheet cascade, inline formatting, links, tables and paginated print layout rendered directly to PDF"
+      ],
+      "flattened": [
+        "semantic-flow source-format physical geometry outside canonical HCD HTML remains distinct from CSS print pagination",
+        "source-format opaque parts, annotations, JavaScript and unsupported browser-only CSS are not embedded in the PDF"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .pdf by OfficeCLI's in-process Rust rust-html-css-pdf handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "HTML/CSS was paginated by the in-process pure-Rust print layout engine; browser JavaScript and unsupported browser-only CSS remain inactive"
+        }
+      ]
+    },
+    "bytes": 16147,
+    "reimportExit": 0,
+    "validateExit": 0,
+    "previewExit": 0
+  },
+  {
+    "from": "txt",
+    "to": "html",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "HIGH",
+      "preserved": [
+        "canonical HCD layout, text, styles and embedded assets"
+      ],
+      "flattened": [],
+      "dropped": [],
+      "warnings": []
+    },
+    "bytes": 2440,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "txt",
+    "to": "md",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .md by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 182,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "txt",
+    "to": "txt",
+    "exportExit": 0,
+    "fidelity": {
+      "schemaVersion": "hcd/2",
+      "level": "SEMANTIC",
+      "preserved": [
+        "canonical HCD revision 0 text in chunk sequence order",
+        "semantic headings, paragraphs, lists and tables recognized across 1 HCD chunks",
+        "in-process Rust output generation and target structure validation"
+      ],
+      "flattened": [
+        "semantic-flow profile-specific geometry, styles and pagination are reduced to semantic document defaults",
+        "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact"
+      ],
+      "dropped": [],
+      "warnings": [
+        {
+          "code": "HCD_CROSS_FORMAT_SEMANTIC_EXPORT",
+          "message": "revision 0 was rebuilt as .txt by OfficeCLI's in-process Rust rust-html-semantic handler; source-backed opaque parts and exact semantic-flow source layout were not applied"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "CSS layout is not reproduced; output uses semantic document defaults"
+        },
+        {
+          "code": "RUST_HTML_SEMANTIC_WARNING",
+          "message": "ignored unsafe or non-semantic <style> content"
+        }
+      ]
+    },
+    "bytes": 182,
+    "reimportExit": 0,
+    "validateExit": 0
+  },
+  {
+    "from": "txt",
+    "to": "txt",
+    "sourceBacked": true,
+    "exportExit": 0,
+    "byteIdentical": true
+  }
+]

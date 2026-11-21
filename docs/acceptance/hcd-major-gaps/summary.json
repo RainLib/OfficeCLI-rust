@@ -1,0 +1,29 @@
+{
+  "rustServerTests": {
+    "passed": 40,
+    "failed": 0
+  },
+  "frontendSuite": {
+    "passed": 35,
+    "failed": 0,
+    "includes": "browser workspace flows and revision-diff tests"
+  },
+  "textRunTests": {
+    "passed": 1,
+    "failed": 0
+  },
+  "clippy": "passed",
+  "fmt": "passed",
+  "frontendBuild": "passed",
+  "sourceFormatsRoundTripped": [
+    "docx",
+    "html",
+    "md",
+    "txt"
+  ],
+  "scope": "table text edits, shared checkpoint coordination, session restoration and fixed text focus",
+  "offlineDraftPersistence": "pending",
+  "tableStructureEditing": "pending",
+  "goalComplete": false,
+  "privateDocumentsIncluded": false
+}

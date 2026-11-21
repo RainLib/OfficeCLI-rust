@@ -1,0 +1,6 @@
+{
+  "status": "passed",
+  "schema": "urn:officecli:hcd-patch:67",
+  "validCases": 2,
+  "rejectedCases": 6
+}

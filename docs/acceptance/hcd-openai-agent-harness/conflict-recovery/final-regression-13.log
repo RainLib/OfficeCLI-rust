@@ -1,0 +1,33 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test agent-harness.spec.ts agent-run-status.spec.ts --grep a peer commit|fresh reads|focus parameter|permission, ownership|spreadsheet team|team workers|two model agents|cancellation|one failed member|full PPT rebuild uses --output /tmp/officecli-agent-rejection-verified-results
+
+
+Running 13 tests using 1 worker
+
+(node:73102) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+scripted model tool rejection: hcd_patch collaboration generation changed; reload the editor
+  ✓   1 e2e/agent-harness.spec.ts:246:1 › two model agents preserve successive edits after a real revision conflict (725ms)
+  ✓   2 e2e/agent-harness.spec.ts:260:1 › full PPT rebuild uses the configured team, replaces every old page and exports native content (6.0s)
+scripted model tool rejection: hcd_patch collaboration generation changed; reload the editor
+  ✓   3 e2e/agent-harness.spec.ts:324:1 › team workers share facts and commit separate assigned blocks (712ms)
+scripted model tool rejection: hcd_patch revision conflict: expected head 0, actual 1
+scripted model tool rejection: hcd_patch revision conflict: expected head 0, actual 1
+scripted model tool rejection: hcd_patch revision conflict: expected head 1, actual 2
+  ✓   4 e2e/agent-harness.spec.ts:335:1 › four-worker spreadsheet team repairs its plan and edits HW1 HW2 Rank exactly once (3.7s)
+  ✓   5 e2e/agent-harness.spec.ts:392:1 › persistently invalid spreadsheet team plan stops before editing and does not show 0/0 (2.2s)
+scripted model tool rejection: hcd_patch 写入超出此 Agent 认领的范围。只可编辑 ["block:n_a4d45d774d316f283b99892648b08d1d"]；请按分工重新读取并规划。
+scripted model tool rejection: hcd_patch 写入超出此 Agent 认领的范围。只可编辑 ["block:n_a4d45d774d316f283b99892648b08d1d"]；请按分工重新读取并规划。
+  ✓   6 e2e/agent-harness.spec.ts:409:1 › team workers cannot escape their assigned region (709ms)
+scripted model tool rejection: hcd_patch 写入超出此 Agent 认领的范围。只可编辑 ["block:n_132ea5bf6f99e826f23ac3c13437a599"]；请按分工重新读取并规划。
+scripted model tool rejection: hcd_patch 写入超出此 Agent 认领的范围。只可编辑 ["block:n_132ea5bf6f99e826f23ac3c13437a599"]；请按分工重新读取并规划。
+  ✓   7 e2e/agent-harness.spec.ts:417:1 › one failed member does not abort independent peers and their completed work stays visible (711ms)
+  ✓   8 e2e/agent-harness.spec.ts:443:1 › team cancellation releases all claims and another principal cannot cancel it (4.6s)
+  ✓   9 e2e/agent-harness.spec.ts:598:1 › task cancellation preserves commits and cannot be used by another principal (207ms)
+  ✓  10 e2e/agent-run-status.spec.ts:6:1 › a peer commit cannot hide another members unresolved conflict (0ms)
+  ✓  11 e2e/agent-run-status.spec.ts:13:1 › fresh reads alone do not mean a failed mutation has recovered (0ms)
+  ✓  12 e2e/agent-run-status.spec.ts:17:1 › focus parameter errors remain distinct from an incomplete document change (0ms)
+  ✓  13 e2e/agent-run-status.spec.ts:23:1 › permission, ownership and pending human edits have separate explanations (0ms)
+
+  13 passed (27.5s)

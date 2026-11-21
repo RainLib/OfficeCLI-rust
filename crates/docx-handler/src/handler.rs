@@ -3640,7 +3640,7 @@ fn build_attribute_string(node: &WordNode, is_root: bool) -> String {
     }
 
     let mut attrs: Vec<(&String, &String)> = node.attributes.iter().collect();
-    attrs.sort_by(|a, b| attribute_sort_key(node, a.0).cmp(&attribute_sort_key(node, b.0)));
+    attrs.sort_by_key(|a| attribute_sort_key(node, a.0));
     for (key, val) in attrs {
         parts.push(format!(
             "{}=\"{}\"",

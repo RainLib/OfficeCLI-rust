@@ -1,0 +1,9 @@
+{
+  "status": "passed",
+  "root": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-workbench-undo-MdrWdd",
+  "checks": [
+    "A distinct user added bold text inside an AI-created paragraph; undo removed only the AI text.",
+    "Both clients and reload kept the original document and formatted supplement; native DOCX reopening preserved bold text."
+  ],
+  "engineProtocolFingerprint": "b09a50c9aede5d778995be061dbd4b0a9c49d8d573d5a1e395114f58de71d016"
+}

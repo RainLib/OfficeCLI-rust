@@ -620,11 +620,12 @@ fn evaluate_formulas(model: &mut WorkbookModel) {
     let formula_cells: Vec<(usize, (usize, usize), String)> = model
         .sheets
         .iter()
-        .flat_map(|ws| {
+        .enumerate()
+        .flat_map(|(sheet_idx, ws)| {
             ws.cells
                 .iter()
                 .filter(|(_, c)| c.formula.is_some())
-                .map(|(key, c)| (ws.index - 1, *key, c.formula.clone().unwrap_or_default()))
+                .map(move |(key, c)| (sheet_idx, *key, c.formula.clone().unwrap_or_default()))
         })
         .collect();
 
@@ -634,7 +635,7 @@ fn evaluate_formulas(model: &mut WorkbookModel) {
         }
         // Strip the leading '=' if present
         let expr = formula_text.strip_prefix('=').unwrap_or(&formula_text);
-        if let Some(result) = formula::evaluate(expr, model) {
+        if let Some(result) = formula::evaluate_in_sheet(expr, model, sheet_idx) {
             if let Some(cell) = model.sheets[sheet_idx].cells.get_mut(&key) {
                 cell.display_value = result.as_string();
             }

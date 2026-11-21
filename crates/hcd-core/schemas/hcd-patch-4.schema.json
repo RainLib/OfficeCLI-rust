@@ -14,7 +14,9 @@
       "type": "array", "minItems": 1, "maxItems": 10000,
       "items": { "oneOf": [
         { "$ref": "#/$defs/insert" }, { "$ref": "#/$defs/delete" },
-        { "$ref": "#/$defs/move" }, { "$ref": "#/$defs/replace" }
+        { "$ref": "#/$defs/move" }, { "$ref": "#/$defs/replace" },
+        { "$ref": "#/$defs/tableInsert" }, { "$ref": "#/$defs/tableEdit" }, { "$ref": "#/$defs/tableCellActivate" },
+        { "$ref": "#/$defs/tableDelete" }, { "$ref": "#/$defs/tableRestore" }
       ] }
     }
   },
@@ -28,9 +30,10 @@
     "inline": {
       "type": "object", "additionalProperties": false, "required": ["text"],
       "properties": {
+        "format": { "$ref": "#/$defs/typedTextFormat" },
         "text": { "type": "string", "maxLength": 1048576 },
         "bold": { "type": "boolean" }, "italic": { "type": "boolean" },
-        "link": { "type": "string", "maxLength": 2048, "pattern": "^(https?://|mailto:)" }
+        "link": { "type": "string", "maxLength": 2048, "pattern": "^([Hh][Tt][Tt][Pp][Ss]?://|[Mm][Aa][Ii][Ll][Tt][Oo]:|[Tt][Ee][Ll]:|#)", "description": "HTTP(S), mailto, tel or a fragment. Runtime also rejects control characters and backslashes and enforces a 2048 UTF-8 byte limit." }
       }
     },
     "block": {
@@ -38,7 +41,104 @@
       "properties": {
         "kind": { "enum": ["paragraph", "heading", "list_item"] },
         "level": { "type": "integer", "minimum": 0, "maximum": 6 },
+        "font": { "$ref": "#/$defs/blockFont" },
+        "alignment": { "enum": ["left", "center", "right", "justify"] },
         "inlines": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/inline" } }
+      }
+    },
+    "mappedTableInline": {
+      "type": "object", "additionalProperties": false, "required": ["nodeId", "text"],
+      "properties": {
+        "format": { "$ref": "#/$defs/typedTextFormat" },
+        "nodeId": { "$ref": "#/$defs/nodeId" },
+        "text": { "type": "string", "maxLength": 1048576 },
+        "bold": { "type": "boolean" }, "italic": { "type": "boolean" },
+        "link": { "type": ["string", "null"], "maxLength": 2048 }
+      }
+    },
+    "mappedTableBlock": {
+      "description": "Text-only replacement of an existing opaque table. Server requires exactly the original run identities, order, marks, level and font; only editableTextNodeIds may change text. Table structure remains protected.",
+      "type": "object", "additionalProperties": false, "required": ["kind", "inlines"],
+      "properties": {
+        "kind": { "const": "opaque" },
+        "level": { "type": ["integer", "null"], "minimum": 0, "maximum": 6 },
+        "font": { "$ref": "#/$defs/blockFont" },
+        "alignment": { "enum": ["left", "center", "right", "justify"] },
+        "inlines": { "type": "array", "items": { "$ref": "#/$defs/mappedTableInline" } }
+      }
+    },
+    "blockFont": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Script faces pinned on the whole block. The same three slots a text.font operation takes, with the same limits the server enforces.",
+      "properties": {
+        "latin": { "$ref": "#/$defs/fontFamily" },
+        "eastAsia": { "$ref": "#/$defs/fontFamily" },
+        "bidi": { "$ref": "#/$defs/fontFamily" }
+      }
+    },
+    "fontFamily": {
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "description": "One font family. maxLength counts characters; the server caps the value at 128 bytes.",
+      "pattern": "^[^<>\"';:&\\x00-\\x1F\\x7F]+$"
+    },
+    "tableDelete": {
+      "type": "object", "additionalProperties": false, "required": ["op", "blockId", "precondition"],
+      "properties": { "op": { "const": "table.delete" }, "blockId": { "$ref": "#/$defs/nodeId" }, "precondition": { "$ref": "#/$defs/precondition" } }
+    },
+    "tableRestore": {
+      "description": "Restore one canonical table from immutable history. A null blockHash requires the table to be absent; otherwise requires its exact current hash. Keeps other blocks and never accepts client HTML.",
+      "type": "object", "additionalProperties": false, "required": ["op", "blockId", "sourceRevision", "afterBlockId", "precondition"],
+      "properties": {
+        "op": { "const": "table.restore" }, "blockId": { "$ref": "#/$defs/nodeId" },
+        "sourceRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+        "afterBlockId": { "oneOf": [{ "$ref": "#/$defs/nodeId" }, { "type": "null" }] },
+        "precondition": { "type": "object", "additionalProperties": false, "required": ["blockHash"], "properties": { "blockHash": { "oneOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] } } }
+      }
+    },
+    "tableInsert": {
+      "description": "Insert a table in a rich semantic body. Optional plain-text values must match the declared dimensions and fit in 1 MiB. At most 10000 logical cells.",
+      "type": "object", "additionalProperties": false, "required": ["op", "afterBlockId", "rows", "columns"],
+      "properties": {
+        "op": { "const": "table.insert" },
+        "afterBlockId": { "oneOf": [{ "$ref": "#/$defs/nodeId" }, { "type": "null" }] },
+        "rows": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "columns": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "values": {
+          "type": "array", "minItems": 1, "maxItems": 1000,
+          "items": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "type": "string" } }
+        }
+      }
+    },
+    "typedTextFormat": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "font": { "$ref": "#/$defs/fontFamily" },
+        "underline": { "type": "boolean" },
+        "sizeHalfPoints": { "type": "integer", "minimum": 2, "maximum": 512 },
+        "color": { "type": "string", "pattern": "^[a-fA-F0-9]{6}$" }
+      }
+    },
+    "tableCellActivate": {
+      "type": "object", "additionalProperties": false, "required": ["op", "blockId", "row", "column", "precondition"],
+      "properties": {
+        "op": { "const": "table.cell.activate" }, "blockId": { "$ref": "#/$defs/nodeId" },
+        "tableIndex": { "type": "integer", "minimum": 0 },
+        "row": { "type": "integer", "minimum": 0, "maximum": 999 },
+        "column": { "type": "integer", "minimum": 0, "maximum": 127 },
+        "precondition": { "$ref": "#/$defs/precondition" }
+      }
+    },
+    "tableEdit": {
+      "description": "Guarded row/column insertion or deletion. tableIndex is zero-based DFS table order within the block. index is a zero-based logical grid boundary for insertion or position for deletion. Merges adjust; the last row/column cannot be removed. Fragmented or incomplete grids reject atomically.",
+      "type": "object", "additionalProperties": false, "required": ["op", "blockId", "action", "index", "precondition"],
+      "properties": {
+        "op": { "const": "table.edit" }, "blockId": { "$ref": "#/$defs/nodeId" },
+        "tableIndex": { "type": "integer", "minimum": 0 },
+        "action": { "enum": ["insertRow", "deleteRow", "insertColumn", "deleteColumn"] },
+        "index": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "precondition": { "$ref": "#/$defs/precondition" }
       }
     },
     "insert": {
@@ -55,7 +155,7 @@
     },
     "replace": {
       "type": "object", "additionalProperties": false, "required": ["op", "blockId", "block", "precondition"],
-      "properties": { "op": { "const": "block.replace" }, "blockId": { "$ref": "#/$defs/nodeId" }, "block": { "$ref": "#/$defs/block" }, "precondition": { "$ref": "#/$defs/precondition" } }
+      "properties": { "op": { "const": "block.replace" }, "blockId": { "$ref": "#/$defs/nodeId" }, "block": { "oneOf": [{ "$ref": "#/$defs/block" }, { "$ref": "#/$defs/mappedTableBlock" }] }, "precondition": { "$ref": "#/$defs/precondition" } }
     }
   }
 }

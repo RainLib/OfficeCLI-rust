@@ -1,0 +1,64 @@
+{
+  "date": "2026-11-16",
+  "branch": "feature/hcd-font-format-integration",
+  "head": "ccb5fd5",
+  "scope": "uncommitted local workspace",
+  "rust": {
+    "passed": 1074,
+    "failed": 0,
+    "ignored": 0,
+    "resultGroups": 25
+  },
+  "rustChecks": {
+    "clippy": true,
+    "format": true,
+    "debugBuild": true
+  },
+  "frontendUnit": {
+    "passed": 24,
+    "failed": 0
+  },
+  "editorBuild": {
+    "standalone": true,
+    "embedded": true
+  },
+  "browser": {
+    "passed": 37,
+    "failed": 2,
+    "duration": "4.0m",
+    "total": 39,
+    "allPassed": false
+  },
+  "initialRecoveryCases": {
+    "passed": 5,
+    "failed": 0,
+    "duration": "44.0s"
+  },
+  "deterministicInFlightSelection": {
+    "beforeFix": {
+      "passed": 0,
+      "failed": 1
+    },
+    "afterFixRepeated": {
+      "passed": 4,
+      "failed": 0,
+      "duration": "27.8s"
+    }
+  },
+  "nativeFormulaProbes": {
+    "passed": 5,
+    "mismatches": 0
+  },
+  "nativeMixedContentProbe": true,
+  "unresolved": [
+    "Native ArrowRight sometimes remains at A1 after retry and undo, including after focus and frame readiness checks; diagnostics and isolated repetitions pass, root cause unconfirmed.",
+    "Reload recovery ended at reconnect UI; trace shows local proxy auth/manifest HTTP 500 and ERR_ADDRESS_INVALID requests; root cause unconfirmed."
+  ],
+  "codeCommitted": false,
+  "dailyServicesRestarted": false,
+  "realModelCalls": false,
+  "sameSourceOfficeVisualReference": false,
+  "remoteCiVerified": false,
+  "cleanCheckoutVerified": false,
+  "entireProductComplete": false
+}

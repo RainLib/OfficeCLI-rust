@@ -1,0 +1,110 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --radius: 0.75rem;
+  --background: #eceff4;
+  --foreground: #272d3b;
+  --card: #ffffff;
+  --card-foreground: #272d3b;
+  --popover: #ffffff;
+  --popover-foreground: #272d3b;
+  --primary: #292f40;
+  --primary-foreground: #ffffff;
+  --secondary: #f5f6fa;
+  --secondary-foreground: #272d3b;
+  --muted: #f7f8fb;
+  --muted-foreground: #667287;
+  --accent: #edf0fc;
+  --accent-foreground: #5865c7;
+  --destructive: #b94f57;
+  --destructive-foreground: #ffffff;
+  --success: #27866a;
+  --warning: #9a681e;
+  --border: #e7eaf0;
+  --input: #e7eaf0;
+  --ring: #5865c7;
+}
+.dark {
+  --background: #12151c;
+  --foreground: #e8edf5;
+  --card: #1c222d;
+  --card-foreground: #e8edf5;
+  --popover: #1c222d;
+  --popover-foreground: #e8edf5;
+  --primary: #dae2f0;
+  --primary-foreground: #18202d;
+  --secondary: #252e3d;
+  --secondary-foreground: #e8edf5;
+  --muted: #161c25;
+  --muted-foreground: #a4b0c3;
+  --accent: #2c3558;
+  --accent-foreground: #a6afff;
+  --destructive: #efa3a8;
+  --destructive-foreground: #402c32;
+  --success: #7dd8b4;
+  --warning: #e1bc81;
+  --border: #323c4d;
+  --input: #323c4d;
+  --ring: #a6afff;
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+    outline-color: color-mix(in oklab, var(--color-ring) 45%, transparent);
+  }
+
+  html {
+    /* The console is a tool, not a page: keep the shell fixed and scroll inside. */
+    height: 100%;
+  }
+
+  body {
+    height: 100%;
+    margin: 0;
+    background: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Digests, byte counts and revision numbers all line up in tables. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}

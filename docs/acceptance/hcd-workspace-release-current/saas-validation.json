@@ -1,0 +1,31 @@
+{
+  "status": "passed",
+  "scope": "default-workspace-phase-b",
+  "checks": [
+    "explicit bootstrap and repeated init never overwrite existing accounts or signing identity",
+    "HttpOnly login, CSRF/origin checks and last administrator protection",
+    "private files and global administration stay isolated from ungranted members",
+    "same Provider enforces per-operation ACL and durable idempotent document session exchanges",
+    "real HCD patch, immutable source, CAS business versions and repeated commit return one durable receipt",
+    "logout revokes previously issued document JWTs through live business authorization",
+    "application restart preserves browser sessions, ACL, exact versions, receipts and deduplicated events",
+    "history restore creates a new HCD revision without replacing a confirmed business version",
+    "Project folders, scoped search, inherited editing and file moves survive a real restart. An already-issued editor session loses write access on downgrade. Removing the project role preserves a direct file grant and hides the directory.",
+    "cookie session registers licensed local fonts and creates immutable themes without pasted tokens",
+    "browser creates accounts and business files, grants ACL, opens editor without pasted tokens, edits and publishes",
+    "session renewal preserves the same mounted editor and unsaved draft",
+    "V2 desktop/mobile/dark management pages use local assets without public requests",
+    "member login lists only shared files and opens a real read-only editor",
+    "anonymous link exchange assigns a stable server-generated identity; identity spoofing, private files, administration and history remain denied",
+    "real anonymous browsers read without login, receive distinct temporary identities, collaborate on edits, save durably and retain their identity on reload; no edit/preview switch",
+    "permission downgrade makes open visitors read-only; rotating the link rejects old signed sessions and removes the editor from old-link browsers",
+    "public directory and phone layout work without login; link-only files stay unlisted and stopping sharing removes public access",
+    "an anonymous image editor can save an actual rotation while conversion, AI, history and business publication controls remain absent",
+    "Two authenticated browsers delivered real comment, reply and sticky mentions across boards without opening them first. A reader opened the exact reply and sticky, read receipts survived a service restart and movement, and access revocation and removing a mention cleared the appropriate entries.",
+    "The admin recovery queue reconciles a genuinely lost Provider commit response after logout and restart, retries an interrupted original publication once, and preserves both versions through an idempotent conflict copy."
+  ],
+  "browserVerified": true,
+  "storage": "production SQLite/immutable-object Provider",
+  "defaultAccounts": false,
+  "offlineReleaseVerified": false
+}

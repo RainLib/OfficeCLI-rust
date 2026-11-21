@@ -1,0 +1,75 @@
+.hcd-surface .word-review-panel { display:grid; gap:12px; min-width:0; align-content:start; }
+.hcd-surface .word-review-heading { display:flex; align-items:center; gap:8px; }
+.hcd-surface .word-review-heading h2 { flex:1; margin:0 !important; font-size:15px; }
+.hcd-surface .word-review-heading .panel-close { min-width:28px; padding:4px; }
+.hcd-surface .word-review-panel :is(button, textarea) { font:inherit; }
+.hcd-surface .word-review-thread,.hcd-surface .word-review-compose { display:grid; min-width:0; gap:10px; }
+.hcd-surface .word-review-thread { padding:12px; border:1px solid var(--line); border-radius:12px; }
+.hcd-surface .word-review-compose :is(textarea,blockquote) { min-width:0; width:100%; margin:0; }
+.hcd-surface .word-review-compose textarea { display:block; color:var(--ink); background:var(--surface); border:1px solid var(--line); border-radius:9px; padding:8px; resize:vertical; }
+.hcd-surface .word-review-compose textarea:focus { outline:2px solid var(--accent); outline-offset:1px; }
+.hcd-surface .word-review-compose blockquote { padding:4px 8px; border-left:2px solid var(--accent); color:var(--muted); font-size:12px; overflow-wrap:anywhere; max-height:88px; overflow:auto; }
+.hcd-surface .word-review-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:5px; }
+.hcd-surface .word-review-actions button { display:inline-flex; align-items:center; gap:4px; min-width:0; font-size:12px; }
+.hcd-surface .word-review-message { display:grid; grid-template-columns:24px minmax(0,1fr); gap:7px; }
+.hcd-surface .word-review-message header { display:flex; flex-wrap:wrap; align-items:center; gap:2px 6px; font-size:12px; overflow-wrap:anywhere; }
+.hcd-surface .word-review-message time,.hcd-surface .word-review-range-status { color:var(--muted); font-size:11px; }
+.hcd-surface .word-review-message p { margin:3px 0 0; white-space:pre-wrap; overflow-wrap:anywhere; }
+.hcd-surface .word-review-avatar { width:24px; height:24px; display:grid; place-items:center; border-radius:50%; background:var(--accent-soft); color:var(--accent); font-size:12px; }
+.hcd-surface .word-review-thread .word-review-anchor { display:flex; align-items:center; gap:5px; min-width:0; justify-content:flex-start; font-size:12px; color:var(--accent); }
+.hcd-surface .word-review-anchor svg { flex:none; }
+.hcd-surface .word-review-anchor span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hcd-surface .word-review-resolved { display:inline-flex; gap:4px; align-items:center; font-size:12px; color:var(--accent); }
+.hcd-surface .word-review-error { overflow-wrap:anywhere; }
+.hcd-surface .word-review-sections { display:flex; gap:4px; padding:3px; border-radius:10px; background:var(--accent-soft); }
+.hcd-surface .word-review-sections button { flex:1; border:0; background:transparent; border-radius:7px; font-size:12px; padding:5px 7px; }
+.hcd-surface .word-review-sections button[aria-pressed=true] { background:var(--surface); color:var(--accent); }
+.hcd-surface .word-review-revision-byline { display:flex; flex-wrap:wrap; gap:4px 8px; align-items:center; color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
+.hcd-surface .word-review-revision-byline strong { font-size:12px; color:var(--ink); }
+.hcd-surface .word-review-snippet { margin:0; padding:6px 8px; border-left:2px solid var(--line); white-space:pre-wrap; overflow-wrap:anywhere; }
+.hcd-surface .word-review-revision[data-kind=insert] .word-review-snippet { border-left-color:var(--accent); }
+.hcd-surface .word-review-revision[data-kind=delete] .word-review-snippet { text-decoration:line-through; color:var(--muted); }
+
+/* Page comments use the document's scroll surface, rather than a second pane. */
+.hcd-surface .word-document-layout { position:relative; min-width:100%; min-height:100%; }
+.hcd-surface .word-document-page { display:flow-root; min-width:0; }
+.hcd-surface .word-document-layout[data-review-open=true] { display:flex; align-items:flex-start; justify-content:center; width:max-content; gap:24px; padding:0 24px; }
+.hcd-surface .word-document-layout[data-review-open=true] .word-document-page { flex:none; }
+.hcd-surface .workspace.semantic-workspace .word-document-layout[data-review-open=true] .document { margin:40px 0; }
+.hcd-surface .word-review-margin { flex:none; position:relative; width:var(--word-review-width,288px); color:var(--ink); font-size:13px; }
+.hcd-surface .workspace.semantic-workspace .layout .word-review-margin { padding:0; border:0; border-radius:0; max-height:none; overflow:visible; background:transparent; box-shadow:none; }
+.hcd-surface .word-review-in-margin { position:relative; display:block; width:100%; padding-top:16px; }
+.hcd-surface .word-review-in-margin .word-review-heading { position:sticky; top:8px; z-index:3; gap:6px; min-height:32px; background:var(--stage); border-radius:10px; }
+.hcd-surface .word-review-count { color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; margin-right:auto; }
+.hcd-surface .word-review-in-margin .word-review-heading h2 { flex:none; font-size:13px; }
+.hcd-surface .word-review-in-margin .word-review-heading button { width:26px; height:26px; padding:4px; min-width:0; border:0; background:transparent; color:var(--muted); }
+.hcd-surface .word-review-in-margin .word-review-sections { position:sticky; top:44px; z-index:3; margin:4px 0 16px; }
+.hcd-surface .word-review-in-margin[data-mode=comments] > [data-review-card] { position:absolute; z-index:2; width:100%; padding:16px; background:var(--surface); border:1px solid var(--line); border-radius:16px; box-shadow:0 3px 14px #152c2610; transition:box-shadow .18s,border-color .18s; }
+.hcd-surface .word-review-in-margin > [data-review-card][data-active=true] { border-color:color-mix(in srgb,var(--accent) 50%,var(--line)); box-shadow:0 4px 20px #152c2617; }
+.hcd-surface .word-review-in-margin > [data-review-card]:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+.hcd-surface .word-review-in-margin > [data-review-card][data-resolved=true]:not([data-active=true]) { background:color-mix(in srgb,var(--surface) 65%,var(--stage)); }
+.hcd-surface .word-review-in-margin .word-review-anchor { padding:4px 7px; background:var(--accent-soft); border:0; border-radius:6px; min-height:26px; }
+.hcd-surface .word-review-in-margin .word-review-message p { color:var(--ink); font-size:13px; line-height:1.65; }
+.hcd-surface .word-review-reply-count { padding-left:31px; color:var(--muted); font-size:11px; }
+.hcd-surface .word-review-tethers { position:absolute; top:0; overflow:visible; pointer-events:none; z-index:1; }
+.hcd-surface .word-review-tethers path { fill:none; stroke:var(--accent); stroke-width:1; opacity:.4; }
+.hcd-surface .word-review-in-margin[data-mode=tracked] { display:grid; gap:12px; }
+.hcd-surface .word-review-in-margin[data-mode=tracked] .word-review-thread { background:var(--surface); }
+/* Word presentation decorations include inline background colors. The review
+ * overlay deliberately takes precedence while its margin is open. */
+.hcd-surface .document .word-comment-mark { background:color-mix(in srgb,var(--accent) 10%,transparent) !important; border-bottom:1px solid color-mix(in srgb,var(--accent) 40%,transparent); cursor:pointer; }
+.hcd-surface .document .word-comment-mark.is-active { background:color-mix(in srgb,var(--accent) 20%,transparent) !important; border-bottom-color:var(--accent); }
+
+/* Narrow canvases show the active thread beside the visible text, without
+ * reserving a dock or adding a second scrolling list. */
+.hcd-surface .word-document-layout[data-review-compact=true] { display:block; width:100%; padding:0; }
+.hcd-surface .word-document-layout[data-review-compact=true] .word-document-page { width:100%; }
+.hcd-surface .workspace.semantic-workspace .word-document-layout[data-review-compact=true] .document { margin:24px auto; }
+.hcd-surface .word-review-margin[data-compact=true] { position:absolute; top:0; z-index:5; padding-top:0; }
+.hcd-surface .word-review-in-margin[data-compact=true] { padding-top:0; }
+.hcd-surface .word-review-in-margin[data-compact=true][data-mode=comments] > [data-review-card]:not([data-active=true]) { visibility:hidden; pointer-events:none; }
+.hcd-surface .word-review-in-margin[data-compact=true] > [data-review-card] { max-height:var(--word-review-card-max-height); overflow-y:auto; overscroll-behavior:contain; }
+.hcd-surface .word-review-in-margin[data-compact=true] .word-review-heading { position:absolute; top:var(--word-review-controls-top,8px); right:0; width:100%; padding:5px 8px; min-height:38px; background:var(--surface); border:1px solid var(--line); border-radius:12px; box-shadow:0 2px 8px #152c2610; }
+.hcd-surface .word-review-in-margin[data-compact=true] .word-review-sections { position:absolute; top:calc(var(--word-review-controls-top,8px) + 42px); right:0; width:100%; margin:0; border:1px solid var(--line); box-shadow:0 2px 8px #152c2610; }
+.hcd-surface .word-review-in-margin[data-compact=true][data-mode=tracked] { padding-top:64px; max-height:calc(100vh - 200px); overflow-y:auto; }
+.hcd-surface .word-review-in-margin[data-compact=true] .word-review-tethers { top:0; }

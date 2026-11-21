@@ -1,0 +1,21 @@
+/* OfficeCLI / Ink and clay · Light */
+:root {
+  --canvas: #EDEEE9;
+  --navigation: #E2E4DE;
+  --stage: #F4F5F0;
+  --surface: #FFFFFF;
+  --panel: #F8F8F3;
+  --ink: #252722;
+  --muted: #61655C;
+  --faint: #686D63;
+  --border: #CACEC6;
+  --accent: #B75F42;
+  --accentsoft: #F5E7DF;
+  --sage: #E8EFE3;
+  --sageink: #52664B;
+  --bluesoft: #E5ECF5;
+  --blueink: #46628E;
+  --yellow: #F2EACF;
+  --bubble: #E7E9E2;
+  --dark: #282B25;
+}

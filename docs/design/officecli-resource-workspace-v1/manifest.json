@@ -1,0 +1,673 @@
+{
+  "title": "OfficeCLI · 资源白板与全局 AI",
+  "native": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v1/officecli-resource-workspace.figcraft",
+  "canvas": {
+    "width": 1600,
+    "height": 1000
+  },
+  "tokens": {
+    "Canvas": "#F4F2EB",
+    "Navigation": "#ECE9E0",
+    "Stage": "#FCFBF7",
+    "Surface": "#FFFFFF",
+    "Panel": "#F9F8F3",
+    "Ink": "#302F2A",
+    "Muted": "#7B786F",
+    "Faint": "#A29D91",
+    "Border": "#E2DED4",
+    "Accent": "#C57556",
+    "AccentSoft": "#F4E5DC",
+    "Sage": "#E9EEE2",
+    "SageInk": "#607153",
+    "BlueSoft": "#E9EDF1",
+    "BlueInk": "#637A89",
+    "Yellow": "#F3EDDA",
+    "Bubble": "#ECE9E0",
+    "Dark": "#34332D"
+  },
+  "screens": [
+    {
+      "key": "board",
+      "name": "01 · 白板总览 · 资料与全局 AI",
+      "id": 105,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v1/previews/01-board.png",
+      "layers": 213
+    },
+    {
+      "key": "insert",
+      "name": "02 · 插入资源 · 文档与表格",
+      "id": 364,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v1/previews/02-insert.png",
+      "layers": 130
+    },
+    {
+      "key": "doc_preview",
+      "name": "03 · 文档预览 · 定位引用位置",
+      "id": 540,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v1/previews/03-doc-preview.png",
+      "layers": 111
+    },
+    {
+      "key": "doc_edit",
+      "name": "04 · 进入原文编辑 · AI 持续",
+      "id": 697,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v1/previews/04-doc-edit.png",
+      "layers": 104
+    },
+    {
+      "key": "range",
+      "name": "05 · 选择表格区域 · B2:F7",
+      "id": 847,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v1/previews/05-range.png",
+      "layers": 256
+    },
+    {
+      "key": "range_board",
+      "name": "06 · 表格区域卡片 · 实时引用",
+      "id": 1149,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v1/previews/06-range-board.png",
+      "layers": 230
+    },
+    {
+      "key": "sheet_edit",
+      "name": "07 · 进入原表编辑 · 回到白板",
+      "id": 1425,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v1/previews/07-sheet-edit.png",
+      "layers": 256
+    },
+    {
+      "key": "ai",
+      "name": "08 · 全局 AI · 管理跨资源上下文",
+      "id": 1727,
+      "page": 104,
+      "preview": "/Users/will/Project/rainy/projects/OfficeCLI-rust/docs/design/officecli-resource-workspace-v1/previews/08-ai.png",
+      "layers": 231
+    }
+  ],
+  "interactions": [
+    {
+      "screen": "board",
+      "label": "打开发布筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "board",
+      "label": "打开产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "board",
+      "label": "打开发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "board",
+      "label": "全局 AI",
+      "target": "ai"
+    },
+    {
+      "screen": "board",
+      "label": "切换筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "board",
+      "label": "切换产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "board",
+      "label": "切换发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "board",
+      "label": "管理全局上下文",
+      "target": "ai"
+    },
+    {
+      "screen": "board",
+      "label": "展开全局AI",
+      "target": "ai"
+    },
+    {
+      "screen": "board",
+      "label": "放入资料",
+      "target": "insert"
+    },
+    {
+      "screen": "board",
+      "label": "预览",
+      "target": "doc_preview"
+    },
+    {
+      "screen": "board",
+      "label": "定位原文",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "board",
+      "label": "进入编辑",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "board",
+      "label": "打开文档预览",
+      "target": "doc_preview"
+    },
+    {
+      "screen": "board",
+      "label": "定位原表",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "board",
+      "label": "进入编辑",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "board",
+      "label": "打开预算原表",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "insert",
+      "label": "打开发布筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "insert",
+      "label": "打开产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "insert",
+      "label": "打开发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "insert",
+      "label": "全局 AI",
+      "target": "ai"
+    },
+    {
+      "screen": "insert",
+      "label": "切换筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "insert",
+      "label": "切换产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "insert",
+      "label": "切换发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "insert",
+      "label": "管理全局上下文",
+      "target": "ai"
+    },
+    {
+      "screen": "insert",
+      "label": "展开全局AI",
+      "target": "ai"
+    },
+    {
+      "screen": "insert",
+      "label": "选择产品发布方案.docx",
+      "target": "insert"
+    },
+    {
+      "screen": "insert",
+      "label": "选择发布预算.xlsx",
+      "target": "range"
+    },
+    {
+      "screen": "insert",
+      "label": "选择渠道内容排期.xlsx",
+      "target": "range"
+    },
+    {
+      "screen": "insert",
+      "label": "取消",
+      "target": "board"
+    },
+    {
+      "screen": "insert",
+      "label": "放入白板",
+      "target": "board"
+    },
+    {
+      "screen": "doc_preview",
+      "label": "打开发布筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "doc_preview",
+      "label": "打开产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "doc_preview",
+      "label": "打开发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "doc_preview",
+      "label": "全局 AI",
+      "target": "ai"
+    },
+    {
+      "screen": "doc_preview",
+      "label": "切换筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "doc_preview",
+      "label": "切换产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "doc_preview",
+      "label": "切换发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "doc_preview",
+      "label": "管理全局上下文",
+      "target": "ai"
+    },
+    {
+      "screen": "doc_preview",
+      "label": "展开全局AI",
+      "target": "ai"
+    },
+    {
+      "screen": "doc_preview",
+      "label": "定位原文",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "doc_preview",
+      "label": "进入编辑",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "doc_preview",
+      "label": "返回白板",
+      "target": "board"
+    },
+    {
+      "screen": "doc_edit",
+      "label": "打开发布筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "doc_edit",
+      "label": "打开产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "doc_edit",
+      "label": "打开发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "doc_edit",
+      "label": "全局 AI",
+      "target": "ai"
+    },
+    {
+      "screen": "doc_edit",
+      "label": "切换筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "doc_edit",
+      "label": "切换产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "doc_edit",
+      "label": "切换发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "doc_edit",
+      "label": "管理全局上下文",
+      "target": "ai"
+    },
+    {
+      "screen": "doc_edit",
+      "label": "展开全局AI",
+      "target": "ai"
+    },
+    {
+      "screen": "doc_edit",
+      "label": "返回白板",
+      "target": "board"
+    },
+    {
+      "screen": "range",
+      "label": "打开发布筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "range",
+      "label": "打开产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "range",
+      "label": "打开发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "range",
+      "label": "全局 AI",
+      "target": "ai"
+    },
+    {
+      "screen": "range",
+      "label": "切换筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "range",
+      "label": "切换产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "range",
+      "label": "切换发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "range",
+      "label": "管理全局上下文",
+      "target": "ai"
+    },
+    {
+      "screen": "range",
+      "label": "展开全局AI",
+      "target": "ai"
+    },
+    {
+      "screen": "range",
+      "label": "取消",
+      "target": "insert"
+    },
+    {
+      "screen": "range",
+      "label": "引用到白板",
+      "target": "range_board"
+    },
+    {
+      "screen": "range_board",
+      "label": "打开发布筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "range_board",
+      "label": "打开产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "range_board",
+      "label": "打开发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "range_board",
+      "label": "全局 AI",
+      "target": "ai"
+    },
+    {
+      "screen": "range_board",
+      "label": "切换筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "range_board",
+      "label": "切换产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "range_board",
+      "label": "切换发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "range_board",
+      "label": "管理全局上下文",
+      "target": "ai"
+    },
+    {
+      "screen": "range_board",
+      "label": "展开全局AI",
+      "target": "ai"
+    },
+    {
+      "screen": "range_board",
+      "label": "放入资料",
+      "target": "insert"
+    },
+    {
+      "screen": "range_board",
+      "label": "预览",
+      "target": "doc_preview"
+    },
+    {
+      "screen": "range_board",
+      "label": "定位原文",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "range_board",
+      "label": "进入编辑",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "range_board",
+      "label": "打开文档预览",
+      "target": "doc_preview"
+    },
+    {
+      "screen": "range_board",
+      "label": "定位表格区域",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "range_board",
+      "label": "编辑表格区域",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "range_board",
+      "label": "将区域交给全局AI",
+      "target": "ai"
+    },
+    {
+      "screen": "range_board",
+      "label": "定位原表",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "range_board",
+      "label": "进入编辑",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "range_board",
+      "label": "打开预算原表",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "sheet_edit",
+      "label": "打开发布筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "sheet_edit",
+      "label": "打开产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "sheet_edit",
+      "label": "打开发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "sheet_edit",
+      "label": "全局 AI",
+      "target": "ai"
+    },
+    {
+      "screen": "sheet_edit",
+      "label": "切换筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "sheet_edit",
+      "label": "切换产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "sheet_edit",
+      "label": "切换发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "sheet_edit",
+      "label": "管理全局上下文",
+      "target": "ai"
+    },
+    {
+      "screen": "sheet_edit",
+      "label": "展开全局AI",
+      "target": "ai"
+    },
+    {
+      "screen": "sheet_edit",
+      "label": "返回白板",
+      "target": "range_board"
+    },
+    {
+      "screen": "ai",
+      "label": "打开发布筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "ai",
+      "label": "打开产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "ai",
+      "label": "打开发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "ai",
+      "label": "全局 AI",
+      "target": "ai"
+    },
+    {
+      "screen": "ai",
+      "label": "切换筹备白板",
+      "target": "board"
+    },
+    {
+      "screen": "ai",
+      "label": "切换产品发布方案",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "ai",
+      "label": "切换发布预算",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "ai",
+      "label": "管理全局上下文",
+      "target": "ai"
+    },
+    {
+      "screen": "ai",
+      "label": "展开全局AI",
+      "target": "ai"
+    },
+    {
+      "screen": "ai",
+      "label": "放入资料",
+      "target": "insert"
+    },
+    {
+      "screen": "ai",
+      "label": "预览",
+      "target": "doc_preview"
+    },
+    {
+      "screen": "ai",
+      "label": "定位原文",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "ai",
+      "label": "进入编辑",
+      "target": "doc_edit"
+    },
+    {
+      "screen": "ai",
+      "label": "打开文档预览",
+      "target": "doc_preview"
+    },
+    {
+      "screen": "ai",
+      "label": "定位原表",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "ai",
+      "label": "进入编辑",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "ai",
+      "label": "打开预算原表",
+      "target": "sheet_edit"
+    },
+    {
+      "screen": "ai",
+      "label": "添加资料",
+      "target": "insert"
+    },
+    {
+      "screen": "ai",
+      "label": "关闭上下文管理",
+      "target": "board"
+    }
+  ],
+  "supportingFrames": [
+    {
+      "key": "foundations",
+      "id": 2,
+      "page": 1
+    },
+    {
+      "key": "states",
+      "id": 2005,
+      "page": 2004
+    }
+  ]
+}

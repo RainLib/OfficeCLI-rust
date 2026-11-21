@@ -1,0 +1,376 @@
+// Shapes mirror the camelCase JSON that `hdoc serve` returns for the catalog.
+
+export type FontStyle = "normal" | "italic" | "oblique";
+export type FontStretch = "normal" | "condensed" | "expanded";
+export type FontFormat = "woff2" | "otf" | "ttf";
+export type FontScript =
+  | "latin"
+  | "eastAsia"
+  | "bidi"
+  | "hans"
+  | "hant"
+  | "arab";
+
+export interface FontLicense {
+  name: string;
+  webPreview: boolean;
+  ooxmlEmbed: boolean;
+  pdfEmbed: boolean;
+  redistribution: boolean;
+  expiresAtEpochMs?: number;
+}
+
+export interface FontFace {
+  family: string;
+  subfamily: string;
+  weight: number;
+  style: FontStyle;
+  stretch: FontStretch;
+  scripts: FontScript[];
+  format: FontFormat;
+  sha256: string;
+  byteLength: number;
+}
+
+export interface FontRevision {
+  schemaVersion: string;
+  fontId: string;
+  fontRevisionId: string;
+  family: string;
+  faces: FontFace[];
+  license: FontLicense;
+}
+
+export interface CatalogFont {
+  fontId: string;
+  family: string;
+  revisions: FontRevision[];
+}
+
+export interface FontRef {
+  fontId: string;
+  fontRevisionId: string;
+}
+
+export interface ThemeFontSlots {
+  latin?: FontRef;
+  eastAsia?: FontRef;
+  bidi?: FontRef;
+}
+
+export interface ThemeRevision {
+  schemaVersion: string;
+  themeRevisionId: string;
+  name: string;
+  major: ThemeFontSlots;
+  minor: ThemeFontSlots;
+  fallbackFamilies: string[];
+}
+
+export interface ThemeDocumentRef {
+  documentId: string;
+  headPinned: boolean;
+  pinnedRevisions: number[];
+}
+
+export interface DocumentSummary {
+  documentId: string;
+  profile: string;
+  format: string;
+  revision: number;
+  state: string;
+  themeRevisionId?: string;
+  title?: string;
+  updatedAtEpochMs?: number;
+  sizeBytes?: number;
+  authorName?: string;
+}
+
+export interface AdminSession {
+  scope: string;
+  documentId: string;
+  userId?: string;
+  displayName?: string;
+  expiresAt: number;
+}
+
+export interface WorkspaceJob {
+  jobId: string;
+  documentId: string;
+  kind: "import" | "export";
+  state: string;
+  format?: string;
+  revision?: number;
+  actor?: string;
+  filename?: string;
+  error?: string;
+  warnings?: string[];
+  createdAtEpochMs?: number;
+  updatedAtEpochMs: number;
+}
+
+export interface AgentRun {
+  runId: string;
+  documentId: string;
+  name: string;
+  task: string;
+  status: string;
+  model: string;
+  createdAtEpochMs: number;
+  updatedAtEpochMs: number;
+  events: Array<{
+    type?: string;
+    message?: string;
+    at?: number;
+    [key: string]: unknown;
+  }>;
+  result: string;
+  committedRevisions: number[];
+  agentCount: number;
+  team?: {
+    phase: string;
+    sharedContext: string;
+    nativeExportVerifiedRevision?: number;
+    units: Array<{
+      unitId: string;
+      title: string;
+      agentId: string;
+      status: string;
+      result: string;
+    }>;
+  };
+}
+
+export interface ServiceInfo {
+  startedAtEpochMs: number;
+  documentsRoot: string;
+  catalogRoot: string;
+  defaultThemeRevisionId?: string;
+  storage: string;
+  api: boolean;
+  mcp: boolean;
+  agentAvailable: boolean;
+  agentModel?: string;
+  collaboration: string;
+  exportConcurrency: number;
+  version: string;
+}
+
+export interface DocumentAccess {
+  documentId: string;
+  scope: "read" | "write";
+  userId?: string;
+  displayName?: string;
+  expiresAt: number;
+  collaborationEpoch: number;
+}
+
+export interface RevisionRecord {
+  revision: number;
+  parentRevision?: number;
+  patchId?: string;
+  authorId?: string;
+  authorName?: string;
+  createdAtEpochMs: number;
+  dirtyNodeIds: string[];
+  dirtyChunkIds: string[];
+  themeRevisionId?: string;
+}
+
+export interface ExportMode {
+  id: string;
+  source: boolean;
+  available: boolean;
+  reason?: string;
+  warnings: string[];
+  fontWarnings: string[];
+}
+
+export interface ExportCapabilities {
+  revision: number;
+  headRevision: number;
+  defaultFormat: string;
+  formats: Array<{
+    format: string;
+    available: boolean;
+    recommendedMode: string;
+    modes: ExportMode[];
+  }>;
+}
+
+export interface ResolvedFace {
+  slot: string;
+  fontId: string;
+  fontRevisionId: string;
+  family: string;
+  subfamily: string;
+  weight: number;
+  style: FontStyle;
+  stretch: FontStretch;
+  scripts: FontScript[];
+  format: FontFormat;
+  sha256: string;
+  byteLength: number;
+  href: string;
+  webPreview: boolean;
+  ooxmlEmbed: boolean;
+  pdfEmbed: boolean;
+}
+
+export interface ResolvedTheme {
+  themeRevisionId: string;
+  name: string;
+  css: string;
+  faces: ResolvedFace[];
+  warnings?: string[];
+}
+
+export interface FontDeleteReport {
+  fontId: string;
+  removedRevisions: string[];
+  removedBlobs: string[];
+}
+
+/**
+ * One appended catalog operation. `detail` is omitted by the server when it is
+ * empty, and an older line may carry an action this build has no name for, so
+ * both fields are read as text rather than as a closed union.
+ */
+export interface AuditEntry {
+  at: number;
+  action: string;
+  target: string;
+  actor: string;
+  detail?: string;
+}
+
+export interface AuditPage {
+  entries: AuditEntry[];
+  /** Lines that could not be read as records, so a short list is not the whole trail. */
+  unreadable: number;
+  /**
+   * Lines the window contained and this page did not return. Different from
+   * `unreadable`: those exist and were merely not read.
+   */
+  truncated?: boolean;
+  /** The limit the server actually applied. */
+  limit: number;
+  /**
+   * The window the server applied, or null for an open end. Compared against
+   * what was asked: an older build ignores both parameters and answers with
+   * the newest lines, which must not be shown as if it were the requested
+   * week.
+   */
+  from?: string | null;
+  to?: string | null;
+}
+
+/**
+ * Which export to ask about. `docx` and `pptx` share the OOXML embedding flag,
+ * `pdf` has its own, and `xlsx` registers names without ever carrying bytes.
+ */
+export type ExportKind = "docx" | "pptx" | "pdf" | "xlsx";
+
+/**
+ * One face of a pinned theme, as the export would treat it. `reason` is the
+ * sentence the export report writes, so the console cannot invent its own
+ * explanation; it is absent exactly when the bytes go into the file.
+ */
+export interface FontPlanEntry {
+  slots: string[];
+  family: string;
+  subfamily: string;
+  weight: number;
+  style: FontStyle;
+  format: FontFormat;
+  sha256: string;
+  byteLength: number;
+  embeds: boolean;
+  reason?: string;
+  /** The day the license stops allowing this face, when it has an end date. */
+  expiresAtEpochMs?: number;
+  /**
+   * The exporter's own renewal sentence, present only for a face whose bytes go
+   * into the file while its license is about to run out.
+   */
+  warning?: string;
+}
+
+export interface FontPlan {
+  documentId: string;
+  /** The revision the answer is about, resolved by the server. */
+  revision: number;
+  /** Null when that revision carries no pinned theme. */
+  themeRevisionId: string | null;
+  kind: ExportKind;
+  /** How soon "about to run out" is, straight from the exporter. */
+  licenseWarnWindowDays: number;
+  entries: FontPlanEntry[];
+  /**
+   * What a PDF export would do to the text the source file already carries.
+   * Only `kind=pdf` gets an answer; every other format is null because there is
+   * no rendered text of somebody else's to move.
+   */
+  textForecast: TextForecast | null;
+}
+
+/**
+ * Why a forecast answered the way it did. Anything but `ready` names what was
+ * missing: the server can only count runs in a source PDF it actually holds.
+ */
+export type ForecastState =
+  | "ready"
+  | "noTheme"
+  | "otherFormat"
+  | "noSource"
+  | "tooLarge"
+  | "unreadable"
+  | "catalogError"
+  | "unavailable";
+
+/** One outcome of the pass — a run that moves, or a reason one does not. */
+export interface ForecastLine {
+  /**
+   * `moved`, `unreadable`, `uncovered`, `unfittable`, `form`, `splitContent`,
+   * `alreadyTheme`, `noFace` or `notEmbedded`.
+   */
+  bucket: string;
+  count: number;
+  /** True when the export files this sentence among its warnings. */
+  warning: boolean;
+  /** The wording the export report writes, verbatim. */
+  sentence: string;
+}
+
+/** A face that would draw moved runs, and how many it would take. */
+export interface ForecastFace {
+  family: string;
+  subfamily: string;
+  runs: number;
+}
+
+export interface TextForecast {
+  state: ForecastState;
+  /** What the answer means, for every state and for a swapped source. */
+  message?: string;
+  /** Ready: every run the pass looked at, moved or not. */
+  runsSeen?: number;
+  runsRetargeted?: number;
+  faces?: ForecastFace[];
+  lines?: ForecastLine[];
+  sourceBytes?: number;
+  /** False when the stored source no longer hashes to what the manifest recorded. */
+  sourceMatches?: boolean;
+}
+
+/** A face picked off disk, before its bytes are stored as a blob. */
+export interface PendingFace {
+  name: string;
+  format: FontFormat;
+  bytes: Uint8Array;
+  subfamily: string;
+  weight: number;
+  style: FontStyle;
+  stretch: FontStretch;
+  scripts: FontScript[];
+}

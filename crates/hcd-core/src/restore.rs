@@ -34,6 +34,7 @@ pub fn restore_revision(
     let patch_id = format!("restore-{target}-{revision}");
     let patch_hash = hash_bytes(format!("restore:{target}:{expected_head}").as_bytes());
     let record = RevisionRecord {
+        canvas_rewrite: None,
         schema_version: head.schema_version.clone(),
         document_id: head.document_id.clone(),
         revision,
@@ -43,13 +44,15 @@ pub fn restore_revision(
         patch_base_revision: Some(expected_head),
         author_id: None,
         author_name: None,
+        theme_revision_id: historical.theme_revision_id.clone(),
         root_hash: target_record.root_hash.clone(),
         annotation_root_hash: target_record.annotation_root_hash.clone(),
         index_prefix: target_record.index_prefix.clone(),
         index_root_href: target_record.index_root_href.clone(),
         index_page_count: Some(historical.index_page_count),
         chunk_count: Some(historical.chunk_count),
-        asset_index_href: target_record.asset_index_href,
+        asset_index_href: target_record.asset_index_href.clone(),
+        styles_href: target_record.styles_href.clone(),
         created_at_epoch_ms: now_epoch_ms(),
         dirty_node_ids: Vec::new(),
         removed_node_ids: Vec::new(),
@@ -57,14 +60,30 @@ pub fn restore_revision(
         dirty_source_parts: Vec::new(),
         dirty_grid_parts: Vec::new(),
         converted_formula_node_ids: Vec::new(),
+        grid_values_reordered: false,
+        grid_filter_changed: false,
+        pdf_layout_changed: false,
+        pptx_scene_changed: false,
         grid_row_insertions: Vec::new(),
         grid_row_deletions: Vec::new(),
         grid_column_insertions: Vec::new(),
         grid_column_deletions: Vec::new(),
+        sheet_renames: Vec::new(),
+        sheet_additions: Vec::new(),
+        sheet_removals: Vec::new(),
+        slide_additions: Vec::new(),
+        slide_removals: Vec::new(),
+        slide_reorders: Vec::new(),
+        slide_copies: Vec::new(),
+        slide_group_edit: None,
+        pptx_master_backgrounds: target_record.pptx_master_backgrounds,
+        pptx_master_text_styles: target_record.pptx_master_text_styles,
         structural_change: true,
     };
+    head.theme_revision_id = historical.theme_revision_id.clone();
     head.revision = revision;
     head.root_hash = record.root_hash.clone();
+    head.styles_href = record.styles_href.clone();
     head.annotation_root_hash = record.annotation_root_hash.clone();
     head.annotation_href = historical.annotation_href;
     head.index_prefix = record.index_prefix.clone();

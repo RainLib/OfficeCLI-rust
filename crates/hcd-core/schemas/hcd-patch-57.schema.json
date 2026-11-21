@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:57",
+  "title": "HTML Canonical Document native Word picture layout",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentId", "patchId", "baseRevision", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "hcd-patch/57" },
+    "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "patchId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "actor": { "type": "object", "maxProperties": 64, "additionalProperties": { "type": "string" } },
+    "metadata": { "type": "object", "maxProperties": 128, "additionalProperties": { "type": "string" } },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["op", "nodeId", "layout", "precondition"],
+        "properties": {
+          "op": { "const": "docx.picture.layout" },
+          "nodeId": { "type": "string", "pattern": "^n_[a-f0-9]{32}$" },
+          "layout": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/layout" }] },
+          "precondition": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["visualHash"],
+            "properties": {
+              "visualHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wrap"],
+      "properties": {
+        "wrap": { "enum": ["inline", "square", "topAndBottom", "behind", "inFront"] },
+        "horizontalAlignment": { "enum": ["left", "center", "right"] },
+        "horizontalOffsetEmu": { "type": "integer", "minimum": -25400000, "maximum": 25400000 },
+        "verticalOffsetEmu": { "type": "integer", "minimum": -25400000, "maximum": 25400000 },
+        "textDistanceEmu": { "type": "integer", "minimum": 0, "maximum": 5080000 },
+        "wrapSide": { "enum": ["bothSides", "left", "right", "largest"] }
+      },
+      "allOf": [
+        { "not": { "required": ["horizontalAlignment", "horizontalOffsetEmu"] } },
+        {
+          "if": { "properties": { "wrap": { "const": "inline" } } },
+          "then": { "maxProperties": 1 }
+        },
+        {
+          "if": { "required": ["wrapSide"] },
+          "then": { "properties": { "wrap": { "const": "square" } } }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "purpose": "independent robustness and source-backed edit probes; no same-source visual certification",
+  "modelsCalled": false,
+  "temporaryRoot": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/hcd-inline-fidelity-mbunewgg",
+  "results": [
+    {
+      "file": "project-proposal.docx",
+      "sha256": "19114630896ec66f97cad09587b62c230ec052e61a78b6c6aa51c6312c2952e7",
+      "importValidated": true,
+      "canonicalHtmlRendered": true,
+      "chunks": 3,
+      "mixedInlinePatch": true,
+      "stableAnchor": true,
+      "sourceExport": true,
+      "paragraphPropertiesPreserved": true,
+      "runPropertiesPreserved": true,
+      "untouchedPackagePartsPreserved": true,
+      "exportReimportValidated": true,
+      "originalUnmodified": true
+    },
+    {
+      "file": "170kV隔离开关采购合同.docx",
+      "sha256": "f3cae6a5ed2f29ca16c49bc5acb8e117f30ab5a822e625ce0574694f516fa16e",
+      "importValidated": true,
+      "canonicalHtmlRendered": true,
+      "chunks": 7,
+      "mixedInlinePatch": true,
+      "stableAnchor": true,
+      "sourceExport": true,
+      "paragraphPropertiesPreserved": true,
+      "runPropertiesPreserved": true,
+      "untouchedPackagePartsPreserved": true,
+      "exportReimportValidated": true,
+      "originalUnmodified": true
+    },
+    {
+      "file": "170kV隔离开关采购合同.pdf",
+      "sha256": "bcea3f6829901b4a697d04338f07ee314ea81303dd913fac6c06340f1a254915",
+      "importValidated": true,
+      "canonicalHtmlRendered": true,
+      "chunks": 37,
+      "unchangedSourceExport": true,
+      "exportedBytesEqualSource": true,
+      "pageCount": null,
+      "originalUnmodified": true
+    }
+  ]
+}

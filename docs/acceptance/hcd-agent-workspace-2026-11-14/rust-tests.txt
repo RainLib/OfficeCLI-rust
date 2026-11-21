@@ -1,0 +1,1103 @@
+   Compiling officecli v0.1.31 (<repo>/crates/officecli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.30s
+     Running unittests src/lib.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/docx_handler-69fe1073cff3f656)
+
+running 41 tests
+test mutations::chart_tests::line_chart_has_two_axes_no_bar_dir ... ok
+test mutations::chart_tests::bar_chart_uses_horizontal_dir ... ok
+test dom_types::tests::paragraph_text_dedupes_alternate_content_to_choice ... ok
+test mutations::chart_tests::column_chart_has_axes_and_categories ... ok
+test dom_types::tests::paragraph_text_uses_fallback_when_no_choice ... ok
+test mutations::chart_tests::pie_chart_has_no_axes ... ok
+test mutations::chart_tests::text_escaping_in_titles ... ok
+test mutations::chart_tests::unknown_chart_type_rejected ... ok
+test handler::tests::generated_word_nodes_serialize_local_attributes_in_word_namespace ... ok
+test add::bookmark_end_tests::standalone_bookmark_end_uses_explicit_id_or_existing_name ... ok
+test helpers::split_run_tests::splits_chinese_after_leading_tab_without_panicking ... ok
+test html_preview::tests::list_container_indent_uses_point_units_and_hanging_marker_origin ... ok
+test helpers::split_run_tests::preserves_all_text_and_non_text_children_at_every_boundary ... ok
+test html_preview::tests::page_layout_reads_unqualified_ooxml_geometry_attributes ... ok
+test add::bookmark_end_tests::tabstop_uses_paragraph_properties_without_replacing_inline_tab ... ok
+test mutations::comment_tests::definition_only_comment_does_not_rewrite_the_document_part ... ok
+test mutations::doc_settings_tests::compat_flag_false_strips_existing ... ok
+test mutations::doc_settings_tests::compat_flag_synthesizes_compat_block_when_missing ... ok
+test html_preview::tests::drawingml_textbox_renders_content_and_shape_instead_of_placeholder ... ok
+test handler::tests::range_text_replacement_does_not_merge_across_paragraphs ... ok
+test mutations::comment_tests::preparing_comments_extended_replace_stamps_existing_comment_para_ids ... ok
+test mutations::doc_settings_tests::compat_flag_toggle_inserts_into_compat_block ... ok
+test handler::tests::range_text_replacement_emits_text_once_across_segments ... ok
+test mutations::doc_settings_tests::first_image_expands_a_self_closing_word_body ... ok
+test mutations::doc_settings_tests::key_to_para_attr_maps_known_keys ... ok
+test mutations::doc_settings_tests::key_to_run_attr_maps_known_keys ... ok
+test handler::raw_part_path_tests::resolves_csharp_semantic_raw_relationship_paths ... ok
+test handler::tests::range_text_replacement_merges_textbox_runs_in_same_paragraph ... ok
+test mutations::doc_settings_tests::settings_inserts_default_tab_stop ... ok
+test mutations::doc_settings_tests::settings_key_lookup ... ok
+test mutations::doc_settings_tests::settings_replaces_existing ... ok
+test text_offset::tests::offsets_include_runs_nested_inside_textboxes ... ok
+test revision::tests::accept_and_reject_apply_the_expected_revision_semantics ... ok
+test revision::tests::query_revisions_emits_stable_synthetic_paths_and_deleted_text ... ok
+test text_offset::tests::offsets_prefer_alternate_content_choice_over_fallback ... ok
+test revision::tests::native_revision_path_can_target_one_marker ... ok
+test mutations::comment_tests::comment_lifecycle_wires_package_and_cleans_anchors ... ok
+test handler::tests::serialize_preserves_non_wordprocessing_namespaces ... ok
+test mutations::comment_tests::comment_positional_paths_use_collection_order_not_ooxml_ids ... ok
+test mutations::comment_tests::modern_comment_metadata_round_trips_reply_and_resolved_state ... ok
+test mutations::comment_tests::point_and_cross_paragraph_comment_ranges_preserve_marker_shape ... ok
+
+test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/handler_common-6aaaec63306c6d2c)
+
+running 38 tests
+test extended_properties::tests::set_rejects_unknown_property ... ok
+test extended_properties::tests::minimal_app_xml_is_well_formed ... ok
+test extended_properties::tests::set_inserts_missing_property ... ok
+test extended_properties::tests::set_writes_known_property ... ok
+test attribute_filter::tests::test_parse_exists ... ok
+test attribute_filter::tests::test_parse_not_equals ... ok
+test attribute_filter::tests::test_parse_equals ... ok
+test extended_properties::tests::empty_input_is_noop ... ok
+test hyperlink_validator::tests::allowlist_rejects_non_absolute ... ok
+test find_replace::tests::test_replace_max_replacements ... ok
+test find_replace::tests::test_replace_basic ... ok
+test find_replace::tests::test_find_all_offsets_case_insensitive ... ok
+test find_replace::tests::test_find_all_offsets_case_sensitive ... ok
+test find_replace::tests::test_replace_whole_word ... ok
+test hyperlink_validator::tests::allowlist_rejects_unsafe_schemes ... ok
+test hyperlink_validator::tests::allowlist_accepts_safe_schemes ... ok
+test hyperlink_validator::tests::require_safe_rejects_javascript_with_named_context ... ok
+test hyperlink_validator::tests::require_safe_returns_ok_for_safe_or_empty_or_relative ... ok
+test attribute_filter::tests::test_matches_all_attributes ... ok
+test extended_properties::tests::non_numeric_int_field_falls_back_to_string ... ok
+test hyperlink_validator::tests::scheme_extraction_handles_plus_and_dash ... ok
+test mutation_selector_guard::tests::test_known_global_allowed ... ok
+test mutation_selector_guard::tests::test_root_rejected ... ok
+test extended_properties::tests::reads_all_fields_with_int_coercion ... ok
+test mutation_selector_guard::tests::test_scoped_path_allowed ... ok
+test path_range::tests::test_parse_range_paths ... ok
+test style_unsupported_hints::tests::test_format_empty ... ok
+test style_unsupported_hints::tests::test_format_with_unsupported ... ok
+test find_replace::tests::test_replace_regex_invalid_falls_back_to_original ... ok
+test style_unsupported_hints::tests::test_suggest_property_no_match ... ok
+test style_unsupported_hints::tests::test_suggest_property_typo ... ok
+test find_replace::tests::test_find_all_spans_literal_and_regex ... ok
+test find_replace::tests::test_replace_regex_basic ... ok
+test find_replace::tests::test_replace_regex_case_insensitive ... ok
+test find_replace::tests::test_replace_regex_whole_word ... ok
+test find_replace::tests::test_matches_text_filter_uses_csharp_literal_and_regex_vocabulary ... ok
+test find_replace::tests::test_replace_regex_capture ... ok
+test find_replace::tests::test_find_all_replacements_expands_regex_captures ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/hcd_core-b97ae3ebf397ec08)
+
+running 126 tests
+test bundle::tests::safe_paths_reject_parent_components ... ok
+test catalog::tests::audit_day_names_follow_the_utc_calendar ... ok
+test catalog::tests::audit_entries_serialize_with_http_names ... ok
+test bundle::tests::revision_reads_enforce_the_chain_limit_before_touching_disk ... ok
+test catalog::tests::a_license_due_soon_is_named_while_the_bytes_still_go_in ... ok
+test bundle::tests::bounded_reader_rejects_a_control_object_before_full_buffering ... ok
+test bundle::tests::bundle_hrefs_cannot_escape_through_symbolic_links ... ok
+test bundle::tests::local_bundle_mutations_are_serialized ... ok
+test catalog::tests::audit_a_missing_log_reads_as_empty_and_unknown_fields_survive ... ok
+test catalog::tests::audit_rejects_a_bad_action_and_forgery_shaped_text ... ok
+test catalog::tests::audit_tail_keeps_the_newest_lines_of_an_oversized_day ... ok
+test catalog::tests::detect_font_format_reads_magic_bytes ... ok
+test catalog::tests::document_summaries_omit_an_absent_pin ... ok
+test catalog::tests::audit_read_walks_days_newest_first_across_files ... ok
+test catalog::tests::embed_plan_skips_oversize_and_records_license_limits ... ok
+test catalog::tests::audit_lines_append_one_file_per_day_and_read_back_newest_first ... ok
+test bundle::tests::gzip_reader_rejects_truncation_trailing_data_and_expansion ... ok
+test archive::tests::rejects_excessive_decompression_before_publishing_destination ... ok
+test catalog::tests::audit_window_refuses_names_that_are_not_days ... ok
+test catalog::tests::audit_window_keeps_only_the_days_it_names ... ok
+test archive::tests::rejects_unsafe_archive_entries_without_creating_destination ... ok
+test catalog::tests::delete_font_revision_drops_it_and_garbage_collects_orphan_blobs ... ok
+test catalog::tests::planted_timestamps_land_on_the_day_they_name ... ok
+test bundle::tests::empty_bundle_finishes_atomically ... ok
+test catalog::tests::delete_is_refused_while_a_theme_references_the_font ... ok
+test catalog::tests::delete_keeps_a_shared_blob_until_the_last_revision_goes ... ok
+test catalog::tests::listing_returns_stored_fonts_and_themes ... ok
+test catalog::tests::listing_rejects_a_tampered_object_instead_of_a_partial_view ... ok
+test catalog::tests::deleting_an_unpinned_theme_keeps_the_fonts_and_drops_the_marker ... ok
+test catalog::tests::expired_license_drops_preview_and_rejects_a_changed_theme ... ok
+test catalog::tests::resolve_pins_font_files_and_css_variables ... ok
+test catalog::tests::theme_document_refs_serialize_with_http_names ... ok
+test bundle::tests::body_root_covers_styles_and_the_asset_manifest ... ok
+test bundle::tests::append_index_page_starts_a_new_leaf_under_a_taller_tree ... ok
+test catalog::tests::truncation_only_says_what_is_really_left_behind ... ok
+test catalog::tests::presentation_css_carries_declarations_when_the_document_has_no_region ... ok
+test hash::tests::bloom_rejects_no_inserted_values ... ok
+test hash::tests::stable_ids_are_repeatable ... ok
+test catalog::tests::a_theme_that_only_survives_in_history_is_still_reachable ... ok
+test catalog::tests::listing_documents_shows_the_head_pin ... ok
+test html::tests::dangerous_css_is_rejected_case_and_space_insensitively ... ok
+test html::tests::a_patched_font_node_without_a_face_or_with_markup_is_broken ... ok
+test html::tests::extracts_only_canonical_text_nodes ... ok
+test html::tests::font_nodes_are_only_the_patched_ones ... ok
+test html::tests::inline_css_uses_a_small_property_and_value_allowlist ... ok
+test patch::tests::a_frozen_band_that_cannot_grow_past_its_sheet_is_refused_untouched ... ok
+test patch::tests::a_patched_node_writes_exactly_the_text_the_block_renderer_writes ... ok
+test patch::tests::a_row_or_column_moved_through_a_frozen_band_moves_the_band_in_every_window ... ok
+test patch::tests::a_shape_alignment_that_finds_no_box_or_reads_junk_is_refused ... ok
+test patch::tests::clearing_a_font_keeps_the_rest_of_the_style ... ok
+test patch::tests::aligning_a_slide_text_shape_moves_every_paragraph_and_the_body_anchor ... ok
+test patch::tests::clearing_a_font_leaves_a_source_face_alone ... ok
+test patch::tests::freezing_a_worksheet_replaces_every_window_pane_and_reports_what_changed ... ok
+test patch::tests::generated_span_text_is_replaced_and_escaped ... ok
+test catalog::tests::presentation_css_adds_fonts_and_leaves_rules_to_the_document ... ok
+test patch::tests::node_style_targets_text_and_pdf_bbox_without_changing_node_hash ... ok
+test patch::tests::node_style_validation_rejects_empty_and_unsafe_values ... ok
+test patch::tests::overlapping_splices_are_rejected ... ok
+test patch::tests::pdf_overlay_delete_removes_only_the_created_text_box ... ok
+test patch::tests::pdf_overlay_geometry_moves_and_resizes_without_changing_text_identity ... ok
+test catalog::tests::listing_documents_fails_loudly_on_an_unreadable_bundle ... ok
+test catalog::tests::reachability_names_the_head_and_the_revision_that_pinned ... ok
+test catalog::tests::listing_documents_skips_loose_files_and_sorts_by_id ... ok
+test catalog::tests::the_font_report_answers_the_same_question_the_export_asks ... ok
+test catalog::tests::the_scan_skips_non_bundles_and_a_missing_document_root ... ok
+test catalog::tests::pin_bumps_revision_and_stays_on_the_revision_it_pinned ... ok
+test catalog::tests::the_report_and_the_export_say_the_same_thing_about_a_license_due_soon ... ok
+test catalog::tests::retired_theme_blocks_new_pins_but_still_resolves_and_reasserts ... ok
+test catalog::tests::theme_font_plan_embeds_otf_and_registers_woff2 ... ok
+test catalog::tests::documents_pinning_another_theme_are_not_reported ... ok
+test catalog::tests::unpin_never_advances_a_document_that_carries_no_theme ... ok
+test patch::tests::one_patch_may_not_both_pin_and_clear_a_node ... ok
+test patch::tests::pptx_slide_copy_needs_the_page_and_the_version_it_addresses ... ok
+test patch::tests::runtime_patch_validation_enforces_frozen_ids_hashes_and_annotations ... ok
+test patch::tests::splitting_merge_restores_empty_cell_style_and_column_order ... ok
+test patch::tests::pptx_slide_deletion_needs_the_page_version_it_addresses ... ok
+test patch::tests::pptx_slide_reorder_needs_the_page_direction_and_version_it_addresses ... ok
+test patch::tests::an_added_slide_never_takes_a_part_name_the_deck_already_spent ... ok
+test catalog::tests::unpin_drops_the_theme_region_and_keeps_the_document_styles ... ok
+test patch::tests::unicode_scalar_splice_handles_emoji ... ok
+test presentation::tests::docx_virtual_pagination_preserves_nodes_and_uses_measured_page_geometry ... ok
+test patch::tests::pptx_slide_copy_copies_every_chunk_of_a_page_that_spans_two ... ok
+test presentation::tests::grid_presentation_groups_sheet_chunks_and_builds_excel_chrome ... ok
+test presentation::tests::presentation_rewrites_known_asset_uris_only ... ok
+test presentation::tests::preview_style_override_is_safe_and_opt_in ... ok
+test presentation::tests::semantic_flow_preview_metrics_match_a4_with_forty_point_margins ... ok
+test presentation::tests::writer_checks_the_limit_before_emitting_more_bytes ... ok
+test schema_tests::frozen_types_reject_unknown_json_fields ... ok
+test search::tests::finds_unicode_and_case_insensitive_text_at_character_offsets ... ok
+test schema_tests::frozen_json_schemas_are_valid_json_and_have_stable_ids ... ok
+test patch::tests::pptx_slide_deletion_drops_the_page_from_the_index_and_records_the_part ... ok
+test structure::tests::body_insert_can_use_the_boundary_before_a_footer ... ok
+test structure::tests::markdown_complex_blocks_do_not_hide_editable_paragraphs ... ok
+test structure::tests::mixed_run_faces_are_read_as_read_only_instead_of_one_block_font ... ok
+test patch::tests::pptx_slide_copy_twice_names_each_copy_by_its_own_part ... ok
+test patch::tests::pptx_slide_copy_duplicates_a_page_right_behind_the_original ... ok
+test patch::tests::text_font_applies_inline_style_and_data_attributes_and_bumps_revision ... ok
+test validate::tests::canonical_identifier_decoding_is_strict_and_repeatable ... ok
+test patch::tests::pptx_slide_reorder_moves_every_chunk_of_a_page_that_spans_two ... ok
+test patch::tests::pptx_slide_reorder_swaps_two_pages_without_rewriting_a_chunk ... ok
+test patch::tests::pptx_slide_reorder_refuses_a_page_with_no_neighbour ... ok
+test validate::tests::styles_href_accepts_global_and_managed_parts_only ... ok
+test xlsx_formula::tests::chained_renames_follow_the_final_name ... ok
+test xlsx_formula::tests::deleting_a_worksheet_collapses_the_references_to_it ... ok
+test xlsx_formula::tests::deleting_a_worksheet_only_breaks_references_to_it ... ok
+test xlsx_formula::tests::deletion_updates_scalar_and_range_references ... ok
+test xlsx_formula::tests::insertion_updates_scalar_absolute_and_range_references ... ok
+test patch::tests::text_font_clear_refuses_a_node_that_carries_no_pin ... ok
+test validate::tests::hcd_table_fragment_metadata_is_strict_and_contiguous ... ok
+test xlsx_formula::tests::rename_keeps_literals_and_longer_names_untouched ... ok
+test xlsx_formula::tests::rename_updates_bare_and_quoted_sheet_references ... ok
+test patch::tests::text_font_requires_v37_and_rejects_empty_or_unsafe_families ... ok
+test validate::tests::dangerous_html_elements_attributes_and_urls_are_rejected ... ok
+test patch::tests::pptx_slide_deletion_refuses_to_empty_a_deck_or_name_a_page_it_cannot_find ... ok
+test patch::tests::text_font_clear_gives_the_node_back_the_tag_the_import_wrote ... ok
+test structure::tests::structural_patch_rejects_conflicts_and_unsafe_links ... ok
+test structure::tests::a_block_font_renders_the_markers_a_text_font_patch_writes ... ok
+test patch::tests::pptx_slide_copy_refuses_a_page_hcd_created_or_hcd_rewrote ... ok
+test structure::tests::restore_reuses_historical_index_and_passes_full_validation ... ok
+test validate::tests::node_id_tracker_detects_duplicates_after_spilling_to_disk ... ok
+test structure::tests::structural_revisions_keep_history_and_reuse_untouched_chunk_objects ... ok
+test structure::tests::a_font_only_edit_makes_a_revision_and_an_unsafe_face_does_not ... ok
+test bundle::tests::append_index_page_opens_the_page_after_a_full_one ... ok
+test bundle::tests::replace_index_pages_renumbers_the_pages_after_a_hole ... ok
+test patch::tests::pptx_slide_deletion_empties_the_last_index_page_it_leaves_behind ... ok
+test patch::tests::patch_revisions_every_bounded_index_page ... ok
+
+test result: ok. 126 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.24s
+
+     Running unittests src/lib.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/hcd_docx-93fa0c3f7fe9e78f)
+
+running 43 tests
+test importer::tests::default_docx_table_css_does_not_invent_grid_borders ... ok
+test exporter::tests::text_rewriter_uses_unicode_text_and_preserves_spaces ... ok
+test exporter::tests::a_pinned_face_outside_a_run_is_reported_not_dropped ... ok
+test exporter::tests::an_unclosed_run_is_an_error_instead_of_a_truncated_part ... ok
+test importer::tests::namespaced_local_names_are_supported ... ok
+test exporter::tests::a_self_closed_run_property_element_gains_the_pinned_fonts ... ok
+test exporter::tests::a_pinned_face_creates_run_properties_when_the_run_has_none ... ok
+test exporter::tests::a_pinned_face_replaces_the_run_fonts_and_keeps_the_rest ... ok
+test importer::tests::flattened_legacy_hyperlink_fields_render_results_and_block_scripts ... ok
+test importer::tests::paragraph_line_rule_distinguishes_auto_from_fixed_spacing ... ok
+test importer::tests::relationship_targets_are_normalized ... ok
+test importer::tests::default_paragraph_style_applies_auto_line_spacing_to_unstyled_paragraphs ... ok
+test importer::tests::first_chunk_is_emitted_before_source_part_eof ... ok
+test importer::tests::conditional_style_masks_are_materialized_on_rows_cells_and_paragraphs ... ok
+test importer::tests::canonical_html_exposes_safe_word_formatting_and_structure ... ok
+test importer::tests::drawingml_textboxes_preserve_geometry_grouping_and_nested_tables ... ok
+test importer::tests::word_font_stacks_keep_metric_compatible_fallbacks ... ok
+test importer::tests::word_numbering_materializes_multilevel_markers_and_start_overrides ... ok
+test importer::tests::word_numbering_preserves_marker_formatting_indent_and_style_inheritance ... ok
+test importer::tests::oversized_drawing_position_value_is_rejected ... ok
+test importer::tests::oversized_table_grid_is_rejected_before_html_growth ... ok
+test importer::tests::word_theme_rejects_excessive_xml_depth ... ok
+test importer::tests::word_theme_resolves_font_slots_colors_tint_and_shade ... ok
+test importer::tests::oversized_table_band_size_is_rejected ... ok
+test importer::tests::logical_column_bands_account_for_grid_span ... ok
+test importer::tests::word_styles_reject_excessive_table_band_sizes ... ok
+test importer::tests::word_styles_reject_excessive_xml_depth_before_css_generation ... ok
+test importer::tests::oversized_vertical_merge_group_is_rejected_before_chunk_publication ... ok
+test importer::tests::run_fonts_follow_east_asia_and_bidi_language_theme_slots ... ok
+test exporter::tests::export_collection_keeps_only_changed_nodes_from_a_dirty_part ... ok
+test importer::tests::table_property_exceptions_override_row_cells_and_ignore_history ... ok
+test importer::tests::oversized_text_node_and_deep_xml_are_rejected ... ok
+test importer::tests::vertical_merge_materializes_rowspan_and_locks_continuation_text ... ok
+test importer::tests::tracked_revisions_preserve_current_semantics_and_keep_deletions_read_only ... ok
+test importer::tests::direct_table_formats_produce_a_valid_file_backed_bundle ... ok
+test importer::tests::duplicate_media_relationship_aliases_remain_available ... ok
+test importer::tests::table_style_conditions_keep_global_row_semantics_across_fragments ... ok
+test importer::tests::duplicate_media_import_produces_valid_unique_asset_index ... ok
+test importer::tests::linked_and_conditional_table_styles_generate_scoped_css ... ok
+test exporter::tests::a_pinned_dirty_node_is_collected_with_its_faces ... ok
+test tests::validator_rejects_a_corrupted_revision_chain ... ok
+test tests::source_export_pins_a_patched_face_onto_its_run ... ok
+test tests::docx_hcd_patch_export_roundtrip ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s
+
+     Running unittests src/lib.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/hcd_formats-e381ed3162386b57)
+
+running 184 tests
+test common::tests::xml_budget_rejects_excessive_depth ... ok
+test common::tests::a_reorder_refuses_a_name_it_asks_for_twice ... ok
+test pdf::tests::pdf_text_controls_are_sanitized_before_hcd_publication ... ok
+test common::tests::an_appended_child_repeats_only_the_namespace_its_siblings_need ... ok
+test common::tests::a_reorder_refuses_a_list_that_opens_one_of_its_entries ... ok
+test mermaid::tests::unsupported_diagram_never_executes_source_as_markup ... ok
+test common::tests::a_reorder_refuses_a_page_the_list_does_not_hold ... ok
+test common::tests::a_list_that_already_holds_the_wanted_order_reports_no_move ... ok
+test common::tests::a_bare_attribute_name_matches_only_an_unprefixed_attribute ... ok
+test common::tests::a_reordered_list_trades_its_entries_and_keeps_every_other_byte ... ok
+test common::tests::a_prefixed_name_finds_the_relationship_whatever_prefix_the_package_used ... ok
+test common::tests::an_entry_the_order_leaves_alone_stays_behind_the_named_ones ... ok
+test mermaid::tests::sequence_diagram_is_bounded_and_escaped ... ok
+test mermaid::tests::flowchart_is_derived_from_the_current_canonical_node ... ok
+test pptx::tests::a_pinned_face_reaches_a_field_run_and_its_self_closed_properties ... ok
+test pptx::tests::a_pinned_face_with_no_writable_run_stops_the_slide_export ... ok
+test pptx::tests::a_run_left_open_at_the_end_of_a_part_is_broken ... ok
+test common::tests::export_collection_materializes_only_dirty_nodes_not_the_whole_part ... ok
+test pdf::tests::hcd_pdf_import_publishes_a_valid_lazy_page_raster ... ok
+test pdf::tests::hcd_import_rejects_an_object_stream_bomb_before_lopdf_without_publishing ... ok
+test pptx::tests::an_alignment_the_part_has_no_shape_or_no_paragraph_for_is_refused ... ok
+test pdf::tests::hcd_import_rejects_an_xref_stream_bomb_before_lopdf_without_publishing ... ok
+test pptx::tests::an_inserted_box_writes_its_pinned_face_into_the_shape_it_creates ... ok
+test pdf::tests::hcd_import_rejects_a_compressed_page_stream_bomb_without_publishing ... ok
+test pptx::tests::a_page_whose_relationship_list_names_a_notes_page_is_not_copied ... ok
+test pptx::tests::a_page_moved_and_moved_back_writes_the_package_unchanged ... ok
+test pptx::tests::a_page_that_points_at_nothing_copies_with_an_empty_relationship_list ... ok
+test pptx::tests::a_text_box_hcd_created_keeps_the_alignment_it_was_drawn_with ... ok
+test pptx::tests::a_page_created_and_deleted_inside_the_history_writes_no_slide_part ... ok
+test pptx::tests::a_page_copied_and_deleted_again_writes_the_package_unchanged ... ok
+test pptx::tests::a_second_paragraph_alignment_only_moves_the_axis_it_names ... ok
+test pptx::tests::inserts_slide_shape_before_extension_list ... ok
+test pdf::tests::restored_pdf_text_exports_the_selected_revision ... ok
+test pptx::tests::integrated_inserted_text_box_combines_font_format_and_alignment ... ok
+test pptx::tests::a_page_hcd_created_moves_through_the_deck_it_joined ... ok
+test pptx::tests::aligning_a_slide_shape_writes_every_paragraph_and_the_body_anchor ... ok
+test pptx::tests::an_added_slide_refuses_a_package_that_has_no_layout_to_draw ... ok
+test pptx::tests::a_deck_that_grew_moved_and_lost_a_page_exports_all_three ... ok
+test pptx::tests::oversized_pptx_merged_row_group_fails_before_fragment_publication ... ok
+test pptx::tests::rejects_oversized_drawingml_table_span_before_chunk_publication ... ok
+test pptx::tests::a_copied_page_is_written_as_a_slide_part_the_package_did_not_carry ... ok
+test pptx::tests::a_copy_outlives_the_page_it_was_made_from ... ok
+test textual::tests::bounded_line_rejects_a_node_larger_than_the_hard_limit ... ok
+test pptx::tests::renders_direct_slide_background_and_shape_paint_geometry ... ok
+test pptx::tests::deleting_a_slide_whose_notes_point_back_at_it_is_refused ... ok
+test pptx::tests::imports_text_shape_geometry_and_direct_run_formatting ... ok
+test pptx::tests::deleting_a_page_that_spans_chunks_takes_every_chunk_that_carries_it ... ok
+test pptx::tests::imports_drawingml_table_geometry_merges_styles_and_roundtrips_text ... ok
+test pptx::tests::moves_native_slide_text_shape_and_preserves_history_and_formatting ... ok
+test theme_fonts::tests::a_face_that_cannot_draw_the_text_says_so_instead_of_failing_silently ... ok
+test pptx::tests::source_export_pins_a_patched_face_onto_one_slide_run ... ok
+test pptx::tests::an_edit_on_a_copied_page_is_rebuilt_onto_the_page_it_was_made_from ... ok
+test pptx::tests::formats_native_slide_runs_and_preserves_history ... ok
+test theme_fonts::tests::a_forecast_with_nothing_to_embed_says_so_instead_of_a_bare_zero ... ok
+test textual::tests::txt_hcd_patch_preserves_bom_and_crlf ... ok
+test theme_fonts::tests::a_plan_with_no_drawable_face_has_nothing_to_report ... ok
+test pptx::tests::large_drawingml_table_streams_fragments_before_part_eof ... ok
+test pptx::tests::deleting_a_slide_writes_a_package_that_no_longer_addresses_it ... ok
+test textual::tests::html_hcd_patch_preserves_markup_and_escapes_replacement ... ok
+test theme_fonts::tests::characters_no_face_is_asked_to_draw_are_not_the_invisible_ones ... ok
+test theme_fonts::tests::guid_obfuscation_reverses_the_spec_key ... ok
+test pptx::tests::appends_a_blank_slide_and_exports_it_as_a_new_slide_part ... ok
+test theme_fonts::tests::refusal_lines_read_right_at_one_run_and_at_several ... ok
+test theme_fonts::tests::the_body_face_is_the_one_that_can_draw_every_character ... ok
+test theme_fonts::tests::an_expiring_license_is_warned_about_once_per_file ... ok
+test textual::tests::large_markdown_table_is_stably_split_into_row_groups ... ok
+test pptx::tests::moving_a_page_writes_the_slide_list_in_the_decks_new_order ... ok
+test theme_fonts::tests::the_minor_latin_slot_is_preferred_when_it_covers_the_text ... ok
+test pptx::tests::restored_slide_text_exports_the_selected_revision ... ok
+test theme_fonts::tests::powerpoint_stores_raw_font_bytes ... ok
+test textual::tests::markdown_hcd_covers_commonmark_gfm_and_safe_extensions ... ok
+test xlsx::tests::a_defined_name_address_moves_with_the_grid_its_tab_shifts ... ok
+test textual::tests::markdown_hcd_renders_semantics_and_source_backed_patch_preserves_other_bytes ... ok
+test xlsx::tests::a_filter_range_and_the_column_it_filters_on_move_with_the_grid ... ok
+test theme_fonts::tests::workbook_registers_the_name_without_font_bytes ... ok
+test textual::tests::large_html_table_is_stably_split_into_contiguous_fragments ... ok
+test theme_fonts::tests::word_embed_obfuscates_the_face_and_registers_a_denied_family ... ok
+test pdf::tests::pdf_raster_modes_keep_small_text_quality_gate ... ok
+test pptx::tests::inserted_slide_text_box_is_valid_and_exports_as_native_shape ... ok
+test xlsx::tests::a_band_that_cannot_grow_past_its_sheet_stops_the_shift ... ok
+test theme_fonts::tests::a_pinned_face_that_cannot_draw_the_page_says_which_runs_stayed ... ok
+test xlsx::tests::a_defined_name_the_shift_cannot_count_still_stops_the_export ... ok
+test pptx::tests::integrated_copy_fonts_format_and_alignment_survive_export_delete_and_restore ... ok
+test xlsx::tests::a_pane_no_window_counted_stops_the_export_that_would_move_it_off_the_sheet ... ok
+test xlsx::tests::a_hidden_worksheet_can_be_deleted_but_an_unknown_one_cannot ... ok
+test theme_fonts::tests::a_face_the_print_engine_drew_with_is_not_written_twice ... ok
+test xlsx::tests::a_history_freeze_replaces_a_source_pane_a_shift_cannot_count ... ok
+test theme_fonts::tests::a_forecast_counts_the_runs_its_face_cannot_draw ... ok
+test xlsx::tests::a_grid_shift_moves_a_filter_and_the_ranges_it_validates ... ok
+test xlsx::tests::a_grid_shift_moves_the_defined_names_that_ranged_over_the_sheet ... ok
+test xlsx::tests::a_frozen_band_the_history_records_follows_the_rows_and_columns_a_shift_moves ... ok
+test xlsx::tests::a_window_the_importer_filled_in_names_the_band_the_shift_widened ... ok
+test xlsx::tests::a_pane_the_shift_cannot_count_stops_the_export ... ok
+test theme_fonts::tests::a_semantic_pdf_export_leaves_the_text_its_own_writer_drew_alone ... ok
+test xlsx::tests::a_tab_created_and_deleted_in_one_history_writes_no_worksheet_part ... ok
+test xlsx::tests::chart_formula_references_resolve_quoted_sheets_and_enforce_bounds ... ok
+test xlsx::tests::aligns_and_borders_native_cell_without_dropping_font_format ... ok
+test xlsx::tests::control_lists_lose_exactly_the_entry_that_named_the_deleted_tab ... ok
+test xlsx::tests::a_pane_the_source_workbook_froze_follows_the_rows_a_shift_moves ... ok
+test xlsx::tests::blank_merge_rejects_nonempty_and_overlapping_cells_without_advancing_head ... ok
+test xlsx::tests::a_shift_moves_a_protected_sheet_and_leaves_the_protection_alone ... ok
+test theme_fonts::tests::a_source_pdf_export_points_the_text_it_carries_at_the_pinned_face ... ok
+test xlsx::tests::a_row_the_source_never_wrote_still_takes_its_place_in_the_grid ... ok
+test xlsx::tests::appends_a_created_tab_in_the_workbooks_own_namespace ... ok
+test xlsx::tests::appended_xlsx_row_is_editable_and_survives_source_backed_export ... ok
+test xlsx::tests::column_insertion_after_last_materialized_column_keeps_exportable_blank_column ... ok
+test xlsx::tests::a_filter_the_shift_cannot_count_still_stops_the_export ... ok
+test xlsx::tests::budget_workbook_column_insertion_preserves_formulas_merges_and_chart ... ok
+test xlsx::tests::a_protection_that_names_cells_still_stops_the_shift ... ok
+test xlsx::tests::budget_workbook_row_insertion_preserves_formulas_merges_and_chart ... ok
+test xlsx::tests::drawing_anchor_attributes_preserve_cell_offsets_and_extents ... ok
+test xlsx::tests::creates_formula_in_first_row_after_grid_and_keeps_history ... ok
+test xlsx::tests::budget_workbook_grid_deletion_preserves_formulas_merges_and_chart ... ok
+test xlsx::tests::empty_sheet_chunk_repeats_view_and_default_grid_metadata ... ok
+test xlsx::tests::creates_a_worksheet_tab_and_exports_it_as_a_new_part ... ok
+test xlsx::tests::formats_common_excel_numbers_and_both_date_systems ... ok
+test xlsx::tests::deleting_only_worksheet_row_keeps_empty_grid_window ... ok
+test xlsx::tests::deleting_filled_inserted_column_clears_dirty_node ... ok
+test xlsx::tests::deleting_implicit_blank_column_moves_source_cells_left ... ok
+test xlsx::tests::deleting_all_columns_keeps_empty_rows_and_valid_bundle ... ok
+test xlsx::tests::deleting_a_worksheet_takes_the_relationship_part_it_owned ... ok
+test xlsx::tests::creates_formula_in_blank_row_tail_and_exports_native_formula ... ok
+test xlsx::tests::grid_view_refs_shift_absolute_and_rectangular_selections ... ok
+test xlsx::tests::converts_real_shared_formulas_to_literal_values_and_keeps_history ... ok
+test xlsx::tests::incomplete_shared_formula_group_remains_read_only ... ok
+test xlsx::tests::merged_range_parser_rejects_invalid_and_overlapping_ranges ... ok
+test xlsx::tests::deleting_previously_inserted_and_filled_row_clears_dirty_node ... ok
+test theme_fonts::tests::a_forecast_line_is_the_sentence_the_export_would_write ... ok
+test xlsx::tests::existing_numeric_cell_becomes_native_sum_formula_and_keeps_history ... ok
+test theme_fonts::tests::the_forecast_offers_the_slots_in_the_order_the_export_does ... ok
+test theme_fonts::tests::the_slot_that_comes_first_is_the_one_the_text_moves_to ... ok
+test xlsx::tests::freezing_a_worksheet_writes_a_window_list_for_a_part_that_names_none ... ok
+test xlsx::tests::formats_native_cell_font_and_fill_without_rewriting_shared_text ... ok
+test xlsx::tests::first_edit_of_sparse_cell_creates_stable_node_and_source_cell ... ok
+test xlsx::tests::deletes_a_worksheet_and_every_entry_that_named_it ... ok
+test xlsx::tests::grid_deletion_ignores_formulas_on_an_unrelated_sheet ... ok
+test xlsx::tests::only_a_feature_that_survives_its_tab_refuses_the_deletion ... ok
+test xlsx::tests::grid_deletion_rewrites_native_formulas_on_target_sheet ... ok
+test xlsx::tests::merges_empty_xlsx_cells_in_hcd_and_source_backed_export ... ok
+test xlsx::tests::merges_sparse_blank_cells_beyond_the_rendered_row_tail ... ok
+test xlsx::tests::rejects_oversized_custom_number_formats ... ok
+test xlsx::tests::freezing_a_worksheet_replaces_the_panes_of_every_window_it_names ... ok
+test xlsx::tests::imports_shared_strings_without_a_workbook_wide_string_table ... ok
+test xlsx::tests::converts_real_formula_to_native_number_then_text_without_stale_numeric_metadata ... ok
+test xlsx::tests::edits_one_shared_formula_member_and_expands_its_source_group ... ok
+test xlsx::tests::middle_column_insertion_preserves_explicit_source_widths ... ok
+test xlsx::tests::merges_blank_anchor_and_unmerges_with_source_backed_export ... ok
+test xlsx::tests::middle_column_deletion_shifts_all_windows_and_preserves_history ... ok
+test xlsx::tests::middle_column_insertion_shifts_all_row_windows ... ok
+test xlsx::tests::middle_row_deletion_shifts_windows_and_preserves_history ... ok
+test xlsx::tests::shared_formula_projection_shifts_only_relative_a1_references ... ok
+test xlsx::tests::shared_string_store_supports_disk_backed_random_reads ... ok
+test xlsx::tests::selected_grid_range_rejection_preserves_head ... ok
+test xlsx::tests::sparse_rows_keep_cells_in_their_excel_columns ... ok
+test xlsx::tests::middle_row_insertion_shifts_across_chunk_windows ... ok
+test xlsx::tests::selected_grid_range_can_delete_every_materialized_row ... ok
+test xlsx::tests::ordinary_formula_edit_preserves_native_formula_and_recalculates ... ok
+test xlsx::tests::the_workbook_keeps_the_names_a_grid_shift_never_moves ... ok
+test xlsx::tests::pastes_mixed_formula_range_atomically_and_preserves_history ... ok
+test xlsx::tests::vertical_merge_columns_do_not_gain_duplicate_empty_cells ... ok
+test xlsx::tests::worksheet_rewrite_preserves_prefixed_styled_cells_and_empty_rows ... ok
+test xlsx::tests::worksheet_view_scan_preserves_split_positions_and_bounds_metadata ... ok
+test xlsx::tests::range_paste_creates_cells_across_windows_and_edits_existing_cell_atomically ... ok
+test xlsx::tests::middle_column_insertion_preserves_ids_history_and_exported_addresses ... ok
+test xlsx::tests::middle_row_insertion_preserves_node_ids_history_and_exported_addresses ... ok
+test xlsx::tests::selected_row_count_can_insert_multiple_rows_after_sheet_tail ... ok
+test xlsx::tests::selected_row_delete_removes_annotations_for_deleted_cells ... ok
+test xlsx::tests::renames_worksheet_tab_and_follows_references_on_export ... ok
+test xlsx::tests::removes_only_empty_appended_xlsx_tail_row ... ok
+test xlsx::tests::restored_grid_revisions_export_source_backed_undo_and_redo ... ok
+test xlsx::tests::the_last_visible_worksheet_cannot_be_deleted ... ok
+test xlsx::tests::source_export_still_refuses_a_pinned_cell_font ... ok
+test xlsx::tests::splits_source_merge_and_exports_preserving_other_merges_and_history ... ok
+test xlsx::tests::grid_shifts_keep_untouched_merges_in_hcd_and_source_export ... ok
+test xlsx::tests::unmerges_hcd_created_cells_and_exports_without_merge ... ok
+test xlsx::tests::writes_the_first_cell_of_an_empty_worksheet_and_exports_it ... ok
+test xlsx::tests::writes_custom_number_format_on_the_same_cloned_style_as_font_color ... ok
+test xlsx::tests::writes_a_cell_onto_a_worksheet_created_in_hcd ... ok
+test xlsx::tests::xlsx_column_width_splits_source_span_and_preserves_history ... ok
+test xlsx::tests::xlsx_row_height_exports_existing_and_inserted_rows_with_history ... ok
+test xlsx::tests::styled_budget_cell_becomes_formula_without_corrupting_html_attributes ... ok
+test xlsx::tests::adds_a_worksheet_window_to_a_new_index_page ... ok
+test xlsx::tests::selected_row_range_crosses_chunk_boundary ... ok
+test xlsx::tests::selected_grid_ranges_commit_once_and_export_all_four_shifts ... ok
+
+test result: ok. 184 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.63s
+
+     Running unittests src/main.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/officecli-d5bcb9841ed0ef12)
+
+running 120 tests
+test commands::convert::tests::test_valid_pdf_to_docx ... ok
+test commands::convert::tests::test_valid_pdf_to_docx_with_pdf_text_engine ... ok
+test commands::convert::tests::test_valid_pdf_to_docx_with_pdf2docx_engine ... ok
+test commands::convert::tests::test_engine_from_str ... ok
+test commands::convert::tests::test_pdf_text_engine_is_pdf_only ... ok
+test commands::convert::tests::test_pdf2docx_engine_is_pdf_only ... ok
+test commands::convert::tests::test_valid_ppt_to_pptx ... ok
+test commands::convert::tests::test_valid_docx_resave ... ok
+test commands::convert::tests::test_invalid_cross_family ... ok
+test commands::convert::tests::test_unsupported_input_format ... ok
+test commands::convert::tests::test_valid_doc_to_docx ... ok
+test commands::convert::tests::test_valid_xls_to_xlsx ... ok
+test commands::convert::tests::test_pdf_to_docx_rejects_oxide ... ok
+test commands::format_handler_session::tests::open_command_close_round_trip ... ok
+test commands::convert::tests::test_valid_html_targets ... ok
+test commands::html_convert::tests::configured_html_pdf_primary_font_overrides_the_bundled_face ... ok
+test commands::format_handler_session::tests::save_envelope_is_empty_body ... ok
+test commands::format_handler_session::tests::open_envelope_is_well_formed ... ok
+test commands::html_convert::tests::column_names_cover_excel_boundaries ... ok
+test commands::batch::path_migration_tests::shift_offset_applies_cumulative_delta ... ok
+test commands::batch::path_migration_tests::detect_split_migration ... ok
+test commands::html_convert::tests::hcd_picture_geometry_is_inherited_and_bounded ... ok
+test commands::html_convert::tests::hcd_pdf_fragments_on_the_same_visual_line_are_coalesced ... ok
+test commands::html_convert::tests::rejects_dangerous_links_and_decodes_numeric_entities ... ok
+test commands::html_convert::tests::print_emoji_marker_preserves_comments_and_attributes ... ok
+test commands::html_convert::tests::print_html_uses_shrink_wrapped_image_and_non_overlapping_task_markers ... ok
+test commands::html_convert::tests::inline_images_become_standalone_blocks_without_fetching ... ok
+test commands::html_convert::tests::print_html_resets_screen_page_shell_without_changing_content ... ok
+test commands::html_convert::tests::print_html_marks_complete_emoji_graphemes_without_changing_hcd_ownership ... ok
+test commands::html_convert::tests::semantic_flow_sections_do_not_force_physical_page_breaks ... ok
+test commands::html_convert::tests::semantic_parser_records_pinned_block_faces ... ok
+test commands::html_convert::tests::semantic_parser_records_a_bidi_only_face ... ok
+test commands::html_convert::tests::semantic_pdf_emits_only_uri_annotations ... ok
+test commands::html_convert::tests::large_tables_are_windowed_without_cloning_into_text_lines ... ok
+test commands::html_convert::tests::malformed_hcd_table_fragment_sequence_fails_before_export ... ok
+test commands::format_handler_session::tests::command_envelope_includes_protocol_msg_type_command_args_props ... ok
+test commands::html_convert::tests::semantic_parser_reports_faces_it_cannot_write ... ok
+test commands::html_convert::tests::contiguous_hcd_table_fragments_reassemble_before_semantic_layout ... ok
+test commands::html_convert::tests::semantic_pdf_wrap_counts_east_asian_characters_as_wide ... ok
+test commands::html_convert::tests::parses_semantic_blocks_tables_entities_and_safe_links ... ok
+test commands::html_convert::tests::semantic_docx_pinner_drops_theme_attributes_it_overrides ... ok
+test commands::html_convert::tests::semantic_pptx_export_keeps_existing_run_properties_when_pinning ... ok
+test commands::hdoc::tests::preview_stylesheet_reader_rejects_active_content ... ok
+test commands::html_convert::tests::semantic_pdf_font_replaces_only_missing_characters ... ok
+test commands::html_convert::tests::semantic_xlsx_rejects_invalid_hcd_grid_row_height ... ok
+test commands::html_convert::tests::xlsx_drawing_picture_geometry_is_available_to_semantic_office_export ... ok
+test commands::html_convert::tests::semantic_xlsx_rejects_oversized_or_misaligned_merge ... ok
+test commands::load_skill::tests::catalog_lists_aliases_with_full_front_matter_descriptions ... ok
+test commands::load_skill::tests::reference_file_can_be_loaded_with_windows_separators ... ok
+test commands::load_skill::tests::reference_file_rejects_traversal_and_binary_assets ... ok
+test commands::load_skill::tests::unknown_skill_lists_supported_aliases ... ok
+test commands::plugin_process::tests::ensure_dotted_handles_bare_and_dotted ... ok
+test commands::plugin_process::tests::exit_code_maps_to_protocol_strings ... ok
+test commands::plugin_process::tests::heartbeat_detects_truthy_envelope ... ok
+test commands::plugin_process::tests::truncate_keeps_head_and_appends_ellipsis ... ok
+test commands::load_skill::tests::content_strips_setup_and_lists_shallow_and_collapsed_references ... ok
+test commands::plugins::tests::dump_lint_reports_unknown_property ... ok
+test commands::plugins::tests::manifest_parses_format_handler_example ... ok
+test commands::plugins::tests::manifest_parses_dump_reader_example ... ok
+test commands::plugins::tests::validate_flags_protocol_mismatch ... ok
+test commands::plugins::tests::validate_flags_unknown_kind ... ok
+test commands::plugins::tests::resolve_plugin_dir_returns_none_when_no_manifest_or_exe ... ok
+test commands::plugins::tests::validate_rejects_zero_idle_default ... ok
+test commands::plugins::tests::validate_requires_vocabulary_for_format_handler ... ok
+test commands::plugins::tests::validate_requires_target_for_dump_reader ... ok
+test commands::raw::tests::keeps_pptx_semantic_parts_for_relationship_aware_handler_resolution ... ok
+test commands::html_convert::tests::semantic_xlsx_preserves_hcd_grid_merges_and_sparse_coordinates ... ok
+test commands::html_convert::tests::semantic_xlsx_preserves_hcd_grid_row_heights_after_sparse_rows ... ok
+test commands::html_convert::tests::semantic_xlsx_preserves_blank_table_cell_addresses ... ok
+test hdoc_server::tests::admin_console_is_served_same_origin ... ok
+test commands::html_convert::tests::semantic_export_pins_nothing_when_two_faces_share_one_text ... ok
+test commands::hdoc::tests::patch_reader_stops_at_the_json_byte_limit ... ok
+test commands::html_convert::tests::a_theme_face_that_can_draw_the_text_beats_the_configured_pdf_body_face ... ok
+test commands::html_convert::tests::semantic_pdf_does_not_duplicate_url_label_annotations ... ok
+test commands::html_convert::tests::semantic_pdf_variable_line_height_keeps_text_bboxes_separate ... ok
+test commands::html_convert::tests::semantic_pdf_keeps_heading_with_following_table ... ok
+test commands::html_convert::tests::semantic_pptx_export_pins_block_faces_onto_runs ... ok
+test commands::html_convert::tests::semantic_pdf_preserves_code_panel_and_safe_link_annotation ... ok
+test commands::html_convert::tests::semantic_pdf_table_draws_grid_and_extractable_cells ... ok
+test hdoc_server::tests::admin_uploads_font_then_saves_and_lists_a_theme ... ok
+test commands::html_convert::tests::semantic_docx_export_pins_block_faces_onto_runs ... ok
+test hdoc_server::tests::audit_route_is_admin_only_and_answers_newest_first ... ok
+test hdoc_server::tests::catalog_retire_validates_id_and_requires_admin ... ok
+test hdoc_server::tests::catalog_routes_require_an_admin_token ... ok
+test hdoc_server::tests::audit_route_reads_a_utc_day_window_and_refuses_bounds_that_are_not_days ... ok
+test hdoc_server::tests::configured_default_theme_requires_a_theme_revision_digest ... ok
+test hdoc_server::tests::catalog_delete_refuses_referenced_fonts_and_removes_loose_ones ... ok
+test hdoc_server::tests::font_faces_only_keeps_face_lines_and_drops_the_rest ... ok
+test hdoc_server::tests::catalog_theme_reachability_and_delete_require_admin ... ok
+test hdoc_server::tests::catalog_write_rejects_missing_blobs_and_unknown_fonts ... ok
+test commands::html_convert::tests::fixed_slide_pdf_keeps_canvas_dimensions_and_page_count ... ok
+test commands::html_convert::tests::a_semantic_pdf_export_reports_the_theme_face_its_body_was_drawn_with ... ok
+test hdoc_server::tests::a_reimported_archive_keeps_its_own_theme_pin ... ok
+test hdoc_server::tests::catalog_retire_lists_and_lifts_theme_retirement ... ok
+test hdoc_server::tests::a_pinned_document_gets_theme_bytes_not_a_second_copy_of_its_rules ... ok
+test hdoc_server::tests::catalog_delete_theme_refuses_then_removes_an_unpinned_theme ... ok
+test hdoc_server::tests::catalog_documents_needs_admin_and_refuses_a_broken_bundle ... ok
+test hdoc_server::tests::theme_read_routes_accept_document_and_admin_tokens_only ... ok
+test mcp::tests::stdio_handles_notifications_errors_schema_and_eof ... ok
+test schema_crc::tests::canonical_name_contributes_to_fingerprint ... ok
+test schema_crc::tests::crc32_matches_standard_check_vector ... ok
+test schema_crc::tests::embedded_schema_fingerprint_is_lowercase_hex ... ok
+test schema_crc::tests::entry_order_and_path_separators_are_canonicalized ... ok
+test hdoc_server::tests::a_stale_or_retired_default_theme_warns_instead_of_failing_the_import ... ok
+test hdoc_server::tests::catalog_documents_lists_the_root_with_its_head_pins ... ok
+test hdoc_server::tests::default_theme_pins_a_freshly_imported_document ... ok
+test hdoc_server::tests::an_import_auto_pin_is_recorded_against_the_uploader ... ok
+test hdoc_server::tests::agents_are_isolated_and_concurrent_edits_conflict_without_overwriting ... ok
+test hdoc_server::tests::catalog_theme_documents_name_the_pinning_documents ... ok
+test hdoc_server::tests::font_plan_route_names_a_license_that_is_about_to_expire ... ok
+test hdoc_server::tests::importing_a_document_that_already_exists_does_not_repin_it ... ok
+test hdoc_server::tests::font_plan_route_says_when_the_stored_source_cannot_be_read ... ok
+test hdoc_server::tests::theme_faces_only_query_serves_font_bytes_alone ... ok
+test hdoc_server::tests::without_a_configured_default_theme_imports_stay_unpinned ... ok
+test hdoc_server::tests::every_finished_catalog_change_appends_a_line_and_a_refusal_none ... ok
+test hdoc_server::tests::pin_theme_route_records_a_content_revision ... ok
+test hdoc_server::tests::font_plan_route_answers_what_each_export_would_carry ... ok
+test hdoc_server::tests::font_plan_route_forecasts_nothing_to_move_when_no_face_will_embed ... ok
+test commands::hdoc_html::tests::standalone_html_inlines_assets_and_refuses_tampering ... ok
+test hdoc_server::tests::font_plan_route_forecasts_the_pdf_text_a_pin_would_touch ... ok
+
+test result: ok. 120 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.69s
+
+     Running tests/cli_smoke.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/cli_smoke-efcf5a2ec0582782)
+
+running 215 tests
+test test_add_part_accepts_csharp_type_and_json_envelope ... ok
+test test_batch_docx ... ok
+test test_batch_accepts_csharp_inlinedparts_chart_carrier_and_rewrites_host_relations ... ok
+test test_batch_default_continues_but_retains_atomic_rollback ... ok
+test test_add_and_view_paragraph ... ok
+test test_batch_docx_from_commands_file ... ok
+test test_add_and_get_paragraph ... ok
+test test_batch_accepts_csharp_command_envelope ... ok
+test test_batch_accepts_csharp_dump_meta_and_raw_set_items ... ok
+test test_add_accepts_csharp_parent_type_and_prop_syntax ... ok
+test test_batch_docx_bookmark_range_paths_supports_hyperlink_paths ... ok
+test test_batch_docx_bookmark_range_paths_supports_table_cell_paths ... ok
+test test_batch_docx_bookmark_range_paths_applies_multiple_ops ... ok
+test test_add_from_copies_existing_element_with_csharp_message ... ok
+test test_add_part_docx_header_footer_returns_real_relationship_ids ... ok
+test test_batch_docx_from_stdin ... ok
+test test_batch_docx_bookmark_range_paths_ignores_virtual_table_separators ... ok
+test test_batch_envelope_stop_on_error_false_continues ... ok
+test test_batch_docx_range_paths_supports_run_paths ... ok
+test test_batch_inlinedparts_chart_preserves_child_and_chart_owned_external_relations ... ok
+test test_add_accepts_csharp_position_flags ... ok
+test test_batch_docx_range_paths_with_props_replaces_text ... ok
+test test_batch_docx_set_range_paths_applies_multiple_format_ops ... ok
+test test_batch_docx_set_range_paths_supports_hyperlink_paths ... ok
+test test_batch_docx_set_range_paths_suffix_fallback_for_stale_offsets ... ok
+test test_batch_inlinedparts_accepts_comment_paragraph_parent ... ok
+test test_batch_docx_set_range_paths_supports_span_index_table_cell_paths ... ok
+test test_batch_inlinedparts_replays_inkml_custom_xml_part ... ok
+test test_batch_inlinedparts_replays_mixed_chart_image_and_ole_graph ... ok
+test test_batch_inlinedparts_replays_activex_child_and_grandchild_graph ... ok
+test test_batch_inlinedparts_accepts_table_cell_parent ... ok
+test test_batch_docx_set_range_paths_applies_multiple_text_replacements ... ok
+test test_create_docx ... ok
+test test_create_pptx ... ok
+test test_batch_inlinedparts_replays_multiple_vml_image_parts ... ok
+test test_batch_inlinedparts_replays_image_parts_on_header_host ... ok
+test test_create_xlsx ... ok
+test test_batch_inlinedparts_replays_smartart_nested_rendered_drawing ... ok
+test test_batch_accepts_csharp_input_commands_and_implicit_stdin ... ok
+test test_create_minimal_docx_omits_style_baseline ... ok
+test test_batch_inlinedparts_replays_smartart_top_level_relationship_graph ... ok
+test test_create_infers_non_western_locale_from_unix_environment ... ok
+test test_convert_docx_resave ... ok
+test test_create_docx_accepts_csharp_locale_fonts_and_rtl_defaults ... ok
+test test_batch_inlinedparts_accepts_footnote_and_endnote_paragraph_parents ... ok
+test test_convert_pdf_to_docx_concurrent_isolated ... ok
+test test_config_csharp_compatibility_surface ... ok
+test test_convert_pdf_to_docx_preserves_extractable_text ... ok
+test test_create_locale_applies_theme_fonts_to_xlsx_and_pptx ... ok
+test test_docx_abstract_num_level_properties_seed_all_template_levels ... ok
+test test_docx_add_markdown_emits_inline_format_runs ... ok
+test test_docx_add_header_targets_paragraph_carried_section ... ok
+test test_docx_add_native_mermaid_sequence_group ... ok
+test test_batch_remove_passes_excel_shift_property ... ok
+test test_docx_abstract_num_top_level_properties_round_trip ... ok
+test test_docx_add_markdown_emits_editable_gfm_table ... ok
+test test_docx_add_markdown_expands_editable_blocks ... ok
+test test_docx_add_paragraph_format_revision_rejects_to_empty_snapshot ... ok
+test test_docx_comment_set_formats_existing_body_without_flattening ... ok
+test test_docx_add_header_footer_creates_typed_parts_and_field_settings ... ok
+test test_docx_comment_body_run_get_and_set_are_path_scoped ... ok
+test test_docx_cell_insertion_revision_reject_removes_whole_cell ... ok
+test test_docx_comment_body_add_and_remove_paragraph_run ... ok
+test test_docx_existing_row_deletion_revision_accept_removes_whole_row ... ok
+test test_docx_add_native_mermaid_flowchart_group ... ok
+test test_docx_existing_cell_deletion_revision_accept_removes_whole_cell ... ok
+test test_docx_hyperlink_add_and_set_write_external_relationships ... ok
+test test_docx_cross_run_find_format_with_revision_tracks_exact_fragments ... ok
+test test_docx_get_exposes_header_footer_roots_and_content ... ok
+test test_docx_cross_run_find_replace_with_revision_tracks_each_fragment ... ok
+test test_docx_find_format_with_revision_reject_restores_run_properties ... ok
+test test_docx_format_revision_reject_restores_snapshot ... ok
+test test_docx_find_replace_with_revision_tracks_precise_fragment ... ok
+test test_docx_cross_run_regex_find_replace_with_revision_expands_captures ... ok
+test test_docx_drawingml_shape_and_textbox_lifecycle ... ok
+test test_docx_move_rehomes_header_and_document_relationships_without_rid_collisions ... ok
+test test_docx_header_footer_typed_image_chart_and_hyperlink_use_own_relationship_parts ... ok
+test test_docx_num_format_auto_creates_numbering_template ... ok
+test test_docx_move_rehomes_comment_and_note_relationships_to_document ... ok
+test test_docx_header_footer_content_supports_l2_set_add_remove_move_and_query ... ok
+test test_docx_paragraph_format_revision_snapshot_omits_mark_run_properties ... ok
+test test_docx_num_start_overrides_round_trip ... ok
+test test_docx_numbering_level_add_replaces_matching_ilvl ... ok
+test test_docx_move_rehomes_header_to_footer_relationships_without_rid_collisions ... ok
+test test_docx_numbering_definition_package_and_stable_get_paths ... ok
+test test_docx_numbering_level_remove_only_drops_target_level ... ok
+test test_docx_move_rehomes_document_relationships_to_comment_and_endnote ... ok
+test test_docx_permission_range_add_get_remove ... ok
+test test_docx_num_reference_update_rejects_dangling_template ... ok
+test test_docx_paragraph_mark_insertion_reject_merges_into_previous_paragraph ... ok
+test test_docx_numbering_level_set_targets_the_selected_abstract_num ... ok
+test test_docx_query_paragraph_and_run_includes_comment_body ... ok
+test test_docx_move_revision_creates_and_resolves_range_markers ... ok
+test test_docx_raw_comments_extended_logical_alias_preserves_thread_metadata ... ok
+test test_docx_paragraph_mark_deletion_accept_merges_into_next_paragraph ... ok
+test test_dump_docx ... ok
+test test_dump_accepts_csharp_positional_path_and_legacy_path_flag ... ok
+test test_docx_regex_find_format_with_revision_reject_restores_run_properties ... ok
+test test_docx_row_insertion_revision_reject_removes_whole_row ... ok
+test test_docx_set_existing_run_as_revision ... ok
+test test_docx_set_existing_run_format_revision_restores_prior_properties ... ok
+test test_docx_set_existing_paragraph_format_revision_restores_prior_properties ... ok
+test test_dump_docx_body_subtree_replays_into_fresh_document ... ok
+test test_docx_tabstop_uses_flat_csharp_compatible_get_path ... ok
+test test_dump_docx_batch_replays_into_fresh_document ... ok
+test test_docx_tracked_find_rejects_hyperlink_boundary ... ok
+test test_dump_docx_comments_replays_into_fresh_document ... ok
+test test_docx_revision_run_lifecycle ... ok
+test test_docx_removing_num_clears_direct_paragraph_bindings ... ok
+test test_dump_docx_font_table_replays_embedded_font_binary ... ok
+test test_dump_docx_font_table_replays_into_fresh_document ... ok
+test test_dump_docx_paragraph_subtree_replays_into_fresh_document ... ok
+test test_docx_table_before_anchor_inserts_at_requested_position ... ok
+test test_dump_docx_root_recursively_replays_activex_and_smartart_graphs ... ok
+test test_dump_docx_root_replays_document_image_binary_with_source_relationship_id ... ok
+test test_dump_docx_root_replays_comments_extended_part ... ok
+test test_dump_docx_document_properties_replay_into_fresh_document ... ok
+test test_dump_docx_root_replays_custom_xml_item_and_properties_binaries ... ok
+test test_dump_docx_styles_replays_semantic_part ... ok
+test test_dump_docx_root_replays_header_image_binary_on_header_relationship_part ... ok
+test test_dump_docx_root_replays_numbering_picture_bullet_binary ... ok
+test test_dump_docx_theme_replays_into_fresh_document ... ok
+test test_dump_pptx_batch_replays_into_fresh_deck ... ok
+test test_dump_docx_web_settings_replays_into_fresh_document ... ok
+test test_help ... ok
+test test_dump_docx_root_replays_footnotes_and_endnotes_parts ... ok
+test test_dump_pptx_batch_replays_recursive_chart_relationships ... ok
+test test_dump_docx_root_replays_comment_and_notes_image_relationship_hosts ... ok
+test test_dump_pptx_batch_creates_missing_slides ... ok
+test test_help_schema ... ok
+test test_help_format_detail ... ok
+test test_dump_pptx_presentation_subtree_replays_into_fresh_deck ... ok
+test test_dump_docx_root_replays_header_and_footer_relationship_parts ... ok
+test test_info ... ok
+test test_get_and_query_json_use_csharp_node_envelope ... ok
+test test_extract_text_docx ... ok
+test test_dump_pptx_slide_subtree_replays_into_matching_slide ... ok
+test test_load_skill_catalog_and_content_are_read_only ... ok
+test test_get_save_extracts_docx_drawing_payload_to_nested_destination ... ok
+test test_load_skill_reads_reference_and_rejects_unsafe_paths ... ok
+test test_dump_docx_root_replays_resources_before_document ... ok
+test test_dump_xlsx_accepts_csharp_positional_sheet_path ... ok
+test test_import_accepts_csharp_positional_source_file ... ok
+test test_json_envelopes_wrap_writes_and_failures ... ok
+test test_dump_xlsx_batch_replays_into_fresh_workbook ... ok
+test test_mcp_registration_lifecycle ... ok
+test test_pptx_note_help_alias ... ok
+test test_dump_xlsx_batch_creates_missing_worksheets ... ok
+test test_new_docx_declares_markdown_heading_styles ... ok
+test test_dump_xlsx_batch_replays_recursive_chart_and_drawing_relationships ... ok
+test test_dump_xlsx_sheet_subtree_replays_into_matching_sheet ... ok
+test test_pptx_add_slide ... ok
+test test_pptx_add_native_mermaid_flowchart_group ... ok
+test test_pptx_add_native_mermaid_sequence_group ... ok
+test test_merge_accepts_csharp_template_output_syntax ... ok
+test test_pptx_raw_set_accepts_semantic_slide_path ... ok
+test test_pptx_group_resize_axes_and_keep_aspect ... ok
+test test_move_paragraph ... ok
+test test_query_sample_docx ... ok
+test test_query_compact_uses_csharp_pptx_total_suffix ... ok
+test test_query_text_empty_result_prints_csharp_help_hint ... ok
+test test_raw_accepts_csharp_default_part_and_row_options ... ok
+test test_raw_docx ... ok
+test test_query_paragraphs ... ok
+test test_output_schema_crc_is_stable_lowercase_hex ... ok
+test test_query_find_supports_csharp_literal_and_regex_filters ... ok
+test test_pptx_presentation_settings_lifecycle ... ok
+test test_query_compact_uses_csharp_stable_docx_format ... ok
+test test_save_docx ... ok
+test test_raw_set_docx ... ok
+test test_version ... ok
+test test_pptx_raw_accepts_csharp_semantic_presentation_part_paths ... ok
+test test_remove_paragraph ... ok
+test test_set_json_reports_csharp_unsupported_property_warning ... ok
+test test_remove_accepts_csharp_revision_props ... ok
+test test_validate_docx ... ok
+test test_pptx_linebreak_add_get_remove_lifecycle ... ok
+test test_view_docx_annotated ... ok
+test test_view_docx_forms ... ok
+test test_view_docx_issues ... ok
+test test_view_docx_outline ... ok
+test test_view_docx_stats ... ok
+test test_pptx_remove_middle_slide_then_edit_and_add ... ok
+test test_view_docx_text ... ok
+test test_view_sample_docx ... ok
+test test_view_json ... ok
+test test_set_accepts_csharp_prop_syntax ... ok
+test test_view_pptx_stats ... ok
+test test_pptx_modern_comment_thread_lifecycle ... ok
+test test_view_sample_xlsx ... ok
+test test_view_sample_docx_issues ... ok
+test test_view_sample_xlsx_outline ... ok
+test test_view_sample_docx_annotated ... ok
+test test_set_text ... ok
+test test_view_accepts_csharp_positional_mode_and_line_range_aliases ... ok
+test test_pptx_theme_and_default_font_lifecycle ... ok
+test test_validate_uses_csharp_judgment_exit_and_streams ... ok
+test test_view_xlsx_stats ... ok
+test test_xlsx_view_outline ... ok
+test test_xlsx_dynamic_array_spill_rejects_occupied_cells ... ok
+test test_xlsx_password_clear_keeps_session_explicit_structure_lock ... ok
+test test_xlsx_raw_and_raw_set_accept_csharp_semantic_sheet_paths ... ok
+test test_xlsx_raw_filters_rows_and_columns_like_csharp ... ok
+test test_xlsx_raw_accepts_csharp_drawing_chart_and_relationship_paths ... ok
+test test_xlsx_modern_formula_ooxml_round_trip ... ok
+test test_xlsx_sheet_order_mutations_preserve_defined_name_scopes ... ok
+test test_xlsx_detected_table_query_and_row_predicate ... ok
+test test_xlsx_workbook_settings_root_lifecycle ... ok
+test test_xlsx_pivottable_top_n_crops_cache_and_writes_refresh_filter ... ok
+test test_xlsx_remove_cell_shift_left_and_up ... ok
+test test_xlsx_pivottable_label_filter_keeps_cache_and_writes_caption_filter ... ok
+test test_xlsx_in_cell_rich_value_image_lifecycle ... ok
+test test_resident_forwards_normal_commands_and_closes_cleanly ... ok
+test test_docx_move_reparents_relationship_runs_through_every_non_body_host ... ok
+test test_xlsx_native_pivottable_cache_records_and_dump_replay ... ok
+
+test result: ok. 215 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s
+
+     Running tests/hdoc_cli.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/hdoc_cli-18fffdfb37943ab2)
+
+running 4 tests
+test hdoc_patch_v2_supports_atomic_cross_node_text_and_presentation_style ... ok
+test hdoc_chunk_window_and_revision_queries_are_cursor_addressable ... ok
+test identical_source_uses_deterministic_default_document_and_node_ids ... ok
+test hdoc_cli_import_patch_validate_export_roundtrip ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+     Running tests/hdoc_multi_format.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/hdoc_multi_format-2b899e267df8eb3b)
+
+running 20 tests
+test txt_hcd_patch_roundtrip_preserves_bom_and_line_endings ... ok
+test html_hcd_patch_roundtrip_is_source_backed_and_rust_only ... ok
+test markdown_hcd_patch_roundtrip_and_semantic_text_exports ... ok
+test pptx_hcd_slide_patch_roundtrip ... ok
+test pptx_hcd_table_cell_patch_roundtrip ... ok
+test xlsx_hcd_cell_patch_roundtrip ... ok
+test pptx_hcd_picture_position_survives_source_free_rust_rebuild ... ok
+test pdf_hcd_page_patch_roundtrip ... ok
+test xlsx_hcd_formula_nodes_are_read_only ... ok
+test hcd_image_node_replace_and_geometry_are_revisioned_and_hash_guarded ... ok
+test pinned_block_fonts_reach_semantic_docx_and_pptx_exports ... ok
+test markdown_mermaid_preview_tracks_nodeid_patch_in_html_and_pdf ... ok
+test large_pptx_hcd_table_rebuilds_as_bounded_native_pptx_windows ... ok
+test xlsx_hcd_media_is_content_addressed ... ok
+test edited_pdf_visual_export_uses_revised_text_without_source ... ok
+test pptx_table_split_across_hcd_chunks_reassembles_before_rust_export ... ok
+test pdf_inserted_text_box_can_be_reedited_and_exported_without_source ... ok
+test edited_hcd_revision_semantically_exports_to_all_rust_targets_without_source ... ok
+test hcd_content_addressed_image_exports_to_all_rust_targets_without_source ... ok
+test supported_hcd_adapters_repeat_stable_ids_and_body_roots ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.13s
+
+     Running tests/html_convert.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/html_convert-e1f19e8b2bfcbbb9)
+
+running 3 tests
+test html_conversion_requires_an_explicit_supported_target ... ok
+test html_always_uses_the_in_process_rust_converter ... ok
+test html_converts_to_docx_xlsx_pptx_and_pdf ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+     Running unittests src/lib.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/oxml-ffb08cccd6dec782)
+
+running 34 tests
+test package::resource_limit_tests::rejects_excessive_entry_count ... ok
+test package::resource_limit_tests::rejects_excessive_uncompressed_size_and_ratio ... ok
+test package::resource_limit_tests::accepts_normal_zip_metadata ... ok
+test archive::tests::unsafe_entry_names_are_rejected ... ok
+test chart_preview::tests::exposes_formula_references_when_a_chart_has_no_cache ... ok
+test package::resource_limit_tests::rejects_excessive_xml_elements_and_depth ... ok
+test chart_preview::tests::renders_cached_scatter_data_and_escapes_title ... ok
+test xml_util::tests::append_adds_last_child ... ok
+test xml_util::tests::find_preserves_source_namespace_prefixes ... ok
+test xml_util::tests::find_with_index_and_attr ... ok
+test xml_util::tests::insert_before_adds_sibling ... ok
+test xml_util::tests::missing_xml_errors ... ok
+test package::resource_limit_tests::rejects_deep_small_xml_parts_before_handler_recursion ... ok
+test xml_util::tests::prepend_adds_first_child ... ok
+test chart_preview::tests::renders_bar_and_radar_charts ... ok
+test chart_preview::tests::renders_extended_histogram_from_chart_data ... ok
+test xml_util::tests::remove_action_drops_only_matched ... ok
+test validate::tests::reports_missing_internal_relationship_target ... ok
+test xml_util::tests::append_expands_self_closing ... ok
+test validate::tests::ignores_zip_directory_entries_when_checking_content_types ... ok
+test xml_util::tests::replace_swaps_element ... ok
+test validate::tests::accepts_package_rooted_relationship_targets ... ok
+test xml_util::tests::setattr_inserts_and_replaces ... ok
+test xml_util::tests::unknown_xpath_errors ... ok
+test xml_util::tests::unsupported_action_errors ... ok
+test archive::tests::streaming_structure_validation_accepts_a_minimal_package ... ok
+test archive::tests::rewrite_with_additions_refuses_to_shadow_an_existing_entry ... ok
+test archive::tests::rewrite_with_changes_refuses_a_removal_that_would_break_the_package ... ok
+test archive::tests::validated_rewrite_preserves_unmodified_compressed_payloads ... ok
+test archive::tests::rewrite_with_changes_drops_a_part_and_keeps_other_entries_raw ... ok
+test package::save_tests::save_replaces_existing_package_with_a_unique_sibling_tempfile ... ok
+test archive::tests::validated_rewrite_does_not_publish_a_malformed_candidate ... ok
+test archive::tests::streaming_structure_validation_rejects_malformed_xml_and_doctype ... ok
+test archive::tests::rewrite_with_additions_appends_a_new_part_and_keeps_other_entries_raw ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests src/lib.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/pdf_handler-cb76eb026458837c)
+
+running 45 tests
+test content_stream::tests::test_encode_pdf_string ... ok
+test content_stream::tests::test_print_pdf_images ... ok
+test content_stream::tests::test_encode_cid_font_text_demo3 ... ok
+test content_stream::tests::test_debug_pkulaw ... ok
+test font_embedder::tests::bundled_emoji_font_is_static_and_covers_grinning_face ... ok
+test font_embedder::tests::bundled_cjk_font_is_a_static_regular_face ... ok
+test content_stream::tests::test_tokenize_compact_ppt_style ... ok
+test content_stream::tests::test_tokenize_line ... ok
+test content_stream::tests::test_extract_pdf_array_text ... ok
+test content_stream::tests::test_extract_pdf_string ... ok
+test content_stream::tests::test_estimate_text_width ... ok
+test font_embedder::tests::registering_font_resolves_indirect_font_dictionary ... ok
+test content_stream::tests::text_next_line_uses_td_leading_instead_of_font_size ... ok
+test content_stream::tests::graphics_state_restore_keeps_temporary_fill_out_of_later_text ... ok
+test html_preview::tests::noto_sans_sc_uses_a_cjk_aware_web_font_stack ... ok
+test content_stream::tests::text_only_parser_keeps_image_geometry_without_decoding_payload ... ok
+test html_preview::tests::watch_html_keeps_lazy_page_loading ... ok
+test font_embedder::tests::bundled_cjk_font_coverage_is_reported_exactly ... ok
+test html_preview::tests::standalone_html_inlines_all_pages_without_server_requests ... ok
+test modifier::image_tests::png_decoder_rejects_truncated_chunks ... ok
+test modifier::image_tests::png_decoder_rejects_pixel_bombs_before_inflate ... ok
+test reader::tests::ascii85_greater_than_is_a_digit_unless_preceded_by_tilde ... ok
+test modifier::image_tests::png_decoder_produces_bounded_rgb ... ok
+test reader::tests::bounded_page_decode_parses_normal_text_without_image_materialization ... ok
+test font_retarget::tests::a_face_that_is_not_on_the_page_draws_nothing ... ok
+test reader::tests::structural_preflight_does_not_decode_ordinary_page_streams ... ok
+test reader::tests::structural_preflight_rejects_cross_reference_stream_bombs ... ok
+test reader::tests::structural_preflight_rejects_xref_width_allocation_bombs ... ok
+test reader::tests::structural_preflight_rejects_object_stream_bombs_and_decodes_escaped_names ... ok
+test modifier::ready_text_tests::ready_text_blocks_switch_between_registered_subset_fonts ... ok
+test reader::tests::open_keeps_streams_compressed_and_bounded_page_decode_rejects_a_bomb ... ok
+test font_embedder::tests::the_cmap_gives_one_character_per_glyph ... ok
+test font_embedder::tests::complete_font_bytes_are_registered_on_the_page ... ok
+test font_retarget::tests::a_run_no_face_can_draw_is_left_in_the_font_that_can ... ok
+test font_retarget::tests::a_page_whose_text_is_split_over_two_streams_is_left_alone ... ok
+test font_retarget::tests::a_face_the_page_drew_with_already_is_counted_not_moved_again ... ok
+test font_embedder::tests::an_embedded_face_can_draw_the_text_it_claims ... ok
+test font_retarget::tests::text_the_parser_merged_from_two_operands_is_not_written_once_as_one ... ok
+test font_retarget::tests::a_run_whose_font_does_not_name_its_characters_stays_put ... ok
+test font_retarget::tests::a_scale_the_page_already_applied_is_folded_into_the_fit ... ok
+test font_retarget::tests::a_plan_leaves_the_file_it_read_untouched ... ok
+test font_retarget::tests::a_plan_counts_the_same_runs_the_pass_moves ... ok
+test font_retarget::tests::text_inside_a_form_xobject_is_counted_and_left_as_it_is ... ok
+test font_retarget::tests::a_trusted_ascii_run_moves_to_the_face_and_keeps_its_width ... ok
+test font_retarget::tests::a_swap_too_far_from_the_original_width_is_kept ... ok
+
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.57s
+
+     Running unittests src/lib.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/pptx_handler-84d3d4a8d66241f5)
+
+running 35 tests
+test add::transition_tests::animation_timing_includes_shape_spid ... ok
+test add::transition_tests::inject_inserts_after_csld_close ... ok
+test add::transition_tests::p14_vortex_uses_alternate_content ... ok
+test add::transition_tests::p15_preset_uses_prst_trans ... ok
+test add::transition_tests::unknown_transition_errors ... ok
+test add::transition_tests::shape_resolution_by_id_and_name ... ok
+test add::transition_tests::basic_fade_emits_bare_transition ... ok
+test add::transition_tests::morph_uses_alternate_content ... ok
+test add::transition_tests::push_with_direction_writes_dir_attr ... ok
+test add::transition_tests::duration_and_advance_time_attrs ... ok
+test add::glb_tests::minimal_glb_passes_spec_invariants ... ok
+test mutations::tests::remove_slide_references_prunes_custom_shows ... ok
+test linebreak::tests::parses_placeholder_and_nested_group_targets ... ok
+test add::transition_tests::strip_removes_bare_and_alt_content_transitions ... ok
+test linebreak::tests::resolves_placeholder_by_type_or_ordinal_and_grouped_shape ... ok
+test presentation::tests::theme_path_uses_the_related_part_not_a_fixed_theme1_name ... ok
+test mutations::tests::remove_slide_uses_relationship_target_and_removes_package_metadata ... ok
+test view::group_resize_tests::group_rejects_non_positive_size ... ok
+test add::table_tests::table_rejects_zero_dimensions_before_cell_generation ... ok
+test view::group_resize_tests::metadata_only_shape_tree_is_empty ... ok
+test view::group_resize_tests::table_only_slide_is_visual_content ... ok
+test view::group_resize_tests::group_keep_aspect_scales_other_axis_and_fonts ... ok
+test add::transition_tests::add_modern_comment_reuses_related_authors_part ... ok
+test add::transition_tests::add_note_reuses_existing_related_notes_master ... ok
+test add::transition_tests::new_notes_master_scales_placeholders_to_presentation_sizes ... ok
+test add::transition_tests::add_note_clones_slide_master_theme_for_new_notes_master ... ok
+test mutations::tests::add_after_removal_uses_new_part_and_unique_ids ... ok
+test add::table_tests::table_uses_positive_frame_fallback_for_non_positive_geometry ... ok
+test handler::tests::semantic_raw_paths_resolve_relationship_targets ... ok
+test view::group_resize_tests::group_single_axis_shrink_rebakes_fonts_by_minimum_ratio ... ok
+test view::group_resize_tests::group_first_mutation_snapshots_missing_child_baselines ... ok
+test view::group_resize_tests::group_width_only_changes_one_axis_by_default ... ok
+test add::transition_tests::add_comment_wires_author_part_slide_relationship_and_content_types ... ok
+test add::transition_tests::add_modern_comment_wires_authors_and_slide_part ... ok
+test add::transition_tests::add_note_wires_slide_master_backlink_and_content_types ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/template_merger-5de6a9fa47f0ebc4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-merge-review-5xy6__sh/msrv-target/debug/deps/xlsx_handler-f432c54eb2a2c856)
+
+running 44 tests
+test formula::tokenizer::tests::test_tokenize_simple_arithmetic ... ok
+test dom_types::tests::test_col_num_to_letters ... ok
+test dom_types::tests::test_cell_ref_parse ... ok
+test formula::tokenizer::tests::test_tokenize_cell_ref ... ok
+test formula::modern::tests::recognizes_dynamic_calls_but_not_quoted_text ... ok
+test dom_types::tests::test_cell_ref_roundtrip ... ok
+test formula::modern::tests::qualifies_dynamic_functions_without_touching_literals_or_existing_prefixes ... ok
+test formula::tokenizer::tests::test_tokenize_sheet_ref ... ok
+test formula::modern::tests::rejects_non_literal_inline_array_values ... ok
+test formula::modern::tests::qualifies_lambda_parameters_and_restores_readback ... ok
+test helpers::tests::extract_source_range_bare_when_no_sheet ... ok
+test helpers::tests::extract_source_range_none_for_non_worksheet ... ok
+test formula::tokenizer::tests::test_tokenize_comparison ... ok
+test formula::tokenizer::tests::test_tokenize_function ... ok
+test formula::tokenizer::tests::test_tokenize_string ... ok
+test formula::functions::tests::modern_lookup_sort_unique_take_and_drop_evaluate_numeric_arrays ... ok
+test helpers::tests::extract_source_range_none_when_no_source ... ok
+test formula::functions::tests::modern_dynamic_functions_accept_ooxml_function_names ... ok
+test formula::functions::tests::modern_dynamic_functions_preserve_strings_and_two_dimensional_shape ... ok
+test helpers::tests::extract_source_range_returns_sheet_qualified_form ... ok
+test helpers::tests::pivot_part_rels_path_for_xl_prefix ... ok
+test helpers::tests::resolve_target_handles_absolute_and_relative ... ok
+test import::tests::test_parse_csv_basic ... ok
+test import::tests::test_parse_csv_escaped_quotes ... ok
+test import::tests::test_parse_csv_quoted ... ok
+test import::tests::test_parse_tsv ... ok
+test dynamic_array::tests::creates_csharp_compatible_xldapr_metadata ... ok
+test query::tests::eval_numeric_and_lexical ... ok
+test query::tests::parse_predicate_eq_ne_gt ... ok
+test query::tests::parse_predicate_list_joins_with_and ... ok
+test query::tests::split_handles_sheet_prefix_and_bare ... ok
+test query::tests::table_selector_distinguishes_detected_from_listobject_only ... ok
+test rich_value_image::tests::relationship_targets_resolve_like_package_parts ... ok
+test rich_value_image::tests::content_type_uses_part_override_before_extension_default ... ok
+test view::tests::truncate_cell_value_handles_multibyte_text ... ok
+test view::tests::truncate_cell_value_preserves_short_text_and_small_widths ... ok
+test query::tests::detected_table_does_not_duplicate_real_listobject ... ok
+test mutations::sheet_order_tests::remove_cell_with_shift_moves_only_the_affected_row_or_column ... ok
+test query::tests::detected_table_requires_header_span_and_data_row ... ok
+test query::tests::row_predicate_falls_back_to_detected_table_and_preserves_comma_header ... ok
+test view::tests::issues_report_out_of_range_defined_name_scope ... ok
+test mutations::sheet_order_tests::remove_sheet_drops_own_scopes_and_cleans_package_references ... ok
+test mutations::sheet_order_tests::move_sheet_remaps_scopes_by_sheet_identity ... ok
+test mutations::sheet_order_tests::insert_sheet_shifts_scopes_and_allocates_unique_package_ids ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests docx_handler
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests handler_common
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests hcd_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests hcd_docx
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests hcd_formats
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests oxml
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pdf_handler
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests pptx_handler
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests template_merger
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests xlsx_handler
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

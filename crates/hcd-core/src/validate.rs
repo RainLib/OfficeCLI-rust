@@ -142,7 +142,7 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
     }
     if !matches!(
         manifest.profile.as_str(),
-        "semantic-flow" | "grid" | "slide-canvas" | "fixed-layout"
+        "semantic-flow" | "grid" | "slide-canvas" | "fixed-layout" | "canvas"
     ) {
         issues.push(issue(
             "PROFILE_UNSUPPORTED",
@@ -159,6 +159,15 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
     }
     validate_manifest_fields(&manifest, &mut issues);
     validate_revision_chain(bundle, &manifest, &mut issues);
+    if manifest.source.format == "excalidraw" {
+        if let Err(error) = crate::canvas::read_scene(bundle, None) {
+            issues.push(issue(
+                "CANVAS_SCENE_INVALID",
+                error.to_string(),
+                "manifest.json",
+            ));
+        }
+    }
 
     let styles_path = match bundle.resolve_href(&manifest.styles_href) {
         Ok(path) => path,
@@ -198,6 +207,8 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
 
     let mut root_hasher = Sha256::new();
     let mut expected_sequence = 0usize;
+    let mut pdf_page_count = 0usize;
+    let mut pdf_layout_max_source_page = None;
     let mut node_ids = NodeIdTracker::new()?;
     let mut table_fragments = HcdTableFragmentTracker::default();
     let mut textual_range_end = 0u64;
@@ -239,6 +250,22 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
         }
         for descriptor in page.chunks {
             validate_descriptor(&descriptor, manifest.storage_codec, &mut issues);
+            if manifest.source.format == "pdf"
+                && descriptor.region == "page"
+                && !descriptor.continuation
+            {
+                pdf_page_count += 1;
+            }
+            if !descriptor.pdf_layout.is_empty() {
+                pdf_layout_max_source_page = Some(
+                    descriptor
+                        .pdf_layout
+                        .iter()
+                        .filter_map(|page| page.source_page)
+                        .max()
+                        .unwrap_or(0) as usize,
+                );
+            }
             if descriptor.sequence != expected_sequence {
                 issues.push(issue(
                     "CHUNK_SEQUENCE",
@@ -327,6 +354,27 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                     &descriptor.html_href,
                 ));
             }
+            match crate::image_layers::saved_stack(&html) {
+                Ok(Some(stack))
+                    if !crate::image_layers::standalone(&manifest.source.format)
+                        || stack
+                            .layers
+                            .iter()
+                            .any(|layer| !asset_hashes.contains(&layer.asset_hash)) =>
+                {
+                    issues.push(issue(
+                        "IMAGE_LAYERS_INVALID",
+                        "图层素材未登记或不属于独立图片".into(),
+                        &descriptor.html_href,
+                    ));
+                }
+                Err(error) => issues.push(issue(
+                    "IMAGE_LAYERS_INVALID",
+                    error.to_string(),
+                    &descriptor.html_href,
+                )),
+                _ => {}
+            }
             match validate_html_fragment_bytes(html.as_bytes(), &asset_hashes) {
                 Ok(fragments) => {
                     for fragment in fragments {
@@ -362,6 +410,20 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
                     Default::default()
                 }
             };
+            if let Err(error) = crate::extract_docx_inline_runs(&html) {
+                issues.push(issue(
+                    "WORD_INLINE_INVALID",
+                    error.to_string(),
+                    &descriptor.html_href,
+                ));
+            }
+            if let Err(error) = crate::extract_xlsx_inline_runs(&html) {
+                issues.push(issue(
+                    "XLSX_INLINE_INVALID",
+                    error.to_string(),
+                    &descriptor.html_href,
+                ));
+            }
             let actual_text_chars: usize = canonical_nodes
                 .values()
                 .map(|text| text.chars().count())
@@ -531,6 +593,15 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
             }
         }
     }
+    if pdf_layout_max_source_page
+        .is_some_and(|maximum| manifest.source.format != "pdf" || maximum > pdf_page_count)
+    {
+        issues.push(issue(
+            "PDF_PAGE_LAYOUT_SOURCE_MISMATCH",
+            "PDF layout references pages outside its source PDF".to_string(),
+            &manifest.index_prefix,
+        ));
+    }
     if expected_sequence != manifest.chunk_count {
         issues.push(issue(
             "CHUNK_COUNT_MISMATCH",
@@ -555,7 +626,12 @@ pub fn validate_bundle(bundle: &Bundle) -> Result<ValidationReport, HcdError> {
             "maps/sha256",
         ));
     }
-    match finalize_root_hash(bundle, root_hasher, &asset_index_href) {
+    match finalize_root_hash(
+        bundle,
+        root_hasher,
+        &asset_index_href,
+        &manifest.styles_href,
+    ) {
         Ok(actual_root) if actual_root != manifest.root_hash => issues.push(issue(
             "ROOT_HASH_MISMATCH",
             format!("expected {}, actual {actual_root}", manifest.root_hash),
@@ -601,7 +677,20 @@ fn validate_manifest_fields(manifest: &crate::HcdManifest, issues: &mut Vec<Vali
     }
     if !matches!(
         manifest.source.format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt"
+        "docx"
+            | "xlsx"
+            | "csv"
+            | "tsv"
+            | "pptx"
+            | "pdf"
+            | "html"
+            | "md"
+            | "txt"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+            | "excalidraw"
     ) {
         issues.push(issue(
             "SOURCE_FORMAT_INVALID",
@@ -626,11 +715,20 @@ fn validate_manifest_fields(manifest: &crate::HcdManifest, issues: &mut Vec<Vali
             "manifest.json",
         ));
     }
-    if manifest.styles_href != "styles.css" {
+    if let Some(theme_revision_id) = &manifest.theme_revision_id {
+        if !valid_sha256(theme_revision_id) {
+            issues.push(issue(
+                "THEME_REVISION_INVALID",
+                "themeRevisionId must be a lowercase SHA-256 digest".to_string(),
+                "manifest.json",
+            ));
+        }
+    }
+    if !valid_styles_href(&manifest.styles_href) {
         issues.push(issue(
             "STYLES_HREF_INVALID",
             format!(
-                "stylesHref must be styles.css, found {}",
+                "stylesHref must be styles.css or a managed styles/ part, found {}",
                 manifest.styles_href
             ),
             "manifest.json",
@@ -696,6 +794,22 @@ fn validate_revision_chain(
                 &path,
             ));
         }
+        if let Some(theme_revision_id) = &record.theme_revision_id {
+            if !valid_sha256(theme_revision_id) {
+                issues.push(issue(
+                    "THEME_REVISION_INVALID",
+                    "themeRevisionId must be a lowercase SHA-256 digest".to_string(),
+                    &path,
+                ));
+            }
+        }
+        if revision == manifest.revision && record.theme_revision_id != manifest.theme_revision_id {
+            issues.push(issue(
+                "THEME_REVISION_MISMATCH",
+                "head revision themeRevisionId does not match the manifest".to_string(),
+                &path,
+            ));
+        }
         if record.document_id != manifest.document_id {
             issues.push(issue(
                 "REVISION_DOCUMENT_MISMATCH",
@@ -758,6 +872,11 @@ fn validate_revision_chain(
                 || !record.dirty_chunk_ids.is_empty()
                 || !record.dirty_source_parts.is_empty()
                 || !record.dirty_grid_parts.is_empty()
+                || record.grid_filter_changed
+                || record.pdf_layout_changed
+                || record.pptx_scene_changed
+                || !record.pptx_master_backgrounds.is_empty()
+                || !record.pptx_master_text_styles.is_empty()
                 || record.index_prefix != "indexes/rev-00000000000000000000"
             {
                 issues.push(issue(
@@ -787,7 +906,9 @@ fn validate_revision_chain(
                         && record.annotation_root_hash == historical.annotation_root_hash
                         && record.index_root_href == historical.index_root_href
                         && record.index_prefix == historical.index_prefix
-                        && record.asset_index_href == historical.asset_index_href => {},
+                        && record.asset_index_href == historical.asset_index_href
+                        && record.pptx_master_backgrounds == historical.pptx_master_backgrounds
+                        && record.pptx_master_text_styles == historical.pptx_master_text_styles => {},
                     _ => issues.push(issue(
                         "REVISION_RESTORE_TARGET_INVALID",
                         "restore revision must reference the exact roots and indexes of an earlier revision".to_string(),
@@ -801,7 +922,8 @@ fn validate_revision_chain(
             && (record.root_hash != manifest.root_hash
                 || record.annotation_root_hash != manifest.annotation_root_hash
                 || record.index_prefix != manifest.index_prefix
-                || record.index_root_href != manifest.index_root_href)
+                || record.index_root_href != manifest.index_root_href
+                || record.styles_href != manifest.styles_href)
         {
             issues.push(issue(
                 "REVISION_HEAD_MISMATCH",
@@ -914,15 +1036,85 @@ fn validate_patch_revision(
         .patch_id
         .as_deref()
         .is_some_and(|id| id.starts_with("restore-"));
-    let content_changed = !record.dirty_node_ids.is_empty() || !record.dirty_grid_parts.is_empty();
+    // A worksheet rename rewrites index chunks and the workbook sheet list, not a
+    // cell and not the worksheet part itself, so it is content without dirty sets.
+    // Creating a worksheet is the same shape: one new window chunk, no cell.
+    // Deleting one is the same shape turned around: chunks leave the index and
+    // their cells go with them, so the revision is content without a source part
+    // rewritten in place. A slide addition is the same shape as a worksheet
+    // addition: one new page chunk, no node yet. A slide deletion is a worksheet
+    // deletion turned around: the page leaves the index and its text nodes leave
+    // with it, and an empty slide leaves neither behind. A slide move is the one
+    // shape of its own: the index it rewrote says the same chunks in a different
+    // order, so there are no nodes and no source part, only chunks that moved.
+    // Earlier PPTX object patches used source slide parts without mapped node
+    // changes too. Their revision records predate the explicit scene flag.
+    let legacy_pptx_scene = record.dirty_node_ids.is_empty()
+        && !record.dirty_source_parts.is_empty()
+        && record
+            .dirty_source_parts
+            .iter()
+            .all(|part| part.starts_with("ppt/slides/") && part.ends_with(".xml"));
+    let scene_changed = record.pptx_scene_changed || legacy_pptx_scene;
+    let content_changed = !record.dirty_node_ids.is_empty()
+        || !record.dirty_grid_parts.is_empty()
+        || !record.sheet_renames.is_empty()
+        || !record.sheet_additions.is_empty()
+        || !record.sheet_removals.is_empty()
+        || !record.slide_additions.is_empty()
+        || !record.slide_removals.is_empty()
+        || !record.slide_reorders.is_empty()
+        || !record.slide_copies.is_empty()
+        || record.grid_filter_changed
+        || record.pdf_layout_changed
+        || scene_changed;
     if !restore
         && (content_changed == record.dirty_chunk_ids.is_empty()
-            || record.dirty_node_ids.is_empty() != record.dirty_source_parts.is_empty())
+            || (scene_changed && record.dirty_source_parts.is_empty())
+            || (!scene_changed
+                && record.dirty_node_ids.is_empty() != record.dirty_source_parts.is_empty()))
     {
         issues.push(issue(
             "REVISION_DIRTY_SET_INCONSISTENT",
             "dirty node/chunk/source-part sets do not consistently describe a content change"
                 .to_string(),
+            path,
+        ));
+    }
+    if record.pptx_master_backgrounds.iter().any(|(part, color)| {
+        !crate::pptx_design::valid_master_part(part)
+            || !crate::pptx_design::valid_pptx_background(color)
+    }) || !restore
+        && !record.pptx_scene_changed
+        && previous.is_some_and(|previous| {
+            previous.pptx_master_backgrounds != record.pptx_master_backgrounds
+        })
+    {
+        issues.push(issue(
+            "REVISION_PPTX_MASTER_BACKGROUND_INVALID",
+            "master backgrounds must be validated native parts and change with a scene revision"
+                .into(),
+            path,
+        ));
+    }
+    if record.pptx_master_text_styles.iter().any(|(part, styles)| {
+        let mut seen = std::collections::HashSet::new();
+        !crate::pptx_design::valid_master_part(part)
+            || styles.len() > 27
+            || styles.iter().any(|style| {
+                !seen.insert((style.kind.as_str(), style.level))
+                    || crate::pptx_design::validate_master_text_style(style).is_err()
+            })
+    }) || !restore
+        && !record.pptx_scene_changed
+        && previous.is_some_and(|previous| {
+            previous.pptx_master_text_styles != record.pptx_master_text_styles
+        })
+    {
+        issues.push(issue(
+            "REVISION_PPTX_MASTER_TEXT_INVALID",
+            "master text styles must be validated native parts and change with a scene revision"
+                .into(),
             path,
         ));
     }
@@ -970,7 +1162,12 @@ fn validate_patch_revision(
                 ));
             }
         }
-        if !content_changed && record.root_hash != previous.root_hash {
+        // A theme pin re-commits the body root through the revision's
+        // stylesheet without touching any node, so it is neither a content nor
+        // an annotation revision. A stylesheet transition is the only change
+        // allowed to move the body root while every dirty set stays empty.
+        let styles_changed = record.styles_href != previous.styles_href;
+        if !content_changed && !styles_changed && record.root_hash != previous.root_hash {
             issues.push(issue(
                 "ANNOTATION_REVISION_CHANGED_BODY_ROOT",
                 "annotation-only revision changed the body root hash".to_string(),
@@ -1047,6 +1244,7 @@ fn validate_descriptor(
             | "slide"
             | "note"
             | "page"
+            | "canvas"
     ) {
         issues.push(issue(
             "CHUNK_REGION_INVALID",
@@ -1085,7 +1283,28 @@ fn validate_descriptor(
             path,
         ));
     }
+    if !descriptor.pdf_layout.is_empty()
+        && (descriptor.sequence != 0
+            || descriptor.region != "page"
+            || descriptor.continuation
+            || crate::validate_pdf_placements(&descriptor.pdf_layout, 100_000).is_err())
+    {
+        issues.push(issue(
+            "PDF_PAGE_LAYOUT_INVALID",
+            "PDF layout must be valid and appear on the first page chunk".into(),
+            path,
+        ));
+    }
     if let Some(grid) = &descriptor.grid {
+        if let Some(filter) = &grid.auto_filter {
+            if grid.kind != crate::GridChunkKind::Cells || filter.validate().is_err() {
+                issues.push(issue(
+                    "GRID_AUTOFILTER_INVALID",
+                    "grid AutoFilter schema or chunk kind is invalid".to_string(),
+                    path,
+                ));
+            }
+        }
         if descriptor.region != "sheet" {
             issues.push(issue(
                 "GRID_CHUNK_REGION_INVALID",
@@ -1216,16 +1435,26 @@ fn validate_map_entry(
         }
     }
     if entry.source.source_cell_ref.is_some()
-        && (source.format != "xlsx" || entry.source.node_kind != "cell")
+        && (!source.is_spreadsheet() || entry.source.node_kind != "cell")
     {
         issues.push(issue(
             "SOURCE_CELL_REF_INVALID",
-            format!("node {} has XLSX-only source metadata", entry.node_id),
+            format!(
+                "node {} has spreadsheet-only source metadata",
+                entry.node_id
+            ),
             path,
         ));
     }
     if entry.source.created_in_hcd
-        && !((source.format == "xlsx" && entry.source.node_kind == "cell")
+        && !((entry.source.node_kind == "image"
+            && entry
+                .source
+                .text_id
+                .as_deref()
+                .is_some_and(|v| v.starts_with("hcd:image:")))
+            || (source.is_spreadsheet() && entry.source.node_kind == "cell")
+            || (source.format == "pdf" && crate::pdf_ocr::valid_source_anchor(&entry.source))
             || (source.format == "pptx"
                 && entry.source.node_kind == "slide-text"
                 && entry
@@ -1243,7 +1472,9 @@ fn validate_map_entry(
             path,
         ));
     }
-    if matches!(source.format.as_str(), "html" | "md" | "txt") {
+    if matches!(source.format.as_str(), "html" | "md" | "txt")
+        && !(entry.source.created_in_hcd && entry.source.node_kind == "image")
+    {
         validate_textual_source_range(
             entry,
             source,
@@ -1339,7 +1570,7 @@ fn validate_textual_source_range(
     }
 }
 
-fn valid_sha256(value: &str) -> bool {
+pub(crate) fn valid_sha256(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -1361,6 +1592,26 @@ fn valid_index_prefix(value: &str) -> bool {
     })
 }
 
+/// The global `styles.css` or a managed stylesheet part `styles/<name>.css`.
+/// A managed part lives in exactly one directory with a dot-less-safe stem, so
+/// it can never traverse outside the bundle.
+fn valid_styles_href(value: &str) -> bool {
+    if value == "styles.css" {
+        return true;
+    }
+    let Some(stem) = value
+        .strip_prefix("styles/")
+        .and_then(|rest| rest.strip_suffix(".css"))
+    else {
+        return false;
+    };
+    !stem.is_empty()
+        && !stem.contains('/')
+        && stem
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
 fn valid_source_part(value: &str) -> bool {
     let allowed_prefix = value.starts_with("word/")
         || value.starts_with("xl/")
@@ -1368,7 +1619,9 @@ fn valid_source_part(value: &str) -> bool {
         || value.starts_with("pdf/")
         || value.starts_with("html/")
         || value.starts_with("markdown/")
-        || value.starts_with("text/");
+        || value.starts_with("text/")
+        || value.starts_with("image/")
+        || value.starts_with("canvas/");
     allowed_prefix
         && !value.is_empty()
         && value.len() <= 1024
@@ -1925,6 +2178,7 @@ fn validate_html_element<B: std::io::BufRead>(
             | "s"
             | "small"
             | "img"
+            | "figure"
     ) {
         return Err(HcdError::InvalidBundle(format!(
             "HTML element {name} is not allowed by hcd/1"
@@ -2023,17 +2277,11 @@ fn validate_html_element<B: std::io::BufRead>(
                 .map_err(|error| {
                     HcdError::InvalidBundle(format!("invalid URL attribute: {error}"))
                 })?;
-            let lower = value.to_ascii_lowercase();
             let asset_hash = value.strip_prefix("asset://sha256/");
             let valid_asset =
                 asset_hash.is_some_and(|hash| valid_sha256(hash) && asset_hashes.contains(hash));
-            let allowed = valid_asset
-                || (normalized_key == "href" && value.starts_with('#'))
-                || (normalized_key == "href"
-                    && (lower.starts_with("https://")
-                        || lower.starts_with("http://")
-                        || lower.starts_with("mailto:")
-                        || lower.starts_with("tel:")));
+            let allowed =
+                valid_asset || (normalized_key == "href" && crate::is_safe_hyperlink(&value));
             if !allowed {
                 return Err(HcdError::InvalidBundle(format!(
                     "external URL is forbidden: {value}"
@@ -2203,6 +2451,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn styles_href_accepts_global_and_managed_parts_only() {
+        assert!(valid_styles_href("styles.css"));
+        assert!(valid_styles_href("styles/rev-00000000000000000001.css"));
+        assert!(valid_styles_href("styles/theme-a.css"));
+        assert!(!valid_styles_href(""));
+        assert!(!valid_styles_href("styles/"));
+        assert!(!valid_styles_href("styles/.css"));
+        assert!(!valid_styles_href("styles/nested/rev.css"));
+        assert!(!valid_styles_href("styles/../escape.css"));
+        assert!(!valid_styles_href("chunks/sha256/a.css"));
+        assert!(!valid_styles_href("styles/rev.css.bak"));
+    }
+
+    #[test]
     fn dangerous_html_elements_attributes_and_urls_are_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("chunk.html");
@@ -2218,6 +2480,8 @@ mod tests {
             "<section><img decoding=\"parallel\"/></section>",
             "<section loading=\"lazy\">bad placement</section>",
             "<section><img SRC=\"https://example.test/tracker\"/></section>",
+            "<section><a href=\"https://example.test/&#10;bad\">bad</a></section>",
+            "<section><a href=\"https://example.test/\\bad\">bad</a></section>",
             "<table><tbody><tr><td colspan=\"16385\">x</td></tr></tbody></table>",
             "<table><tbody><tr><td rowspan=\"1048577\">x</td></tr></tbody></table>",
             "<table><colgroup><col span=\"0\"/></colgroup><tbody></tbody></table>",

@@ -1,0 +1,50 @@
+.hcd-surface .pptx-notes-panel {
+  flex: 0 0 clamp(150px, 27vh, 270px);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  color: var(--ink);
+}
+.hcd-surface .pptx-notes-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 38px;
+  padding: 4px 15px 4px 19px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.hcd-surface .pptx-notes-panel > header button {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  font-size: 18px;
+}
+.hcd-surface .pptx-notes-panel > p { margin: 10px 19px; color: var(--muted); font-size: 12px; }
+.hcd-surface .pptx-notes-pages { min-height: 0; flex: 1; overflow: auto; padding: 0 18px 12px; }
+.hcd-surface .pptx-notes-pages .fixed-page { margin: 0 auto; box-shadow: none; }
+.hcd-surface .pptx-note-content { max-width: 780px; margin: 0 auto; }
+.hcd-surface .pptx-note-content p,
+.hcd-surface .pptx-note-content .pptx-note-run {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.hcd-surface .pptx-note-content .pptx-note-run:hover { border-color: var(--line); background: var(--stage); color: var(--ink); }
+.hcd-surface .pptx-note-content .pptx-note-hit { background: var(--accent-soft); }
+.hcd-surface .pptx-note-edit { padding: 7px 10px; border: 1px solid var(--accent); border-radius: 10px; }
+.hcd-surface .pptx-note-edit .fixed-tiptap-text { min-height: 28px; outline: none; font-size: 13px; line-height: 1.55; }
+.hcd-surface .pptx-note-edit > div:last-child { display: flex; gap: 6px; justify-content: flex-end; }
+.hcd-surface .pptx-note-edit button { padding: 4px 9px; border: 0; background: var(--stage); font-size: 12px; }

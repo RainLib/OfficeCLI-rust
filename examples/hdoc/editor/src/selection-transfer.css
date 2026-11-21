@@ -1,0 +1,22 @@
+:is(.hcd-surface,.hosted-transfer) .selection-transfer { display:grid; gap:12px; padding:12px; min-width:0; }
+:is(.hcd-surface,.hosted-transfer) .transfer-heading,:is(.hcd-surface,.hosted-transfer) .transfer-source,:is(.hcd-surface,.hosted-transfer) .transfer-actions,:is(.hcd-surface,.hosted-transfer) .transfer-progress { display:flex; align-items:center; gap:8px; }
+:is(.hcd-surface,.hosted-transfer) .transfer-heading h3,:is(.hcd-surface,.hosted-transfer) .transfer-preview h3,:is(.hcd-surface,.hosted-transfer) .transfer-preview h4 { margin:0; color:var(--ink); }
+:is(.hcd-surface,.hosted-transfer) .transfer-heading h3,:is(.hcd-surface,.hosted-transfer) .transfer-preview h3 { font-size:15px; }
+:is(.hcd-surface,.hosted-transfer) .transfer-preview h4 { font-size:13px; }
+:is(.hcd-surface,.hosted-transfer) .transfer-source,:is(.hcd-surface,.hosted-transfer) .transfer-preview article { border:1px solid var(--line); border-radius:14px; background:var(--surface); padding:10px; }
+:is(.hcd-surface,.hosted-transfer) .transfer-source div,:is(.hcd-surface,.hosted-transfer) .selection-transfer form label { display:grid; gap:4px; min-width:0; }
+:is(.hcd-surface,.hosted-transfer) .transfer-source strong { font-size:12px; overflow-wrap:anywhere; }
+:is(.hcd-surface,.hosted-transfer) .transfer-source small,:is(.hcd-surface,.hosted-transfer) .transfer-preview small,:is(.hcd-surface,.hosted-transfer) .transfer-actions span { color:var(--muted); font-size:11px; }
+:is(.hcd-surface,.hosted-transfer) .selection-transfer form { display:grid; gap:10px; padding:10px; box-shadow:none; }
+:is(.hcd-surface,.hosted-transfer) .selection-transfer label { color:var(--muted); font-size:11px; }
+:is(.hcd-surface,.hosted-transfer) .selection-transfer form :is(input,select,textarea) { box-sizing:border-box; min-width:0; width:100%; border:1px solid var(--line); border-radius:9px; background:var(--surface); color:var(--ink); padding:6px 8px; font-size:12px; }
+:is(.hcd-surface,.hosted-transfer) .selection-transfer textarea { min-height:60px; resize:vertical; }
+:is(.hcd-surface,.hosted-transfer) .selection-transfer button { display:inline-flex; align-items:center; justify-content:center; gap:6px; border:1px solid var(--line); border-radius:10px; padding:6px 9px; background:var(--surface); color:var(--ink); font-size:12px; }
+:is(.hcd-surface,.hosted-transfer) .selection-transfer button.transfer-primary { background:var(--ink); color:var(--surface); }
+:is(.hcd-surface,.hosted-transfer) .transfer-preview { display:grid; gap:8px; }
+:is(.hcd-surface,.hosted-transfer) .transfer-preview p,:is(.hcd-surface,.hosted-transfer) .transfer-preview li { font-size:12px; line-height:1.5; overflow-wrap:anywhere; }
+:is(.hcd-surface,.hosted-transfer) .transfer-preview article > header,:is(.hcd-surface,.hosted-transfer) .transfer-actions { justify-content:space-between; display:flex; gap:8px; }
+:is(.hcd-surface,.hosted-transfer) .transfer-preview-nodes { margin:8px 0; padding:0; display:grid; gap:6px; list-style:none; }
+:is(.hcd-surface,.hosted-transfer) .transfer-preview-nodes li { padding:6px 8px; border-radius:8px; background:var(--accent-soft); }
+:is(.hcd-surface,.hosted-transfer) .transfer-preview-nodes p,:is(.hcd-surface,.hosted-transfer) .transfer-preview-edges { margin:3px 0; }
+:is(.hcd-surface,.hosted-transfer) .transfer-progress { color:var(--muted); font-size:12px; }

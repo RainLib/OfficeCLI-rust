@@ -1,0 +1,280 @@
+{
+  "outcome": "stale",
+  "exactPatch": {
+    "schemaVersion": "hcd-patch/50",
+    "documentId": "grid-batch-stale",
+    "patchId": "b81f9aef-5705-4a7d-ac63-75ba49f31b1a",
+    "baseRevision": 0,
+    "actor": {
+      "client": "officecli-hcd-univer-viewer"
+    },
+    "operations": [
+      {
+        "op": "text.splice",
+        "nodeId": "n_6143b7b625f6c2ad1fed1ab29f0fd666",
+        "start": 0,
+        "deleteCount": 13,
+        "insertText": "other",
+        "precondition": {
+          "nodeHash": "93d828bb877123d77c79bf74a6842cc3c19df8cd1ae8405bce919660c97ea9c0"
+        }
+      },
+      {
+        "op": "xlsx.richText.set",
+        "nodeId": "n_4af360904941c6252c8e2672855366be",
+        "runs": [
+          {
+            "text": "新😀",
+            "properties": {
+              "b": {},
+              "color": {
+                "rgb": "FFCC2244"
+              },
+              "rFont": {
+                "val": "Arial"
+              },
+              "sz": {
+                "val": "11"
+              }
+            }
+          },
+          {
+            "text": " normal",
+            "properties": {
+              "b": {
+                "val": "0"
+              },
+              "color": {
+                "rgb": "FF000000"
+              },
+              "rFont": {
+                "val": "Arial"
+              },
+              "sz": {
+                "val": "11"
+              }
+            }
+          }
+        ],
+        "precondition": {
+          "nodeHash": "93d828bb877123d77c79bf74a6842cc3c19df8cd1ae8405bce919660c97ea9c0"
+        }
+      },
+      {
+        "op": "xlsx.richText.create",
+        "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+        "row": 2,
+        "column": 2,
+        "runs": [
+          {
+            "text": "新增",
+            "properties": {
+              "b": {
+                "val": "1"
+              }
+            }
+          },
+          {
+            "text": " normal",
+            "properties": {}
+          }
+        ]
+      },
+      {
+        "op": "xlsx.formula.set",
+        "nodeId": "n_cba83f2ddd14f479a20aed6f0d211e23",
+        "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+        "formula": "=SUM(B1,2)",
+        "precondition": {
+          "nodeHash": "3fdba35f04dc8c462986c992bcf875546257113072a909c162f7e470e581e278"
+        }
+      },
+      {
+        "op": "xlsx.formula.create",
+        "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+        "row": 2,
+        "column": 3,
+        "formula": "=B1*2"
+      },
+      {
+        "op": "xlsx.number.set",
+        "nodeId": "n_400d3815b2df249abe7c470a2c431a1b",
+        "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+        "value": "7",
+        "precondition": {
+          "nodeHash": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35"
+        }
+      }
+    ],
+    "metadata": {
+      "rootHash": "40922f985506a662b456635d2ff2bad8c68ac5c78c90bc4a11b884f33f9c9cc1"
+    }
+  },
+  "local": {
+    "schemaVersion": "hcd-grid-batch-input/1",
+    "collaborationEpoch": 0,
+    "patch": {
+      "schemaVersion": "hcd-patch/50",
+      "documentId": "grid-batch-stale",
+      "patchId": "b81f9aef-5705-4a7d-ac63-75ba49f31b1a",
+      "baseRevision": 0,
+      "actor": {
+        "client": "officecli-hcd-univer-viewer"
+      },
+      "operations": [
+        {
+          "op": "text.splice",
+          "nodeId": "n_6143b7b625f6c2ad1fed1ab29f0fd666",
+          "start": 0,
+          "deleteCount": 13,
+          "insertText": "other",
+          "precondition": {
+            "nodeHash": "93d828bb877123d77c79bf74a6842cc3c19df8cd1ae8405bce919660c97ea9c0"
+          }
+        },
+        {
+          "op": "xlsx.richText.set",
+          "nodeId": "n_4af360904941c6252c8e2672855366be",
+          "runs": [
+            {
+              "text": "新😀",
+              "properties": {
+                "b": {},
+                "color": {
+                  "rgb": "FFCC2244"
+                },
+                "rFont": {
+                  "val": "Arial"
+                },
+                "sz": {
+                  "val": "11"
+                }
+              }
+            },
+            {
+              "text": " normal",
+              "properties": {
+                "b": {
+                  "val": "0"
+                },
+                "color": {
+                  "rgb": "FF000000"
+                },
+                "rFont": {
+                  "val": "Arial"
+                },
+                "sz": {
+                  "val": "11"
+                }
+              }
+            }
+          ],
+          "precondition": {
+            "nodeHash": "93d828bb877123d77c79bf74a6842cc3c19df8cd1ae8405bce919660c97ea9c0"
+          }
+        },
+        {
+          "op": "xlsx.richText.create",
+          "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+          "row": 2,
+          "column": 2,
+          "runs": [
+            {
+              "text": "新增",
+              "properties": {
+                "b": {
+                  "val": "1"
+                }
+              }
+            },
+            {
+              "text": " normal",
+              "properties": {}
+            }
+          ]
+        },
+        {
+          "op": "xlsx.formula.set",
+          "nodeId": "n_cba83f2ddd14f479a20aed6f0d211e23",
+          "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+          "formula": "=SUM(B1,2)",
+          "precondition": {
+            "nodeHash": "3fdba35f04dc8c462986c992bcf875546257113072a909c162f7e470e581e278"
+          }
+        },
+        {
+          "op": "xlsx.formula.create",
+          "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+          "row": 2,
+          "column": 3,
+          "formula": "=B1*2"
+        },
+        {
+          "op": "xlsx.number.set",
+          "nodeId": "n_400d3815b2df249abe7c470a2c431a1b",
+          "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+          "value": "7",
+          "precondition": {
+            "nodeHash": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35"
+          }
+        }
+      ],
+      "metadata": {
+        "rootHash": "40922f985506a662b456635d2ff2bad8c68ac5c78c90bc4a11b884f33f9c9cc1"
+      }
+    },
+    "changes": [
+      {
+        "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+        "row": 0,
+        "column": 0,
+        "oldText": "中文😀 normal 斜体",
+        "newText": "新😀 normal",
+        "nodeId": "n_4af360904941c6252c8e2672855366be"
+      },
+      {
+        "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+        "row": 0,
+        "column": 1,
+        "oldText": "2",
+        "newText": "7",
+        "nodeId": "n_400d3815b2df249abe7c470a2c431a1b"
+      },
+      {
+        "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+        "row": 0,
+        "column": 2,
+        "oldText": "=LEN(A1)",
+        "newText": "=SUM(B1,2)",
+        "nodeId": "n_cba83f2ddd14f479a20aed6f0d211e23"
+      },
+      {
+        "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+        "row": 1,
+        "column": 0,
+        "oldText": "中文😀 normal 斜体",
+        "newText": "other",
+        "nodeId": "n_6143b7b625f6c2ad1fed1ab29f0fd666"
+      },
+      {
+        "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+        "row": 1,
+        "column": 1,
+        "oldText": "",
+        "newText": "新增 normal"
+      },
+      {
+        "sheetId": "s_afd2260fbbe6090f3255d73ba015f9a9",
+        "row": 1,
+        "column": 2,
+        "oldText": "",
+        "newText": "=B1*2"
+      }
+    ],
+    "text": "A1: 新😀 normal\nB1: 7\nC1: =SUM(B1,2)\nA2: other\nB2: 新增 normal\nC2: =B1*2"
+  },
+  "originalPosts": 1,
+  "replayedPosts": 0,
+  "revision": 1,
+  "canvasPreserved": true
+}

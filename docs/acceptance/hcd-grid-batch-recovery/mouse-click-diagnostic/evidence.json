@@ -1,0 +1,142 @@
+[
+  {
+    "run": "workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat4",
+    "evidence": [
+      {
+        "key": "ArrowRight",
+        "keyCode": 39,
+        "meta": false,
+        "ctrl": false,
+        "shift": false,
+        "alt": false,
+        "active": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); color: transparent; outline: none; z-index: -2; caret-color: transparent; white-space: pre-wrap; user-select: text;\"></div>",
+        "editing": true,
+        "blocked": false,
+        "revision": 2,
+        "selection": "A1",
+        "context": {
+          "FOCUSING_UNIVER_EDITOR": true,
+          "FOCUSING_UNIT": true,
+          "FOCUSING_DOC": false,
+          "FOCUSING_SHEET": true,
+          "FOCUSING_SLIDE": false,
+          "SELECTIONS_ENABLED": true,
+          "EDITOR_ACTIVATED": true,
+          "FOCUSING_UNIVER": true,
+          "FOCUSING_EDITOR_INPUT_FORMULA": false,
+          "FOCUSING_EDITOR_BUT_HIDDEN": true
+        },
+        "forceEscaped": false,
+        "forceDisabled": false,
+        "candidate": "sheet.formula-embedding-editor.__INTERNAL_EDITOR__DOCS_NORMAL",
+        "after": "A1",
+        "prevented": true
+      }
+    ]
+  },
+  {
+    "run": "workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat5",
+    "evidence": [
+      {
+        "key": "ArrowRight",
+        "keyCode": 39,
+        "meta": false,
+        "ctrl": false,
+        "shift": false,
+        "alt": false,
+        "active": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); color: transparent; outline: none; z-index: -2; caret-color: transparent; white-space: pre-wrap; user-select: text;\"></div>",
+        "editing": true,
+        "blocked": false,
+        "revision": 2,
+        "selection": "A1",
+        "context": {
+          "FOCUSING_UNIVER_EDITOR": true,
+          "FOCUSING_UNIT": true,
+          "FOCUSING_DOC": false,
+          "FOCUSING_SHEET": true,
+          "FOCUSING_SLIDE": false,
+          "SELECTIONS_ENABLED": true,
+          "EDITOR_ACTIVATED": true,
+          "FOCUSING_UNIVER": true,
+          "FOCUSING_EDITOR_INPUT_FORMULA": false,
+          "FOCUSING_EDITOR_BUT_HIDDEN": true
+        },
+        "forceEscaped": false,
+        "forceDisabled": false,
+        "candidate": "sheet.formula-embedding-editor.__INTERNAL_EDITOR__DOCS_NORMAL",
+        "after": "A1",
+        "prevented": true
+      }
+    ]
+  },
+  {
+    "run": "workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat2",
+    "evidence": [
+      {
+        "key": "ArrowRight",
+        "keyCode": 39,
+        "meta": false,
+        "ctrl": false,
+        "shift": false,
+        "alt": false,
+        "active": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); color: transparent; outline: none; z-index: -2; caret-color: transparent; white-space: pre-wrap; user-select: text;\"></div>",
+        "editing": true,
+        "blocked": false,
+        "revision": 2,
+        "selection": "A1",
+        "context": {
+          "FOCUSING_UNIVER_EDITOR": true,
+          "FOCUSING_UNIT": true,
+          "FOCUSING_DOC": false,
+          "FOCUSING_SHEET": true,
+          "FOCUSING_SLIDE": false,
+          "SELECTIONS_ENABLED": true,
+          "EDITOR_ACTIVATED": true,
+          "FOCUSING_UNIVER": true,
+          "FOCUSING_EDITOR_INPUT_FORMULA": false,
+          "FOCUSING_EDITOR_BUT_HIDDEN": true
+        },
+        "forceEscaped": false,
+        "forceDisabled": false,
+        "candidate": "sheet.formula-embedding-editor.__INTERNAL_EDITOR__DOCS_NORMAL",
+        "after": "A1",
+        "prevented": true
+      }
+    ]
+  },
+  {
+    "run": "workspace-XLSX-batch-input-0d415-follow-the-epoch-after-undo-repeat6",
+    "evidence": [
+      {
+        "key": "ArrowRight",
+        "keyCode": 39,
+        "meta": false,
+        "ctrl": false,
+        "shift": false,
+        "alt": false,
+        "active": "<div contenteditable=\"true\" data-u-comp=\"editor\" id=\"__editor___INTERNAL_EDITOR__DOCS_NORMAL\" style=\"position: absolute; overflow: hidden; opacity: 1; background: rgb(0, 0, 0); color: transparent; outline: none; z-index: -2; caret-color: transparent; white-space: pre-wrap; user-select: text;\"></div>",
+        "editing": true,
+        "blocked": false,
+        "revision": 2,
+        "selection": "A1",
+        "context": {
+          "FOCUSING_UNIVER_EDITOR": true,
+          "FOCUSING_UNIT": true,
+          "FOCUSING_DOC": false,
+          "FOCUSING_SHEET": true,
+          "FOCUSING_SLIDE": false,
+          "SELECTIONS_ENABLED": true,
+          "EDITOR_ACTIVATED": true,
+          "FOCUSING_UNIVER": true,
+          "FOCUSING_EDITOR_INPUT_FORMULA": false,
+          "FOCUSING_EDITOR_BUT_HIDDEN": true
+        },
+        "forceEscaped": false,
+        "forceDisabled": false,
+        "candidate": "sheet.formula-embedding-editor.__INTERNAL_EDITOR__DOCS_NORMAL",
+        "after": "A1",
+        "prevented": true
+      }
+    ]
+  }
+]

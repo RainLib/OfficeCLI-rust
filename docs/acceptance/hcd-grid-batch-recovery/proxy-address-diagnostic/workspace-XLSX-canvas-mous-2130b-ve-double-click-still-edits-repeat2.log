@@ -1,0 +1,96 @@
+(node:29859) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+  VITE v7.1.11  ready in 74 ms
+
+  ➜  Local:   http://127.0.0.1:56529/
+11:19:46 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:46 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture/auth
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:46 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture/theme
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:46 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:46 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture/agents
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:47 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture/image-jobs
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:47 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture/agent-runs
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:47 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture/agents
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:48 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture/image-jobs
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:48 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture/agents
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:48 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture/agent-runs
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:49 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture/agents
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:49 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture/image-jobs
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:49 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture/agent-runs
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)
+11:19:49 AM [vite] http proxy error: /v1/documents/grid-pointer-gesture/agents
+Error: connect EADDRNOTAVAIL 127.0.0.1:56527 - Local (0.0.0.0:0)
+    at internalConnect (node:net:1468:16)
+    at defaultTriggerAsyncIdScope (node:internal/async_hooks:474:12)
+    at node:net:1791:9
+    at process.processTicksAndRejections (node:internal/process/task_queues:85:11)

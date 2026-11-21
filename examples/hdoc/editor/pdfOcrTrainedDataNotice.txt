@@ -1,0 +1,9 @@
+Tesseract OCR language data for English, Simplified Chinese, and Traditional Chinese.
+The 4.0.0_best_int files are distributed by naptha/tessdata from Tesseract's
+integerized Tessdata Best models under the Apache License, Version 2.0.
+
+https://github.com/naptha/tessdata/tree/master/4.0.0_best_int
+https://github.com/tesseract-ocr/tessdata_best
+
+The files are from the @tesseract.js-data/eng, @tesseract.js-data/chi_sim,
+and @tesseract.js-data/chi_tra packages, version 1.0.0.

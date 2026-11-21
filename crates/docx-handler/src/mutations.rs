@@ -2725,21 +2725,19 @@ fn merge_ppr_into_props(
                     merged.insert("border".to_string(), "preserve".to_string());
                 }
             }
-            "shd" => {
-                if !new_props.contains_key("shading") && !new_props.contains_key("shd") {
-                    let fill = child.attributes.get("fill").cloned().unwrap_or_default();
-                    let pat = child
-                        .attributes
-                        .get("val")
-                        .cloned()
-                        .unwrap_or("clear".to_string());
-                    let clr = child
-                        .attributes
-                        .get("color")
-                        .cloned()
-                        .unwrap_or("auto".to_string());
-                    merged.insert("shd".to_string(), format!("{};{};{}", pat, fill, clr));
-                }
+            "shd" if !new_props.contains_key("shading") && !new_props.contains_key("shd") => {
+                let fill = child.attributes.get("fill").cloned().unwrap_or_default();
+                let pat = child
+                    .attributes
+                    .get("val")
+                    .cloned()
+                    .unwrap_or("clear".to_string());
+                let clr = child
+                    .attributes
+                    .get("color")
+                    .cloned()
+                    .unwrap_or("auto".to_string());
+                merged.insert("shd".to_string(), format!("{};{};{}", pat, fill, clr));
             }
             _ => {}
         }
@@ -6372,10 +6370,10 @@ fn replace_comment_body(block: &str, text: &str) -> Result<String, HandlerError>
     let close = block
         .rfind("</w:comment>")
         .ok_or_else(|| HandlerError::OperationFailed("unterminated comment".to_string()))?;
-    // commentsExtended.xml identifies a comment by the first comment-body
+    // commentsExtended.xml identifies a comment by the last comment-body
     // paragraph's w14:paraId. Preserve that id when replacing the body so a
     // text edit cannot silently sever reply threading or resolved state.
-    let para_id_attr = first_comment_para_id(block)
+    let para_id_attr = last_comment_para_id(block)
         .map(|id| {
             format!(
                 " xmlns:w14=\"{}\" w14:paraId=\"{}\"",
@@ -8040,17 +8038,19 @@ fn assign_comment_para_id(xml: &str, comment_id: &str) -> Result<(String, String
         .ok_or_else(|| HandlerError::OperationFailed("malformed comments.xml".to_string()))?;
     let comment_end = find_matching_close(xml, comment_start, "<w:comment", "</w:comment>")
         .ok_or_else(|| HandlerError::OperationFailed("unterminated comment".to_string()))?;
-    let paragraph_rel = xml[comment_start..comment_end]
-        .find("<w:p")
-        .ok_or_else(|| {
-            HandlerError::OperationFailed("comment has no paragraph for metadata".to_string())
-        })?;
-    let paragraph_start = comment_start + paragraph_rel;
-    let paragraph_end = find_tag_close_after(xml, paragraph_start)
-        .ok_or_else(|| HandlerError::OperationFailed("malformed comment paragraph".to_string()))?;
-    if let Some(existing) = xml_attribute(&xml[paragraph_start..=paragraph_end], "w14:paraId") {
+    let paragraph = &xml[comment_start..comment_end];
+    let opening = last_comment_paragraph_start(paragraph).ok_or_else(|| {
+        HandlerError::OperationFailed("comment has no paragraph for metadata".to_string())
+    })?;
+    if let Some(existing) = last_comment_para_id(paragraph) {
         return Ok((xml.to_string(), existing));
     }
+    let paragraph_end = comment_start + opening.end
+        - if paragraph[opening].ends_with("/>") {
+            2
+        } else {
+            1
+        };
     let para_id = crate::para_id::generate_para_id();
     let insertion = format!(" xmlns:w14=\"{}\" w14:paraId=\"{}\"", W14_NS, para_id);
     let mut updated = String::with_capacity(xml.len() + insertion.len());
@@ -8320,7 +8320,7 @@ fn parse_comments(xml: &str) -> Result<Vec<DocxComment>, HandlerError> {
             anchor: None,
             parent_id: None,
             done: false,
-            para_id: first_comment_para_id(block),
+            para_id: last_comment_para_id(block),
         });
         cursor = close;
     }
@@ -8353,10 +8353,28 @@ fn collect_word_text(xml: &str) -> String {
     text
 }
 
-fn first_comment_para_id(comment_xml: &str) -> Option<String> {
-    let p_start = comment_xml.find("<w:p")?;
-    let p_end = find_tag_close_after(comment_xml, p_start)?;
-    xml_attribute(&comment_xml[p_start..=p_end], "w14:paraId")
+fn last_comment_paragraph_start(comment_xml: &str) -> Option<std::ops::Range<usize>> {
+    let mut reader = quick_xml::Reader::from_str(comment_xml);
+    let mut last = None;
+    loop {
+        let start = reader.buffer_position() as usize;
+        match reader.read_event().ok()? {
+            quick_xml::events::Event::Start(tag) | quick_xml::events::Event::Empty(tag)
+                if tag.name().as_ref() == b"w:p" =>
+            {
+                last = Some(start..reader.buffer_position() as usize);
+            }
+            quick_xml::events::Event::Eof => return last,
+            _ => {}
+        }
+    }
+}
+
+fn last_comment_para_id(comment_xml: &str) -> Option<String> {
+    xml_attribute(
+        &comment_xml[last_comment_paragraph_start(comment_xml)?],
+        "w14:paraId",
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -11493,10 +11511,7 @@ fn strip_named_element_pub(xml: &str, qualified_name: &str) -> String {
     let mut out = xml.to_string();
     let open_tag_pat = format!("<{}", qualified_name);
     let close_tag_pat = format!("</{}>", qualified_name);
-    loop {
-        let Some(open) = out.find(&open_tag_pat) else {
-            break;
-        };
+    while let Some(open) = out.find(&open_tag_pat) {
         // Ensure the match is the start of a real tag (not a longer name).
         let next = out.as_bytes().get(open + open_tag_pat.len()).copied();
         if !matches!(

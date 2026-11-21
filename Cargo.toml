@@ -1,7 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/canvas-core",
     "crates/officecli",
+    "crates/office-engine",
     "crates/oxml",
     "crates/hcd-core",
     "crates/hcd-docx",
@@ -15,10 +17,10 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.31"
+version = "0.1.32"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/anthropics/officecli"
+repository = "https://github.com/RainLib/Foldly"
 
 [workspace.dependencies]
 # Serialization

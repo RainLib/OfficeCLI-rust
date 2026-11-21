@@ -1,0 +1,31 @@
+{
+  "ephemeralPortRange": {
+    "first": 49152,
+    "last": 65535
+  },
+  "tcpMslMilliseconds": 15000,
+  "observedTimeWaitCount": 16163,
+  "separateEndpointClassificationSnapshot": {
+    "dominantNonLoopbackEndpointTimeWait": 15258,
+    "loopbackTimeWait": 15
+  },
+  "observedErrors": [
+    "Vite upstream connect EADDRNOTAVAIL",
+    "Playwright direct API connect EADDRNOTAVAIL",
+    "Chromium navigation net::ERR_ADDRESS_INVALID"
+  ],
+  "interpretation": "Current reproduction supports system address allocation pressure; most TIME_WAIT sockets in the endpoint snapshot were not loopback. This does not prove all historical failures have the same cause.",
+  "externalProcessesChanged": false,
+  "systemNetworkSettingsChanged": false,
+  "proxyProbe": {
+    "before": {
+      "requests": 20,
+      "upstreamConnections": 20
+    },
+    "after": {
+      "requests": 20,
+      "upstreamConnections": 1,
+      "passed": true
+    }
+  }
+}

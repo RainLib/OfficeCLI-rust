@@ -66,6 +66,16 @@ pub fn parse_chart_preview(xml: &str) -> Result<ChartPreview, String> {
             && node.tag_name().name() != "chart"
     }) {
         let kind = chart_node.tag_name().name().trim_end_matches("Chart");
+        let kind = if kind == "bar"
+            && chart_node.children().any(|node| {
+                node.is_element()
+                    && node.tag_name().name() == "barDir"
+                    && node.attribute("val") == Some("bar")
+            }) {
+            "horizontalBar"
+        } else {
+            kind
+        };
         if !chart_kinds.iter().any(|existing| existing == kind) {
             chart_kinds.push(kind.to_string());
         }
@@ -101,7 +111,11 @@ pub fn render_preview_svg(chart: &ChartPreview) -> String {
         WIDTH / 2.0,
         escape_xml(&chart.title)
     ));
-    if chart.series.is_empty() {
+    if !chart
+        .series
+        .iter()
+        .any(|series| series.values.iter().any(|value| value.is_finite()))
+    {
         body.push_str("<rect x=\"54\" y=\"48\" width=\"564\" height=\"250\" fill=\"#fafafa\" stroke=\"#d9d9d9\"/><text x=\"320\" y=\"178\" text-anchor=\"middle\" font-family=\"Arial,sans-serif\" font-size=\"14\" fill=\"#777\">No cached chart data</text>");
     } else {
         let primary = chart
@@ -113,14 +127,21 @@ pub fn render_preview_svg(chart: &ChartPreview) -> String {
             "pie" | "doughnut" | "ofPie" => render_pie(chart, &mut body),
             "radar" => render_radar(chart, &mut body),
             "boxWhisker" => render_box_whisker(chart, &mut body),
-            "bar" => render_bars(chart, &mut body),
+            "bar" | "horizontalBar" => render_bars(chart, &mut body, primary == "horizontalBar"),
             "scatter" | "bubble" => render_cartesian(chart, &mut body, true),
             _ => render_cartesian(chart, &mut body, false),
         }
-        render_legend(chart, &mut body);
+        if matches!(primary, "bar" | "line" | "horizontalBar") {
+            render_categories(chart, &mut body, primary);
+        }
+        render_legend(
+            chart,
+            &mut body,
+            matches!(primary, "pie" | "doughnut" | "ofPie"),
+        );
     }
     format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {WIDTH} {HEIGHT}\" role=\"img\" aria-label=\"{}\">{body}</svg>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1280\" height=\"720\" viewBox=\"0 0 {WIDTH} {HEIGHT}\" role=\"img\" aria-label=\"{}\">{body}</svg>",
         escape_xml(&chart.title)
     )
 }
@@ -301,8 +322,14 @@ fn series_strings(node: roxmltree::Node<'_, '_>, container: &str) -> Vec<String>
 fn series_numbers(node: roxmltree::Node<'_, '_>, container: &str) -> Vec<f64> {
     series_strings(node, container)
         .into_iter()
-        .filter_map(|value| value.trim().parse::<f64>().ok())
-        .filter(|value| value.is_finite())
+        .map(|value| {
+            value
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .unwrap_or(f64::NAN)
+        })
         .take(MAX_POINTS)
         .collect()
 }
@@ -316,9 +343,10 @@ fn cached_points(container: roxmltree::Node<'_, '_>) -> Vec<String> {
             let value = point
                 .descendants()
                 .find(|node| node.is_element() && node.tag_name().name() == "v")?
-                .text()?
+                .text()
+                .unwrap_or_default()
                 .to_string();
-            Some((index, value))
+            (index < MAX_POINTS).then_some((index, value))
         })
         .take(MAX_POINTS)
         .collect::<Vec<_>>();
@@ -331,8 +359,24 @@ fn cached_points(container: roxmltree::Node<'_, '_>) -> Vec<String> {
             .enumerate()
             .collect();
     }
-    indexed.sort_by_key(|(index, _)| *index);
-    indexed.into_iter().map(|(_, value)| value).collect()
+    let count = container
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "ptCount")
+        .and_then(|node| node.attribute("val"))
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_default();
+    let count = indexed
+        .iter()
+        .map(|(index, _)| index + 1)
+        .max()
+        .unwrap_or(0)
+        .max(count)
+        .min(MAX_POINTS);
+    let mut values = vec![String::new(); count];
+    for (index, value) in indexed {
+        values[index] = value;
+    }
+    values
 }
 
 fn collect_text(node: roxmltree::Node<'_, '_>) -> String {
@@ -369,11 +413,16 @@ fn value_bounds(chart: &ChartPreview) -> (f64, f64) {
     (minimum, maximum)
 }
 
+fn fraction(value: f64, (minimum, maximum): (f64, f64)) -> f64 {
+    let scale = minimum.abs().max(maximum.abs()).max(1.0);
+    (value / scale - minimum / scale) / (maximum / scale - minimum / scale)
+}
+
 fn render_cartesian(chart: &ChartPreview, body: &mut String, numeric_x: bool) {
     render_axes(body);
     let plot_width = WIDTH - LEFT - RIGHT;
     let plot_height = HEIGHT - TOP - BOTTOM;
-    let (minimum, maximum) = value_bounds(chart);
+    let bounds = value_bounds(chart);
     for (series_index, series) in chart.series.iter().enumerate() {
         let count = series.values.len();
         if count == 0 {
@@ -401,23 +450,29 @@ fn render_cartesian(chart: &ChartPreview, body: &mut String, numeric_x: bool) {
                 } else {
                     LEFT + index as f64 / (count - 1) as f64 * plot_width
                 };
-                let y = TOP + (maximum - value) / (maximum - minimum) * plot_height;
-                (x, y)
+                let y = TOP + (1.0 - fraction(*value, bounds)) * plot_height;
+                (x.is_finite() && y.is_finite()).then_some((x, y))
             })
             .collect::<Vec<_>>();
         let color = PALETTE[series_index % PALETTE.len()];
-        let joined = points
-            .iter()
-            .map(|(x, y)| format!("{x:.1},{y:.1}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        body.push_str(&format!(
-            "<polyline points=\"{joined}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2.2\"/>"
-        ));
-        for (index, (x, y)) in points.iter().enumerate() {
+        for segment in points
+            .split(Option::is_none)
+            .filter(|segment| segment.len() > 1)
+        {
+            let joined = segment
+                .iter()
+                .flatten()
+                .map(|(x, y)| format!("{x:.1},{y:.1}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            body.push_str(&format!("<polyline points=\"{joined}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2.2\"/>"));
+        }
+        for (index, point) in points.iter().enumerate() {
+            let Some((x, y)) = point else { continue };
             let radius = series
                 .bubble_sizes
                 .get(index)
+                .filter(|value| value.is_finite())
                 .map(|value| value.abs().sqrt().clamp(3.0, 15.0))
                 .unwrap_or(3.3);
             body.push_str(&format!("<circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"{radius:.1}\" fill=\"{color}\" fill-opacity=\".72\"/>"));
@@ -425,11 +480,32 @@ fn render_cartesian(chart: &ChartPreview, body: &mut String, numeric_x: bool) {
     }
 }
 
-fn render_bars(chart: &ChartPreview, body: &mut String) {
-    render_axes(body);
+fn render_bars(chart: &ChartPreview, body: &mut String, horizontal: bool) {
     let plot_width = WIDTH - LEFT - RIGHT;
     let plot_height = HEIGHT - TOP - BOTTOM;
-    let (_, maximum) = value_bounds(chart);
+    let bounds = value_bounds(chart);
+    let zero = fraction(0.0, bounds);
+    if horizontal {
+        for step in 0..=5 {
+            let x = LEFT + plot_width * f64::from(step) / 5.0;
+            body.push_str(&format!(
+                "<line x1=\"{x:.1}\" y1=\"{TOP}\" x2=\"{x:.1}\" y2=\"{:.1}\" stroke=\"#e7e7e7\"/>",
+                TOP + plot_height
+            ));
+        }
+        let x = LEFT + plot_width * zero;
+        body.push_str(&format!(
+            "<line x1=\"{x:.1}\" y1=\"{TOP}\" x2=\"{x:.1}\" y2=\"{:.1}\" stroke=\"#777\"/>",
+            TOP + plot_height
+        ));
+    } else {
+        render_axes(body);
+        let y = TOP + plot_height * (1.0 - zero);
+        body.push_str(&format!(
+            "<line x1=\"{LEFT}\" x2=\"{:.1}\" y1=\"{y:.1}\" y2=\"{y:.1}\" stroke=\"#999\"/>",
+            LEFT + plot_width
+        ));
+    }
     let count = chart
         .series
         .iter()
@@ -437,35 +513,70 @@ fn render_bars(chart: &ChartPreview, body: &mut String) {
         .max()
         .unwrap_or(1)
         .max(1);
-    let group_width = plot_width / count as f64;
-    let bar_width = (group_width * 0.78 / chart.series.len().max(1) as f64).max(1.0);
+    let group = (if horizontal { plot_height } else { plot_width }) / count as f64;
+    let thickness = group * 0.76 / chart.series.len().max(1) as f64;
     for (series_index, series) in chart.series.iter().enumerate() {
         let color = PALETTE[series_index % PALETTE.len()];
         for (index, value) in series.values.iter().enumerate() {
-            let height = value.max(0.0) / maximum.max(1.0) * plot_height;
-            let x = LEFT
-                + index as f64 * group_width
-                + group_width * 0.11
-                + series_index as f64 * bar_width;
-            body.push_str(&format!("<rect x=\"{x:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{height:.1}\" fill=\"{color}\"/>", TOP + plot_height - height, bar_width * 0.92));
+            if !value.is_finite() {
+                continue;
+            }
+            let at = fraction(*value, bounds);
+            let offset = index as f64 * group + group * 0.12 + series_index as f64 * thickness;
+            let (x, y, width, height) = if horizontal {
+                (
+                    LEFT + at.min(zero) * plot_width,
+                    TOP + offset,
+                    (at - zero).abs() * plot_width,
+                    thickness * 0.91,
+                )
+            } else {
+                (
+                    LEFT + offset,
+                    TOP + (1.0 - at.max(zero)) * plot_height,
+                    thickness * 0.91,
+                    (at - zero).abs() * plot_height,
+                )
+            };
+            body.push_str(&format!("<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{width:.1}\" height=\"{height:.1}\" rx=\"1\" fill=\"{color}\"/>"));
         }
     }
 }
 
 fn render_pie(chart: &ChartPreview, body: &mut String) {
     let values = &chart.series[0].values;
-    let total: f64 = values.iter().map(|value| value.max(0.0)).sum();
+    let scale = values
+        .iter()
+        .filter(|value| value.is_finite())
+        .fold(0.0f64, |max, value| max.max(value.abs()))
+        .max(1.0);
+    let total: f64 = values
+        .iter()
+        .filter(|value| value.is_finite())
+        .map(|value| value.abs() / scale)
+        .sum();
     if total <= 0.0 {
         return render_cartesian(chart, body, false);
     }
     let (cx, cy, radius) = (WIDTH / 2.0, 174.0, 105.0);
     let mut angle = -std::f64::consts::FRAC_PI_2;
     for (index, value) in values.iter().enumerate() {
-        let next = angle + value.max(0.0) / total * std::f64::consts::TAU;
+        if !value.is_finite() || *value == 0.0 {
+            continue;
+        }
+        let share = value.abs() / scale / total;
+        let color = PALETTE[index % PALETTE.len()];
+        if share >= 1.0 {
+            body.push_str(&format!(
+                "<circle cx=\"{cx}\" cy=\"{cy}\" r=\"{radius}\" fill=\"{color}\"/>"
+            ));
+            break;
+        }
+        let next = angle + share * std::f64::consts::TAU;
         let large = i32::from(next - angle > std::f64::consts::PI);
         let (x1, y1) = (cx + radius * angle.cos(), cy + radius * angle.sin());
         let (x2, y2) = (cx + radius * next.cos(), cy + radius * next.sin());
-        body.push_str(&format!("<path d=\"M {cx:.1} {cy:.1} L {x1:.1} {y1:.1} A {radius:.1} {radius:.1} 0 {large} 1 {x2:.1} {y2:.1} Z\" fill=\"{}\" stroke=\"#fff\"/>", PALETTE[index % PALETTE.len()]));
+        body.push_str(&format!("<path d=\"M {cx:.1} {cy:.1} L {x1:.1} {y1:.1} A {radius:.1} {radius:.1} 0 {large} 1 {x2:.1} {y2:.1} Z\" fill=\"{color}\" stroke=\"#fff\"/>"));
         angle = next;
     }
 }
@@ -586,12 +697,70 @@ fn radar_points(
         .join(" ")
 }
 
-fn render_legend(chart: &ChartPreview, body: &mut String) {
-    let shown = chart.series.len().min(6);
-    let item_width = (WIDTH - 30.0) / shown.max(1) as f64;
-    for (index, series) in chart.series.iter().take(shown).enumerate() {
-        let x = 18.0 + index as f64 * item_width;
-        body.push_str(&format!("<rect x=\"{x:.1}\" y=\"326\" width=\"10\" height=\"10\" fill=\"{}\"/><text x=\"{:.1}\" y=\"336\" font-family=\"Arial,sans-serif\" font-size=\"11\" fill=\"#444\">{}</text>", PALETTE[index % PALETTE.len()], x + 14.0, escape_xml(&series.name)));
+fn render_categories(chart: &ChartPreview, body: &mut String, kind: &str) {
+    let Some(series) = chart
+        .series
+        .iter()
+        .max_by_key(|series| series.categories.len())
+    else {
+        return;
+    };
+    let count = series.categories.len();
+    let horizontal = kind == "horizontalBar";
+    let step = count.div_ceil(if horizontal { 12 } else { 8 }).max(1);
+    for (index, category) in series.categories.iter().enumerate().step_by(step) {
+        let center = if kind == "line" && count > 1 {
+            index as f64 / (count - 1) as f64
+        } else {
+            (index as f64 + 0.5) / count as f64
+        };
+        let (x, y, anchor) = if horizontal {
+            (
+                LEFT - 6.0,
+                TOP + center * (HEIGHT - TOP - BOTTOM) + 4.0,
+                "end",
+            )
+        } else {
+            (
+                LEFT + center * (WIDTH - LEFT - RIGHT),
+                HEIGHT - BOTTOM + 16.0,
+                "middle",
+            )
+        };
+        let label = preview_label(category, if horizontal { 4 } else { 8 });
+        body.push_str(&format!("<text x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"{anchor}\" font-family=\"Arial,sans-serif\" font-size=\"11\" fill=\"#555\">{label}</text>"));
+    }
+}
+
+fn preview_label(value: &str, limit: usize) -> String {
+    let mut label: String = value.chars().take(limit).collect();
+    if value.chars().count() > limit {
+        label.push('…');
+    }
+    escape_xml(&label)
+}
+
+fn render_legend(chart: &ChartPreview, body: &mut String, pie: bool) {
+    let entries: Vec<_> = if pie {
+        chart.series[0]
+            .categories
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (index, name.as_str()))
+            .collect()
+    } else {
+        chart
+            .series
+            .iter()
+            .enumerate()
+            .map(|(index, series)| (index, series.name.as_str()))
+            .collect()
+    };
+    let item_width = (WIDTH - 30.0) / entries.len().clamp(1, 4) as f64;
+    for (position, (index, name)) in entries.into_iter().take(8).enumerate() {
+        let x = 18.0 + (position % 4) as f64 * item_width;
+        let y = 326.0 + (position / 4) as f64 * 16.0;
+        body.push_str(&format!("<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"10\" height=\"10\" rx=\"2\" fill=\"{}\"/><text x=\"{:.1}\" y=\"{:.1}\" font-family=\"Arial,sans-serif\" font-size=\"11\" fill=\"#444\">{}</text>", PALETTE[index % PALETTE.len()], x + 14.0, y + 9.0, preview_label(name, 11)));
     }
 }
 

@@ -1,0 +1,59 @@
+{
+  "date": "2026-11-16",
+  "branch": "feature/hcd-font-format-integration",
+  "head": "ccb5fd5",
+  "scope": "uncommitted local workspace",
+  "rust": {
+    "passed": 1073,
+    "failed": 0,
+    "ignored": 0,
+    "resultGroups": 25
+  },
+  "frontendUnit": {
+    "passed": 21,
+    "failed": 0
+  },
+  "browser": {
+    "passed": 31,
+    "failed": 0,
+    "duration": "2.6m"
+  },
+  "editorBuild": {
+    "standalone": true,
+    "embedded": true
+  },
+  "rustChecks": {
+    "clippy": true,
+    "format": true,
+    "debugBuild": true
+  },
+  "schemaContractValidation": {
+    "validator": "Ajv2020",
+    "standaloneAndMixedContent": true,
+    "invalidContainsReproducedAndFixed": true
+  },
+  "intermediateBrowserRun": {
+    "passed": 29,
+    "failed": 2,
+    "duration": "3.4m",
+    "recheckPassed": 2,
+    "recheckDuration": "13.1s",
+    "rootCauseUnconfirmed": true,
+    "record": "intermediate-browser-results.json"
+  },
+  "nativeCreationShapes": [
+    "absentCell",
+    "emptyRow",
+    "styledEmptyCell",
+    "absentRow"
+  ],
+  "nativeFormulaProbes": {
+    "passed": 5,
+    "mismatches": 0
+  },
+  "sameSourceOfficeVisualReference": false,
+  "realModelCalls": false,
+  "remoteCiVerified": false,
+  "cleanCheckoutVerified": false,
+  "entireProductComplete": false
+}

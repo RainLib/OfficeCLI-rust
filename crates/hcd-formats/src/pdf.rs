@@ -1,9 +1,10 @@
 use crate::common::{
     base_manifest, checked_export_state_with_restores, collect_dirty_nodes, emit_failed,
     emit_started, escape_attribute, escape_text, finish_import, source_identity,
-    write_fidelity_report, ExportOptions, ImportOptions, PdfRasterMode,
+    write_fidelity_report, ExportOptions, ImportOptions, PdfRasterMode, RunFontSupport,
 };
 use handler_common::{DocumentHandler, InsertPosition};
+use hayro::hayro_interpret::util::PageExt;
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::palette::css::WHITE;
@@ -14,6 +15,7 @@ use hcd_core::{
     NodeMapEntry, SourceAnchor, TextExtractEntry, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION,
     MAX_CHUNK_BYTES,
 };
+use pdf_handler::PdfHandler;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read};
 use std::path::Path;
@@ -84,6 +86,7 @@ struct PdfRenderedText {
     width: f32,
     height: f32,
     style: String,
+    invisible: bool,
 }
 
 struct PdfRenderedImage {
@@ -204,6 +207,7 @@ where
             width,
             height,
             style,
+            invisible,
         } = rendered;
         if text.len() > MAX_CHUNK_BYTES {
             return Err(HcdError::ResourceLimit(format!(
@@ -215,8 +219,9 @@ where
         let node_id = stable_node_id(&[self.document_id, &part, "text-block", &index.to_string()]);
         let node_hash = hash_bytes(text.as_bytes());
         let source_path = format!("/page[{}]/text[{index}]", self.page);
+        let mapping = if invisible { "source-ocr" } else { "source" };
         let block = format!(
-            "<p class=\"hcd-pdf-text\" data-hcd-text-node=\"{node_id}\" data-hcd-source-path=\"{source_path}\" data-hcd-source-order=\"{index}\" data-hcd-mapping=\"source\" data-hcd-bbox=\"{x},{y},{width},{height}\" data-hcd-x=\"{x}\" data-hcd-y=\"{y}\" data-hcd-width=\"{width}\" data-hcd-height=\"{height}\" style=\"{style}\"><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{}</span></p>",
+            "<p class=\"hcd-pdf-text\" data-hcd-text-node=\"{node_id}\" data-hcd-source-path=\"{source_path}\" data-hcd-source-order=\"{index}\" data-hcd-mapping=\"{mapping}\" data-hcd-bbox=\"{x},{y},{width},{height}\" data-hcd-x=\"{x}\" data-hcd-y=\"{y}\" data-hcd-width=\"{width}\" data-hcd-height=\"{height}\" style=\"{style}\"><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{}</span></p>",
             escape_text(&text)
         );
         if self.blocks > 0
@@ -235,7 +240,12 @@ where
                 text_ordinal: index as u64,
                 paragraph_id: Some(source_path),
                 text_id: None,
-                node_kind: "pdf-text".to_string(),
+                node_kind: if invisible {
+                    "pdf-source-ocr"
+                } else {
+                    "pdf-text"
+                }
+                .into(),
                 editable: true,
             },
         });
@@ -305,6 +315,71 @@ struct PageRaster {
     lossy: bool,
 }
 
+/// Compose a sharper rendition from the same verified PDF source. The browser
+/// keeps its low-resolution chunk raster as the initial paint and fallback.
+pub fn render_pdf_raster(
+    source: &Path,
+    source_hash: &str,
+    page: u32,
+    dpi: u16,
+) -> Result<Vec<u8>, HcdError> {
+    if page == 0 || !matches!(dpi, 192 | 288 | 384) {
+        return Err(HcdError::InvalidPatch(
+            "invalid PDF render page or density".into(),
+        ));
+    }
+    preflight_pdf(source)?;
+    let source_bytes = std::fs::read(source)?;
+    if source_bytes.len() as u64 > MAX_HCD_PDF_SOURCE_BYTES
+        || hash_bytes(&source_bytes) != source_hash
+    {
+        return Err(HcdError::SourceMismatch(
+            "the stored source PDF does not match the import".into(),
+        ));
+    }
+    let pdf = Pdf::new(Arc::new(source_bytes))
+        .map_err(|_| HcdError::InvalidBundle("source PDF could not be rendered".into()))?;
+    let page_ref = pdf
+        .pages()
+        .get(page as usize - 1)
+        .ok_or_else(|| HcdError::InvalidPatch("PDF render page is outside the document".into()))?;
+    let (width, height) = page_ref.render_dimensions();
+    let requested = f32::from(dpi) / 72.0;
+    let dimension_scale = MAX_HCD_PDF_RASTER_DIMENSION as f32 / width.max(height);
+    let pixels_scale = (MAX_HCD_PDF_RASTER_PIXELS as f32 / (width * height)).sqrt();
+    let scale = requested.min(dimension_scale).min(pixels_scale);
+    let w = (width * scale).floor().max(1.0) as u16;
+    let h = (height * scale).floor().max(1.0) as u16;
+    let png = render_hayro(page_ref, w, h, scale)?
+        .into_png()
+        .map_err(|error| HcdError::InvalidBundle(format!("PDF raster encoding failed: {error}")))?;
+    if png.len() > MAX_HCD_PDF_RASTER_PNG_BYTES {
+        return Err(HcdError::ResourceLimit(
+            "PDF raster exceeds the page byte limit".into(),
+        ));
+    }
+    Ok(png)
+}
+
+fn render_hayro(
+    page: &hayro::hayro_syntax::page::Page<'_>,
+    width: u16,
+    height: u16,
+    scale: f32,
+) -> Result<hayro::vello_cpu::Pixmap, HcdError> {
+    let settings = RenderSettings {
+        x_scale: scale,
+        y_scale: scale,
+        width: Some(width),
+        height: Some(height),
+        bg_color: WHITE,
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        render_pdf_page(page, &InterpreterSettings::default(), &settings)
+    }))
+    .map_err(|_| HcdError::InvalidBundle("PDF page rasterization failed".into()))
+}
+
 fn render_page_raster(
     pdf: &Pdf,
     poppler_source: Option<&Path>,
@@ -345,19 +420,10 @@ fn render_page_raster(
             .pages()
             .get(page_index)
             .ok_or_else(|| format!("Hayro page {} does not exist", page_index + 1))?;
-        let settings = RenderSettings {
-            x_scale: HCD_PDF_RASTER_SCALE,
-            y_scale: HCD_PDF_RASTER_SCALE,
-            width: Some(width as u16),
-            height: Some(height as u16),
-            bg_color: WHITE,
-        };
-        let pixmap = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            render_pdf_page(page, &InterpreterSettings::default(), &settings)
-        }))
-        .map_err(|_| format!("Hayro panicked while rendering page {}", page_index + 1))?;
+        let pixmap = render_hayro(page, width as u16, height as u16, HCD_PDF_RASTER_SCALE)
+            .map_err(|error| error.to_string())?;
         let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
-        for pixel in pixmap.data_as_u8_slice().chunks_exact(4) {
+        for pixel in pixmap.data_as_u8_slice().as_chunks::<4>().0 {
             let alpha = u16::from(pixel[3]);
             for channel in &pixel[..3] {
                 rgb.push((u16::from(*channel) + 255 - alpha).min(255) as u8);
@@ -453,6 +519,7 @@ fn render_poppler_page(source: &Path, page: usize) -> Result<Vec<u8>, String> {
             &page.to_string(),
             "-r",
             "96",
+            "-cropbox",
             "-png",
             "-singlefile",
         ])
@@ -523,19 +590,7 @@ fn import_pdf_inner<F>(
 where
     F: FnMut(&ImportEvent) -> Result<(), HcdError>,
 {
-    pdf_handler::reader::preflight_structural_streams(
-        source,
-        pdf_handler::reader::PdfStructuralLimits {
-            maximum_source_bytes: MAX_HCD_PDF_SOURCE_BYTES as usize,
-            maximum_dictionary_bytes: MAX_HCD_PDF_STREAM_DICTIONARY_BYTES,
-            maximum_encoded_stream_bytes: MAX_HCD_PDF_STRUCTURAL_STREAM_BYTES,
-            maximum_decoded_stream_bytes: MAX_HCD_PDF_STRUCTURAL_STREAM_BYTES,
-            maximum_total_decoded_bytes: MAX_HCD_PDF_STRUCTURAL_TOTAL_BYTES,
-            maximum_structural_streams: MAX_HCD_PDF_STRUCTURAL_STREAMS,
-            maximum_xref_entries: MAX_HCD_PDF_XREF_ENTRIES,
-        },
-    )
-    .map_err(pdf_parse_error)?;
+    preflight_pdf(source)?;
     let source_path = source
         .to_str()
         .ok_or_else(|| HcdError::InvalidBundle("PDF path is not UTF-8".to_string()))?;
@@ -549,7 +604,7 @@ where
     }
     let mut writer = BundleWriter::create_with_codec(output, options.storage_codec)?;
     writer.write_styles(
-        ".hcd-pdf-page{display:block;padding:0;margin:0 auto 18pt;background:#fff;overflow:hidden;box-shadow:0 2px 12px #0003}.hcd-pdf-page[data-hcd-continuation=\"true\"]{background:transparent;box-shadow:none}.hcd-pdf-page-raster{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;pointer-events:none}.hcd-pdf-image{position:absolute;display:block;z-index:1}.hcd-pdf-visual-node{pointer-events:none;background:transparent}.hcd-pdf-text{position:absolute;min-width:max-content;white-space:nowrap;margin:0;line-height:1;z-index:2;cursor:text}.hcd-pdf-page[data-hcd-source-raster=\"true\"] .hcd-pdf-text{color:transparent!important;text-shadow:none!important}.hcd-pdf-page[data-hcd-source-raster=\"true\"] .hcd-pdf-text:has(span[data-hcd-patched=\"true\"]){background:#fff;z-index:3;outline:1px dashed #b45f06;outline-offset:1px}.hcd-pdf-page[data-hcd-source-raster=\"true\"] .hcd-pdf-text span[data-hcd-patched=\"true\"]{color:#111!important}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-pdf-visual-node{pointer-events:auto;cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-pdf-visual-node:hover{background:rgba(255,59,48,.10);outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) .hcd-pdf-text:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8);outline-offset:0}.hcd-empty-page{position:absolute;inset:0}",
+        ".hcd-pdf-page{display:block;padding:0;margin:0 auto 18pt;background:#fff;overflow:hidden;box-shadow:0 2px 12px #0003}.hcd-pdf-page[data-hcd-continuation=\"true\"]{background:transparent;box-shadow:none}.hcd-pdf-page-raster{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;pointer-events:none}.hcd-pdf-image{position:absolute;display:block;z-index:1}.hcd-pdf-visual-node{pointer-events:none;background:transparent}.hcd-pdf-text{position:absolute;min-width:max-content;white-space:nowrap;margin:0;line-height:1;z-index:2;cursor:text}.hcd-pdf-page[data-hcd-source-raster=\"true\"] .hcd-pdf-text{color:transparent!important;text-shadow:none!important}.hcd-pdf-page[data-hcd-source-raster=\"true\"] .hcd-pdf-text:has(span[data-hcd-patched=\"true\"]){background:#fff;z-index:3;outline:1px dashed #b45f06;outline-offset:1px}.hcd-pdf-page[data-hcd-source-raster=\"true\"] .hcd-pdf-text span[data-hcd-patched=\"true\"]{color:#111!important}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-pdf-visual-node{pointer-events:auto;cursor:crosshair}body:not([data-hcd-image-hitboxes=\"off\"]) .hcd-pdf-visual-node:hover{background:rgba(255,59,48,.10);outline:2px solid rgba(255,59,48,.95);outline-offset:-1px}body:not([data-hcd-text-hitboxes=\"off\"]) .hcd-pdf-text:hover{background:rgba(10,132,255,.12);outline:1px solid rgba(10,132,255,.8);outline-offset:0}.hcd-pdf-text:is([data-hcd-mapping=\"ocr\"],[data-hcd-mapping=\"source-ocr\"]){color:transparent!important;min-width:0;text-shadow:none!important;user-select:text}.hcd-empty-page{position:absolute;inset:0}",
     )?;
     let raster_source = std::fs::read(source)?;
     let (raster_pdf, raster_initialization_error) = match Pdf::new(Arc::new(raster_source)) {
@@ -570,10 +625,10 @@ where
             pdf_handler::html_preview::page_dimensions(&reader, page);
         // The source page box is unrotated. Hayro applies /Rotate while rendering,
         // so its output dimensions must also drive the raster canvas and preview.
-        let rendered_dimensions = raster_pdf
+        let display_page = raster_pdf
             .as_ref()
-            .and_then(|pdf| pdf.pages().get(page - 1))
-            .map(|page| page.render_dimensions());
+            .and_then(|pdf| pdf.pages().get(page - 1));
+        let rendered_dimensions = display_page.map(|page| page.render_dimensions());
         let mut parsed = reader
             .parse_page_text_blocks_bounded(
                 page,
@@ -709,13 +764,22 @@ where
             chunks.push_image(image)?;
         }
         for block in &parsed.text_blocks {
-            let style = pdf_handler::html_preview::text_block_inline_style(
+            let mut style = pdf_handler::html_preview::text_block_inline_style(
                 &parsed,
                 block,
                 page_height,
                 llx,
                 lly,
             );
+            if chunks.source_raster {
+                if let Some(display_page) = display_page {
+                    style = project_text_box(
+                        &style,
+                        &block.bbox,
+                        display_page.initial_transform(true).as_coeffs(),
+                    );
+                }
+            }
             let (text, replaced) = sanitize_pdf_text(block.text.clone());
             replaced_control_characters = replaced_control_characters.saturating_add(replaced);
             chunks.push(PdfRenderedText {
@@ -726,6 +790,7 @@ where
                 width: block.bbox.width,
                 height: block.bbox.height,
                 style,
+                invisible: block.style.invisible,
             })?;
         }
         chunks.flush()?;
@@ -763,7 +828,7 @@ where
     });
     manifest.warnings.push(FidelityWarning {
         code: "PDF_SOURCE_VISUAL_LAYER_READ_ONLY".to_string(),
-        message: format!("{rasterized_pages} of {} PDF pages were composited as a read-only 96-DPI visual layer; {lossy_pages} page(s) use lossy JPEG at quality {}; extractable nodeId text remains selectable/editable but is transparent in source-view mode, and scanned text requires OCR before text patching", reader.page_count(), options.pdf_raster_quality),
+        message: format!("{rasterized_pages} of {} PDF pages were composited as a read-only 96-DPI visual layer; {lossy_pages} page(s) use lossy JPEG at quality {}; extractable nodeId text remains selectable/editable but is transparent in source-view mode, and OCR layers can be added to scanned pages", reader.page_count(), options.pdf_raster_quality),
         node_id: None,
         source_part: None,
     });
@@ -867,6 +932,48 @@ fn pdf_parse_error(error: handler_common::HandlerError) -> HcdError {
     } else {
         HcdError::InvalidBundle(message)
     }
+}
+
+fn project_text_box(
+    style: &str,
+    bbox: &pdf_handler::content_stream::BBox,
+    transform: [f64; 6],
+) -> String {
+    let [a, b, c, d, e, f] = transform;
+    let x = f64::from(bbox.x);
+    let y = f64::from(bbox.y);
+    let w = f64::from(bbox.width);
+    let h = f64::from(bbox.height);
+    let corners = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)];
+    let (mut left, mut top, mut right, mut bottom) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for (x, y) in corners {
+        let px = a * x + c * y + e;
+        let py = b * x + d * y + f;
+        left = left.min(px);
+        top = top.min(py);
+        right = right.max(px);
+        bottom = bottom.max(py);
+    }
+    if ![left, top, right, bottom].into_iter().all(f64::is_finite) {
+        return style.into();
+    }
+    let width = (right - left).max(0.0);
+    let height = (bottom - top).max(0.0);
+    let rest = style
+        .split(';')
+        .filter(|declaration| {
+            !["left:", "top:", "width:", "height:", "line-height:"]
+                .iter()
+                .any(|name| declaration.starts_with(name))
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    format!("{rest};left:{left:.2}pt;top:{top:.2}pt;width:{width:.2}pt;height:{height:.2}pt;line-height:{height:.2}pt")
 }
 
 struct PdfOverlayPosition {
@@ -1064,6 +1171,16 @@ pub(crate) fn export_pdf(
     target: &Path,
     options: &ExportOptions,
 ) -> Result<FidelityReport, HcdError> {
+    export_pdf_revision(bundle, source, target, options, None)
+}
+
+pub(crate) fn export_pdf_revision(
+    bundle: &Bundle,
+    source: &Path,
+    target: &Path,
+    options: &ExportOptions,
+    page_range: Option<std::ops::RangeInclusive<usize>>,
+) -> Result<FidelityReport, HcdError> {
     if target.exists() {
         return Err(HcdError::InvalidBundle(format!(
             "target already exists: {}",
@@ -1071,8 +1188,29 @@ pub(crate) fn export_pdf(
         )));
     }
     let (manifest, dirty_parts, dirty_node_ids, _) =
-        checked_export_state_with_restores(bundle, source, options)?;
+        checked_export_state_with_restores(bundle, source, options, RunFontSupport::Rejects)?;
+    let layout = hcd_core::pdf_page_layout(bundle, &manifest)?;
+    let organized = !layout.is_empty();
+    let selected_layout = pdf_layout_range(&layout, page_range.as_ref())?;
     let mut nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
+    nodes.retain(|node| node.source.node_kind != hcd_core::pdf_ocr::OCR_NODE_KIND);
+    let mut recognized = hcd_core::pdf_ocr::pdf_ocr_layers(bundle, &manifest)?;
+    if organized {
+        let selected = selected_layout
+            .iter()
+            .filter_map(|page| page.source_page.map(u64::from))
+            .collect::<std::collections::HashSet<_>>();
+        nodes.retain(|node| selected.contains(&page_number(&node.source.part)));
+        recognized.retain(|page| selected.contains(&u64::from(page.page)));
+    } else if let Some(range) = &page_range {
+        nodes.retain(|node| {
+            usize::try_from(page_number(&node.source.part)).is_ok_and(|page| range.contains(&page))
+        });
+        recognized.retain(|page| range.contains(&(page.page as usize)));
+    }
+    if organized || page_range.is_some() || !recognized.is_empty() {
+        preflight_pdf(source)?;
+    }
     nodes.sort_by(|left, right| {
         let left_page = page_number(&left.source.part);
         let right_page = page_number(&right.source.part);
@@ -1081,7 +1219,10 @@ pub(crate) fn export_pdf(
     let overlay_positions = pdf_overlay_positions(bundle, &manifest, &nodes)?;
     let has_active_edits = !nodes.is_empty();
 
-    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let parent = target
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)?;
     let temp = tempfile::Builder::new()
         .prefix(".officecli-hcd-pdf-")
@@ -1089,7 +1230,7 @@ pub(crate) fn export_pdf(
         .tempfile_in(parent)?;
     std::fs::copy(source, temp.path())?;
     let mut masked_overlays = false;
-    if !nodes.is_empty() {
+    if has_active_edits || organized || page_range.is_some() || !recognized.is_empty() {
         let temp_path = temp.path().to_str().ok_or_else(|| {
             HcdError::InvalidBundle("temporary PDF path is not UTF-8".to_string())
         })?;
@@ -1179,15 +1320,42 @@ pub(crate) fn export_pdf(
                 )
                 .map_err(|error| HcdError::Unsupported(error.to_string()))?;
         }
+        if !recognized.is_empty() {
+            let pdf = Pdf::new(Arc::new(std::fs::read(source)?)).map_err(|_| {
+                HcdError::InvalidBundle("source PDF could not place recognized text".into())
+            })?;
+            let pages = placed_ocr_pages(&pdf, &recognized)?;
+            handler.add_ocr_text(&pages).map_err(pdf_parse_error)?;
+        }
+        apply_pdf_page_selection(&handler, selected_layout, page_range.as_ref())?;
         handler
             .save()
             .map_err(|error| HcdError::InvalidBundle(error.to_string()))?;
     }
-    pdf_handler::reader::PdfReader::open(&temp.path().to_string_lossy())
+    let exported = pdf_handler::reader::PdfReader::open(&temp.path().to_string_lossy())
         .map_err(|error| HcdError::InvalidBundle(format!("exported PDF is invalid: {error}")))?;
-    temp.persist(target)
+    let expected_count = if organized {
+        Some(selected_layout.len())
+    } else {
+        page_range
+            .as_ref()
+            .map(|range| range.end() - range.start() + 1)
+    };
+    if expected_count.is_some_and(|count| exported.page_count() != count) {
+        return Err(HcdError::InvalidBundle(
+            "exported PDF page count does not match the current page selection".into(),
+        ));
+    }
+    temp.persist_noclobber(target)
         .map_err(|error| HcdError::Io(error.error))?;
 
+    let has_deleted_pages = organized
+        && page_range.is_none()
+        && layout
+            .iter()
+            .filter(|page| page.source_page.is_some())
+            .count()
+            != hcd_core::pdf_page_count(bundle, &manifest)?;
     let mut warnings = manifest.warnings;
     if masked_overlays {
         warnings.push(FidelityWarning {
@@ -1198,9 +1366,11 @@ pub(crate) fn export_pdf(
         });
     }
 
-    let report = FidelityReport {
+    let mut report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
-        level: if !has_active_edits {
+        level: if (organized || !recognized.is_empty()) && !has_active_edits {
+            FidelityLevel::High
+        } else if !has_active_edits {
             FidelityLevel::Exact
         } else {
             FidelityLevel::Semantic
@@ -1216,8 +1386,157 @@ pub(crate) fn export_pdf(
         dropped: vec!["HCD recognition annotations are not exported".to_string()],
         warnings,
     };
+    if !recognized.is_empty() {
+        report.preserved.push(format!(
+            "native searchable Unicode OCR on {} page(s), with the original visible artwork",
+            recognized.len()
+        ));
+    }
+    if organized {
+        report.preserved[0] =
+            "original PDF page objects, page resources, and applied page order and rotation".into();
+    }
+    if has_deleted_pages || page_range.is_some() {
+        report.dropped.push("document-level outlines, named destinations, attachments, tags and signatures, plus links to omitted pages and unsupported annotations".to_string());
+    }
+    if let Some(range) = page_range {
+        report.level = if has_active_edits {
+            FidelityLevel::Semantic
+        } else {
+            FidelityLevel::High
+        };
+        report.preserved[0] = format!("selectable text, graphics, page geometry, and supported annotations from pages {}–{} in the exported order", range.start(), range.end());
+    }
     write_fidelity_report(options, &report)?;
     Ok(report)
+}
+
+fn placed_ocr_pages(
+    pdf: &Pdf,
+    recognized: &[hcd_core::pdf_ocr::PdfOcrPage],
+) -> Result<Vec<pdf_handler::ocr_text::OcrTextPage>, HcdError> {
+    recognized
+        .iter()
+        .map(|layer| {
+            let page = pdf
+                .pages()
+                .get(layer.page as usize - 1)
+                .ok_or_else(|| HcdError::InvalidBundle("recognized PDF page is missing".into()))?;
+            let (width, height) = page.render_dimensions();
+            let transform = page.initial_transform(false).inverse().as_coeffs();
+            let lines = layer
+                .lines
+                .iter()
+                .map(|line| {
+                    let bounds = line.bounds;
+                    pdf_handler::ocr_text::OcrTextLine::from_display_box(
+                        line.text.clone(),
+                        [
+                            bounds.left * width,
+                            bounds.top * height,
+                            (bounds.right - bounds.left) * width,
+                            (bounds.bottom - bounds.top) * height,
+                        ],
+                        height,
+                    )
+                })
+                .collect();
+            Ok(pdf_handler::ocr_text::OcrTextPage {
+                page: layer.page,
+                transform,
+                lines,
+            })
+        })
+        .collect()
+}
+
+pub fn validate_pdf_source_export(
+    bundle: &Bundle,
+    source: &Path,
+    revision: u64,
+    page_range: Option<std::ops::RangeInclusive<usize>>,
+) -> Result<(), HcdError> {
+    let options = ExportOptions {
+        revision: Some(revision),
+        fidelity_report: None,
+    };
+    let (manifest, ..) =
+        checked_export_state_with_restores(bundle, source, &options, RunFontSupport::Rejects)?;
+    let layout = hcd_core::pdf_page_layout(bundle, &manifest)?;
+    if layout.is_empty() && page_range.is_none() {
+        return Ok(());
+    }
+    let selected = pdf_layout_range(&layout, page_range.as_ref())?;
+    preflight_pdf(source)?;
+    let path = source
+        .to_str()
+        .ok_or_else(|| HcdError::Unsupported("PDF source path must be UTF-8".into()))?;
+    // Opening and changing this handler only alters its in-memory object graph.
+    let handler =
+        PdfHandler::open(path, true).map_err(|error| HcdError::Unsupported(error.to_string()))?;
+    apply_pdf_page_selection(&handler, selected, page_range.as_ref())
+}
+
+fn pdf_layout_range<'a>(
+    layout: &'a [hcd_core::PdfPagePlacement],
+    range: Option<&std::ops::RangeInclusive<usize>>,
+) -> Result<&'a [hcd_core::PdfPagePlacement], HcdError> {
+    let Some(range) = range.filter(|_| !layout.is_empty()) else {
+        return Ok(layout);
+    };
+    range
+        .start()
+        .checked_sub(1)
+        .and_then(|start| layout.get(start..*range.end()))
+        .filter(|pages| !pages.is_empty())
+        .ok_or_else(|| {
+            HcdError::InvalidPatch("PDF page range is outside the organized document".into())
+        })
+}
+
+fn apply_pdf_page_selection(
+    handler: &PdfHandler,
+    layout: &[hcd_core::PdfPagePlacement],
+    range: Option<&std::ops::RangeInclusive<usize>>,
+) -> Result<(), HcdError> {
+    let result = if !layout.is_empty() {
+        let plan: Vec<_> = layout
+            .iter()
+            .map(|page| match page.source_page {
+                Some(source) => pdf_handler::PdfPageSelection::Source {
+                    page: source,
+                    rotation: page.rotation,
+                },
+                None => pdf_handler::PdfPageSelection::Blank {
+                    width: hcd_core::PDF_BLANK_WIDTH_PT,
+                    height: hcd_core::PDF_BLANK_HEIGHT_PT,
+                    rotation: page.rotation,
+                },
+            })
+            .collect();
+        handler.organize_pages(&plan, range.is_some())
+    } else if let Some(range) = range {
+        handler.retain_page_range(range.clone())
+    } else {
+        return Ok(());
+    };
+    result.map_err(|error| HcdError::Unsupported(error.to_string()))
+}
+
+fn preflight_pdf(source: &Path) -> Result<(), HcdError> {
+    pdf_handler::reader::preflight_structural_streams(
+        source,
+        pdf_handler::reader::PdfStructuralLimits {
+            maximum_source_bytes: MAX_HCD_PDF_SOURCE_BYTES as usize,
+            maximum_dictionary_bytes: MAX_HCD_PDF_STREAM_DICTIONARY_BYTES,
+            maximum_encoded_stream_bytes: MAX_HCD_PDF_STRUCTURAL_STREAM_BYTES,
+            maximum_decoded_stream_bytes: MAX_HCD_PDF_STRUCTURAL_STREAM_BYTES,
+            maximum_total_decoded_bytes: MAX_HCD_PDF_STRUCTURAL_TOTAL_BYTES,
+            maximum_structural_streams: MAX_HCD_PDF_STRUCTURAL_STREAMS,
+            maximum_xref_entries: MAX_HCD_PDF_XREF_ENTRIES,
+        },
+    )
+    .map_err(pdf_parse_error)
 }
 
 fn page_number(part: &str) -> u64 {

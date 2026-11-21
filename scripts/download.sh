@@ -12,7 +12,7 @@
 #   win-x64, win-arm64
 set -euo pipefail
 
-REPO="RainLib/OfficeCli-rust"
+REPO="RainLib/Foldly"
 VERSION="${1:-latest}"
 PLATFORM="${2:-auto}"
 OUT_DIR="${OUT_DIR:-dist}"

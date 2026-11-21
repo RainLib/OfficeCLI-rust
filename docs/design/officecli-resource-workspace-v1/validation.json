@@ -1,0 +1,171 @@
+{
+  "nativeExists": true,
+  "nativeBytes": 178565,
+  "screens": 8,
+  "supportingFrames": 2,
+  "globalAIComponent": 56,
+  "prototypeLinks": 113,
+  "allTargetsExist": true,
+  "previewsExist": true,
+  "fontReport": {
+    "embeddedFontFiles": 0,
+    "externalPenpotFontRefs": [],
+    "fontLicenseNotices": 0,
+    "fonts": [
+      {
+        "available": true,
+        "family": "Georgia",
+        "layers": [
+          "OfficeCLI",
+          "fx"
+        ]
+      },
+      {
+        "available": true,
+        "family": "Inter",
+        "layers": [
+          "#302F2A",
+          "#607153",
+          "#C57556",
+          "#F4F2EB",
+          "#FFFFFF",
+          "A",
+          "Accent",
+          "B",
+          "B     I     U     ≡     •     ↗",
+          "B2:F7",
+          "Canvas",
+          "DESIGN PROTOTYPE  /  1600 × 1000  / ",
+          "Ink",
+          "L",
+          "OFFICECLI / RESOURCE WORKSPACE",
+          "PRODUCT LAUNCH / 2026",
+          "SageInk",
+          "Surface",
+          "W",
+          "Y",
+          "−    100%    +",
+          "正文  ˅    Noto Sans   ˅     14   ˅",
+          "选中区域：预算!B2:F7",
+          "预算 ! B2:F7",
+          "￥    %     .00     ∑    筛选"
+        ]
+      },
+      {
+        "available": true,
+        "family": "PingFang SC",
+        "layers": [
+          "01  暖白底色，克制的层次",
+          "02  同一套圆角与内容视图",
+          "03  AI 是工作空间能力",
+          "10 / 操作控件",
+          "16 / 卡片与 AI",
+          "26 / 主工作区",
+          "AI/currentPage",
+          "任务  2",
+          "保留对话、上下文与任务",
+          "全局 AI",
+          "原文与原表",
+          "定位准确，继续编辑",
+          "对话",
+          "对话与任务跨资源持续。当前页面可以跟随，固定资料由用户管理。",
+          "工具栏与按钮共享",
+          "此对话的上下文",
+          "白板",
+          "白板与文档共享",
+          "看见关系、讨论与引用",
+          "管理",
+          "让资料相连，让 AI 随行。",
+          "资料",
+          "资料与助手共享",
+          "资源引用与视图 · Claude 风格方向 · 全局 AI",
+          "进入编辑"
+        ]
+      }
+    ],
+    "missing": 0,
+    "total": 3
+  },
+  "missingFonts": 0,
+  "sharedAIInstances": 8,
+  "colorVariables": 18,
+  "selectedToolbarClearancePx": 13,
+  "visualReviewScreens": 10,
+  "nativePrototypeVerifiedPath": [
+    "board",
+    "doc_preview",
+    "doc_edit",
+    "board",
+    "insert",
+    "range",
+    "range_board",
+    "sheet_edit",
+    "ai",
+    "board"
+  ],
+  "implementationScope": "Design and clickable prototype; resource backend and global AI state implementation not changed.",
+  "exportedPNGs": [
+    {
+      "name": "00-foundations.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 211979
+    },
+    {
+      "name": "01-board.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 288835
+    },
+    {
+      "name": "02-insert.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 261914
+    },
+    {
+      "name": "03-doc-preview.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 252301
+    },
+    {
+      "name": "04-doc-edit.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 240874
+    },
+    {
+      "name": "05-range.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 221037
+    },
+    {
+      "name": "06-range-board.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 300084
+    },
+    {
+      "name": "07-sheet-edit.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 215216
+    },
+    {
+      "name": "08-ai.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 288272
+    },
+    {
+      "name": "09-states.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 168606
+    }
+  ],
+  "nativeSHA256": "bf72a16f8fbbd0724596c65da99a7ea75606f80e77fed870ee1f0fd75a54a2dd",
+  "verifiedNativeReopen": true
+}

@@ -1,0 +1,10 @@
+{
+  "screenCount": 15,
+  "localCandidateDemo": {
+    "width": 1080,
+    "height": 720,
+    "changedPixelsInsideMask": 19346,
+    "changedPixelsOutsideMask": 0
+  },
+  "scope": "Design artifacts only. No runtime format conversion or AI inpainting implementation claimed."
+}

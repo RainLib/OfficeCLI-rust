@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:59",
+  "title": "HTML Canonical Document worksheet pivot table",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "patchId",
+    "baseRevision",
+    "operations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "hcd-patch/59"
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "patchId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "baseRevision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "actor": {
+      "type": "object",
+      "maxProperties": 64,
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "maxProperties": 128,
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "op",
+          "sheetId",
+          "pivotId",
+          "config"
+        ],
+        "properties": {
+          "op": {
+            "const": "xlsx.pivot.set"
+          },
+          "sheetId": {
+            "type": "string",
+            "pattern": "^s_[0-9a-f]{32}$"
+          },
+          "pivotId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "config": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/$defs/pivotConfig"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "pivotConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "sourceSheetId",
+        "sourceRange",
+        "anchorRow",
+        "anchorColumn",
+        "rows",
+        "columns",
+        "values"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "sourceSheetId": {
+          "type": "string",
+          "pattern": "^s_[0-9a-f]{32}$"
+        },
+        "sourceRange": {
+          "$ref": "#/$defs/chartRange"
+        },
+        "anchorRow": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "anchorColumn": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "rows": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 63
+          }
+        },
+        "columns": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 63
+          }
+        },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "field",
+              "aggregate"
+            ],
+            "properties": {
+              "field": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 63
+              },
+              "aggregate": {
+                "enum": [
+                  "sum",
+                  "count",
+                  "average",
+                  "min",
+                  "max"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "chartRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "startRow",
+        "endRow",
+        "startColumn",
+        "endColumn"
+      ],
+      "properties": {
+        "startRow": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "endRow": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "startColumn": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "endColumn": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        }
+      }
+    }
+  }
+}

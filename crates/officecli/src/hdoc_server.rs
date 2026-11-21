@@ -1,24 +1,61 @@
 //! Authenticated local HCD core API. Bundles stay private under the configured root.
 //! The HTTP surface only returns decoded, verified objects requested by the client.
-use crate::commands::hdoc::{HdocIssueTokenCommand, HdocServeCommand, HdocTokenScope};
+use crate::commands::hdoc::{
+    source_document_id, HdocIssueTokenCommand, HdocServeCommand, HdocTokenScope, PdfPageRange,
+};
 use crate::hdoc_remote::RemoteStore;
+mod admin;
+mod agent_continuation;
+mod agent_execution;
+mod agent_identity;
+mod agent_operations;
+mod agent_run_store;
+mod agent_runs;
+mod agent_team;
+mod agent_tools;
+mod agent_workflow_store;
+mod agent_workflows;
+mod canvas;
+mod canvas_materials;
+mod canvas_reactions;
+mod canvas_spec;
+mod exports;
+mod grid_drafts;
+mod identity;
+mod image_job_store;
+mod image_jobs;
+mod image_workspace;
+mod integration;
+mod mcp_http;
+mod office_features;
+mod pdf_view;
+mod selection_transfers;
+mod spreadsheet;
+mod word_review;
 use anyhow::{anyhow, Context, Result};
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use base64::Engine;
+use exports::{
+    download_ticket, export_document, prepare_download, preview_download_ticket, DownloadTicket,
+};
 use futures::StreamExt;
 use hcd_core::{
-    apply_patch, apply_structure_patch, editor_projection, hash_file, manifest_at_revision,
-    project_editor, restore_revision, search_bundle, BlockPrecondition, Bundle, EditorBlockContent,
-    EditorInline, HcdError, PatchBatch, StructureOperation, StructurePatchBatch,
-    HCD_PATCH_SCHEMA_VERSION_4, MAX_PATCH_JSON_BYTES,
+    apply_patch, apply_structure_patch, audit_action, detect_font_format, editor_projection,
+    hash_file, list_documents, manifest_at_revision, pin_document_theme, project_editor,
+    resolve_document_theme, restore_revision, search_bundle, sort_grid, theme_documents,
+    theme_font_plan, theme_font_report, unpin_document_theme, AuditRecord, BlockPrecondition,
+    Bundle, DiskCatalog, DocumentSummary, EditorBlockContent, EditorInline, FontDeleteReport,
+    FontFace, FontFileFormat, FontLicense, FontRevision, FontScript, FontStretch, FontStyle,
+    GridSortRequest, HcdError, PatchBatch, StructureOperation, StructurePatchBatch,
+    ThemeDocumentRef, ThemeEmbedKind, ThemeFontSlots, ThemeRevision, FONT_CATALOG_SCHEMA,
+    HCD_PATCH_SCHEMA_VERSION_4, LICENSE_WARN_WINDOW_DAYS, MAX_AUDIT_LIMIT, MAX_FONT_BYTES,
+    MAX_PATCH_JSON_BYTES, THEME_SCHEMA,
 };
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -32,21 +69,61 @@ use tokio::sync::Mutex;
 #[derive(Clone)]
 struct ServerState {
     root: PathBuf,
+    catalog: DiskCatalog,
     secret: Arc<Vec<u8>>,
     remote: Option<RemoteStore>,
+    /// Theme pinned onto newly imported documents; `None` keeps today's unpinned behavior.
+    default_theme: Option<String>,
     collaboration_lock: Arc<Mutex<()>>,
     downloads: Arc<Mutex<HashMap<String, DownloadTicket>>>,
+    export_jobs: Arc<tokio::sync::Semaphore>,
+    agents: Arc<Mutex<HashMap<(String, String), AgentActivity>>>,
+    agent_operations: agent_operations::OperationStore,
+    agent_runs: agent_runs::RunStore,
+    agent_workflows: agent_workflow_store::Store,
+    worker_generation: Arc<String>,
+    worker_fences: Arc<std::sync::RwLock<HashSet<String>>>,
+    image_jobs: image_jobs::JobStore,
+    image_edits: image_workspace::Store,
+    image_slots: Arc<tokio::sync::Semaphore>,
+    mcp_sessions: mcp_http::SessionStore,
+    canvas_rooms: canvas::Rooms,
+    transfer_slots: Arc<tokio::sync::Semaphore>,
+    transfer_cancellations: Arc<Mutex<HashMap<uuid::Uuid, tokio::sync::oneshot::Sender<()>>>>,
+    integration: Option<Arc<integration::Integration>>,
+    backup: Option<integration::backup::Gate>,
 }
 
-#[derive(Clone)]
-struct DownloadTicket {
-    document_id: String,
-    format: String,
-    query: ExportQuery,
-    expires_at: Instant,
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentActivity {
+    agent_id: String,
+    name: String,
+    status: String,
+    node_id: Option<String>,
+    block_id: Option<String>,
+    chunk_sequence: Option<usize>,
+    message: String,
+    revision: u64,
+    collaboration_epoch: u64,
+    updated_at_epoch_ms: u64,
+    operation_at_epoch_ms: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentFocus {
+    status: String,
+    node_id: Option<String>,
+    block_id: Option<String>,
+    chunk_sequence: Option<usize>,
+    message: Option<String>,
+    expected_revision: u64,
+    #[serde(default)]
+    targets: Vec<agent_operations::OperationTarget>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Claims {
     doc: String,
     scope: String,
@@ -57,6 +134,10 @@ struct Claims {
     aud: String,
     iat: usize,
     exp: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker_generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    integration_session: Option<String>,
 }
 
 fn load_secret(name: &str) -> Result<Vec<u8>> {
@@ -70,10 +151,14 @@ fn load_secret(name: &str) -> Result<Vec<u8>> {
 
 pub fn issue_token(command: &HdocIssueTokenCommand) -> Result<String> {
     if !(valid_id(&command.document_id)
-        || command.document_id == "*" && matches!(command.scope, HdocTokenScope::Upload))
+        || command.document_id == "*"
+            && matches!(
+                command.scope,
+                HdocTokenScope::Upload | HdocTokenScope::Admin
+            ))
     {
         return Err(anyhow!(
-            "document ID must be 1-128 ASCII letters, digits, _ or -"
+            "document ID must be 1-128 ASCII letters, digits, _ or -, or '*' for an upload or admin token"
         ));
     }
     let secret = load_secret(&command.secret_env)?;
@@ -84,6 +169,7 @@ pub fn issue_token(command: &HdocIssueTokenCommand) -> Result<String> {
             HdocTokenScope::Read => "read",
             HdocTokenScope::Write => "write",
             HdocTokenScope::Upload => "upload",
+            HdocTokenScope::Admin => "admin",
         }
         .to_string(),
         sub: command.user_id.clone(),
@@ -91,6 +177,8 @@ pub fn issue_token(command: &HdocIssueTokenCommand) -> Result<String> {
         aud: "hcd-core".to_string(),
         iat: now,
         exp: now + command.ttl_seconds as usize,
+        worker_generation: None,
+        integration_session: None,
     };
     Ok(encode(
         &Header::new(Algorithm::HS256),
@@ -100,9 +188,18 @@ pub fn issue_token(command: &HdocIssueTokenCommand) -> Result<String> {
 }
 
 pub async fn serve(command: HdocServeCommand) -> Result<()> {
+    admin::started_at();
     let secret = Arc::new(load_secret(&command.secret_env)?);
     std::fs::create_dir_all(&command.root)?;
     let root = command.root.canonicalize()?;
+    // Acquire before remote hydration or other startup writes, so a second
+    // API cannot alter this root while the original workers are still alive.
+    let task_process_lock = agent_runs::RunStore::acquire_root(&root)?;
+    if command.integration_config.is_none() && root.join("integration/identity.json").exists() {
+        return Err(anyhow!(
+            "this root contains managed host documents; --integration-config is required"
+        ));
+    }
     let database_url = std::env::var(&command.database_url_env).ok();
     let bucket = std::env::var(&command.s3_bucket_env).ok();
     let remote = match (database_url, bucket) {
@@ -120,32 +217,269 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
             ))
         }
     };
+    let catalog = DiskCatalog::open(match &command.catalog {
+        Some(path) => path.clone(),
+        None => root.join("catalog"),
+    })?;
+    let default_theme = configured_default_theme(command.default_theme.clone())?;
+    identity::service_id(&root)?;
+    let agent_runs = agent_runs::RunStore::recover(&root, task_process_lock)?;
+    let agent_workflows = agent_workflow_store::Store::recover(&root)?;
+    let image_jobs = image_jobs::JobStore::recover(&root, "generation")?;
+    let image_edits = image_workspace::Store::recover(&root, "inpaint")?;
+    let integration = command
+        .integration_config
+        .as_ref()
+        .map(|path| integration::Integration::open(path, &root).map(Arc::new))
+        .transpose()?;
+    let backup = (integration.is_some()
+        && remote.is_none()
+        && std::env::var("HCD_LOCAL_WORKSPACE_BACKUP").as_deref() == Ok("true"))
+    .then(integration::backup::Gate::default);
     let state = ServerState {
         root,
+        catalog,
         secret,
         remote,
+        default_theme,
         collaboration_lock: Arc::new(Mutex::new(())),
         downloads: Arc::new(Mutex::new(HashMap::new())),
+        export_jobs: Arc::new(tokio::sync::Semaphore::new(2)),
+        agents: Arc::new(Mutex::new(HashMap::new())),
+        agent_operations: Arc::new(Mutex::new(HashMap::new())),
+        agent_runs,
+        agent_workflows,
+        worker_generation: Arc::new(uuid::Uuid::new_v4().to_string()),
+        worker_fences: Default::default(),
+        image_jobs,
+        image_edits,
+        image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        mcp_sessions: Default::default(),
+        canvas_rooms: Default::default(),
+        transfer_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+        transfer_cancellations: Default::default(),
+        integration,
+        backup,
     };
+    integration::start_events(&state);
     let router = Router::new()
-        .route("/health", get(|| async { Json(json!({"ok": true})) }))
+        .route("/v1/documents/{id}/canvas", get(canvas::read))
+        .route("/v1/documents/{id}/canvas/layout", post(canvas::plan))
+        .route("/v1/documents/{id}/canvas/materials", get(canvas_materials::browse))
+        .route("/v1/documents/{id}/canvas/materials/plan", post(canvas_materials::plan))
+        .route("/v1/documents/{id}/canvas/reactions", get(canvas_reactions::read).put(canvas_reactions::set))
+        .route("/v1/documents/{id}/canvas/patch", post(canvas::patch).layer(DefaultBodyLimit::max(34 * 1024 * 1024)))
+        .route("/v1/documents/{id}/canvas/spec-undo", post(canvas_spec::undo))
+        .route("/v1/documents/{id}/canvas/events", get(canvas::events))
+        .route("/v1/documents/{id}/canvas/presence", post(canvas::presence))
+        .route("/v1/documents/{id}/agent-workflows", get(agent_workflows::list).post(agent_workflows::create))
+        .route("/v1/documents/{id}/agent-workflows/{workflow_id}", get(agent_workflows::read).delete(agent_workflows::cancel))
+        .route("/v1/documents/{id}/agent-workflows/{workflow_id}/review", get(agent_workflows::review))
+        .route("/v1/documents/{id}/agent-workflows/{workflow_id}/actions", post(agent_workflows::execute))
+        .route("/integration/v1/sessions", post(integration::open_session))
+        .route("/integration/v1/sessions/{session_id}/refresh", post(integration::refresh_session))
+        .route("/integration/v1/sessions/{session_id}", delete(integration::close_session))
+        .route("/integration/v1/boards/{id}/mentions", get(integration::mentions::read))
+        .route("/integration/v1/publications", get(integration::recovery::list))
+        .route("/integration/v1/publications/{id}", get(integration::recovery::read))
+        .route("/integration/v1/publications/{id}/reconcile", post(integration::recovery::reconcile))
+        .route("/integration/v1/publications/{id}/artifact", get(integration::recovery::artifact))
+        .route("/integration/v1/publications/{id}/event-retry", post(integration::recovery::retry_event))
+        .route("/integration/v1/backup-leases/{id}", axum::routing::put(integration::backup::acquire).delete(integration::backup::release))
+        .route("/v1/documents/{id}/integration", get(integration::document_status))
+        .route("/v1/documents/{id}/publications", post(integration::publish))
+        .route("/v1/documents/{id}/publications/{publication_id}", get(integration::publication_status))
+        .route("/health", get(|| async { Json(json!({"ok": true,"build":crate::capabilities::runtime()["build"],"protocolFingerprint":crate::capabilities::fingerprint()})) }))
+        .route("/v1/capabilities", get(|| async { Json(crate::capabilities::runtime().clone()) }))
+        .route("/admin", get(catalog_admin))
+        .route("/v1/admin/session", get(admin::session))
+        .route("/v1/admin/workspace", get(admin::workspace))
+        .route("/v1/admin/service", get(admin::service))
+        .route("/v1/admin/jobs", get(admin::jobs))
+        .route("/v1/admin/agent-runs", get(admin::agent_runs))
+        .route("/v1/documents", get(catalog_documents))
         .route("/v1/documents/{id}", get(manifest))
+        .route("/v1/documents/{id}/capabilities", get(document_capabilities))
         .route("/v1/import", post(import_document))
+        .route(
+            "/v1/images",
+            post(image_workspace::upload).layer(DefaultBodyLimit::max(34 * 1024 * 1024)),
+        )
+        .route("/v1/documents/{id}/image", get(image_workspace::info))
+        .route("/v1/documents/{id}/image/layer-thumbnail/{hash}", get(image_workspace::layer_thumbnail))
+        .route(
+            "/v1/documents/{id}/image/content",
+            get(image_workspace::content),
+        )
+        .route(
+            "/v1/documents/{id}/image/commit",
+            post(image_workspace::commit).layer(DefaultBodyLimit::max(46 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/documents/{id}/image/copies",
+            post(image_workspace::copy).layer(DefaultBodyLimit::max(46 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/documents/{id}/image/jobs",
+            get(image_workspace::jobs)
+                .post(image_workspace::start)
+                .layer(DefaultBodyLimit::max(46 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/documents/{id}/image/jobs/{job_id}",
+            delete(image_workspace::cancel),
+        )
+        .route(
+            "/v1/documents/{id}/image/jobs/{job_id}/content",
+            get(image_workspace::candidate),
+        )
+        .route(
+            "/v1/documents/{id}/image/jobs/{job_id}/mask",
+            get(image_workspace::mask_content),
+        )
+        .route(
+            "/v1/documents/{id}/image/jobs/{job_id}/apply",
+            post(image_workspace::apply),
+        )
         .route("/v1/jobs/{job_id}", get(job_status))
         .route("/v1/documents/{id}/editor", get(editor))
+        .route("/v1/documents/{id}/office-features", get(office_features::read).post(office_features::edit))
+        .route("/v1/documents/{id}/word-review", get(word_review::read).post(word_review::edit))
         .route("/v1/documents/{id}/project", post(project))
+        .route("/v1/documents/{id}/selection-transfers", post(selection_transfers::start))
+        .route("/v1/documents/{id}/selection-transfers/{run_id}", get(selection_transfers::read).delete(selection_transfers::cancel))
+        .route("/v1/documents/{id}/selection-transfers/{run_id}/apply", post(selection_transfers::apply))
+        .route("/v1/documents/{id}/selection-transfers/{run_id}/source", get(selection_transfers::source))
         .route("/v1/documents/{id}/patch", post(patch))
         .route("/v1/documents/{id}/node-patch", post(node_patch))
+        .route("/v1/documents/{id}/node-patch-review", post(grid_drafts::review))
+        .route("/v1/documents/{id}/grid-sort", post(grid_sort))
+        .route("/v1/documents/{id}/grid-filter", get(grid_filter))
+        .route("/v1/documents/{id}/pdf-layout", get(pdf_layout))
+        .route("/v1/documents/{id}/pdf-ocr", get(pdf_view::ocr_pages))
+        .route("/v1/documents/{id}/pdf-render/{page}", get(pdf_view::render))
         .route("/v1/documents/{id}/checkpoints", post(checkpoint))
         .route("/v1/documents/{id}/revisions", get(revisions))
         .route("/v1/documents/{id}/revisions/{revision}", get(revision))
+        .route(
+            "/v1/documents/{id}/patch-receipts/{patch_id}",
+            get(patch_receipt),
+        )
         .route("/v1/documents/{id}/restore/{revision}", post(restore))
         .route("/v1/documents/{id}/index/{page}", get(index_page))
         .route("/v1/documents/{id}/chunks/{sequence}", get(chunk))
         .route("/v1/documents/{id}/search", get(search))
+        .route("/v1/documents/{id}/nodes/{node_id}", get(text_node))
+        .route("/v1/documents/{id}/sheets/{index}", get(spreadsheet::read))
+        .route("/v1/documents/{id}/sheet-charts/{sheet}", get(spreadsheet::charts))
+        .route("/v1/documents/{id}/sheet-pivot-preview/{sheet}", get(spreadsheet::pivot_preview))
+        .route(
+            "/v1/documents/{id}/agents",
+            get(agent_list).post(agent_focus),
+        )
+        .route(
+            "/v1/documents/{id}/agent-runs",
+            get(agent_runs::list).post(agent_runs::start),
+        )
+        .route(
+            "/v1/documents/{id}/agent-runs/{run_id}",
+            get(agent_runs::read).delete(agent_runs::cancel),
+        )
+        .route(
+            "/v1/documents/{id}/agent-runs/{run_id}/continuation",
+            get(agent_continuation::review).post(agent_continuation::resume),
+        )
+        .route(
+            "/v1/documents/{id}/mcp",
+            get(mcp_http::get)
+                .post(mcp_http::post)
+                .delete(mcp_http::delete),
+        )
+        .route(
+            "/v1/documents/{id}/collaboration/pending",
+            post(collaboration_pending),
+        )
+        .route(
+            "/v1/documents/{id}/image-jobs",
+            get(image_jobs::list).post(image_jobs::start),
+        )
+        .route(
+            "/v1/documents/{id}/image-jobs/{job_id}",
+            delete(image_jobs::cancel),
+        )
+        .route(
+            "/v1/documents/{id}/image-jobs/{job_id}/content",
+            get(image_jobs::content),
+        )
+        .route(
+            "/v1/documents/{id}/image-jobs/{job_id}/insert",
+            post(image_jobs::insert),
+        )
+        .route(
+            "/v1/documents/{id}/assets",
+            post(stage_raster_asset).layer(DefaultBodyLimit::max(hcd_formats::images::MAX_IMAGE_BYTES)),
+        )
         .route("/v1/documents/{id}/assets/{hash}", get(asset))
         .route("/v1/documents/{id}/styles", get(styles))
+        .route("/v1/documents/{id}/presentation", get(word_presentation))
+        .route(
+            "/v1/documents/{id}/theme",
+            get(document_theme).put(pin_theme),
+        )
+        .route(
+            "/v1/documents/{id}/theme/files/{sha256}",
+            get(document_theme_file),
+        )
+        .route("/v1/documents/{id}/font-plan", get(document_font_plan))
+        .route("/v1/themes/{theme_revision_id}", get(theme_revision))
+        .route(
+            "/v1/themes/{theme_revision_id}/files/{font_id}/{font_revision_id}/{sha256}",
+            get(theme_file),
+        )
+        .route("/v1/catalog/audit", get(catalog_audit))
+        .route("/v1/catalog/fonts", get(catalog_fonts))
+        .route(
+            "/v1/catalog/fonts/{font_id}",
+            get(catalog_font).delete(catalog_delete_font),
+        )
+        .route(
+            "/v1/catalog/fonts/{font_id}/blobs",
+            post(catalog_put_blob).route_layer(DefaultBodyLimit::max(MAX_FONT_BYTES as usize)),
+        )
+        .route(
+            "/v1/catalog/fonts/{font_id}/revisions",
+            post(catalog_put_font_revision),
+        )
+        .route(
+            "/v1/catalog/fonts/{font_id}/revisions/{revision}",
+            delete(catalog_delete_font_revision),
+        )
+        .route(
+            "/v1/catalog/themes",
+            get(catalog_themes).post(catalog_put_theme),
+        )
+        .route("/v1/catalog/themes/retired", get(catalog_retired_themes))
+        .route(
+            "/v1/catalog/themes/{theme_revision_id}/retire",
+            post(catalog_retire_theme).delete(catalog_unretire_theme),
+        )
+        .route(
+            "/v1/catalog/themes/{theme_revision_id}/documents",
+            get(catalog_theme_documents),
+        )
+        .route(
+            "/v1/catalog/themes/{theme_revision_id}",
+            delete(catalog_delete_theme),
+        )
+        .route(
+            "/v1/documents/{id}/export-capabilities",
+            get(exports::capabilities),
+        )
         .route("/v1/documents/{id}/export/{format}", get(export_document))
+        .route(
+            "/v1/documents/{id}/export-capabilities/{format}",
+            get(exports::format_capabilities),
+        )
         .route(
             "/v1/documents/{id}/downloads/{format}",
             post(prepare_download),
@@ -160,6 +494,9 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
             "/v1/documents/{id}/collaboration/state",
             get(collaboration_get).put(collaboration_put),
         )
+        .layer(axum::middleware::from_fn(protocol_guard))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), integration::guard))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), integration::backup::admit))
         .layer(DefaultBodyLimit::max(MAX_PATCH_JSON_BYTES as usize))
         .with_state(state);
     let address: SocketAddr = command.bind.parse().context("invalid --bind address")?;
@@ -172,7 +509,45 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
     Ok(())
 }
 
-fn authorize_upload(state: &ServerState, headers: &HeaderMap) -> Result<(), ApiError> {
+async fn protocol_guard(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    if request.method() == axum::http::Method::POST
+        && (request.uri().path().ends_with("/patch")
+            || request.uri().path().ends_with("/node-patch")
+            || request.uri().path().ends_with("/node-patch-review")
+            || request.uri().path().ends_with("/office-features")
+            || request.uri().path().ends_with("/agent-workflows"))
+        && request
+            .headers()
+            .get(crate::capabilities::PROTOCOL_HEADER)
+            .is_some_and(|value| value.to_str().ok() != Some(crate::capabilities::fingerprint()))
+    {
+        return (StatusCode::CONFLICT, Json(json!({"code":"service_version_changed","error":"服务操作协议已变化，请刷新能力后重新读取文档；未执行本次修改。"}))).into_response();
+    }
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        crate::capabilities::PROTOCOL_HEADER,
+        crate::capabilities::fingerprint()
+            .parse()
+            .expect("hex header"),
+    );
+    response
+}
+
+async fn document_capabilities(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let actor = claims(&state, &headers, &id)?;
+    let manifest = open(&state, &id)?.manifest().map_err(hcd_error)?;
+    let mut result = crate::capabilities::runtime().clone();
+    result["document"] = json!({"documentId":id,"revision":manifest.revision,"format":manifest.source.format,"capabilities":manifest.capabilities,"canWrite":actor.scope == "write"});
+    Ok(Json(result))
+}
+
+/// Upload routes need a token of their own scope, and the claims are handed back
+/// so a default-theme auto-pin can record who imported the document.
+fn authorize_upload(state: &ServerState, headers: &HeaderMap) -> Result<Claims, ApiError> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -193,13 +568,75 @@ fn authorize_upload(state: &ServerState, headers: &HeaderMap) -> Result<(), ApiE
             )
         })?
         .claims;
+    if let Some(integration) = &state.integration {
+        integration.validate_actor(&claims)?;
+    }
     if claims.doc != "*" || claims.scope != "upload" {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
             "upload token required".to_string(),
         ));
     }
-    Ok(())
+    Ok(claims)
+}
+
+/// `--default-theme` names a catalog theme revision, so it must be a 64-character lowercase digest.
+fn configured_default_theme(value: Option<String>) -> Result<Option<String>> {
+    match value {
+        None => Ok(None),
+        Some(id) if valid_digest_hex(&id) => Ok(Some(id)),
+        Some(_) => Err(anyhow!(
+            "--default-theme must be a 64-character lowercase theme revision id"
+        )),
+    }
+}
+
+/// Pin the service default theme onto a freshly imported bundle.
+///
+/// A bundle that already carries a pin — an HCD archive re-imported with its own brand —
+/// keeps it, because the default only fills in for documents that have no theme yet.
+/// A stale, retired, or unreadable theme must not strand the document an operator just
+/// uploaded, so the failure becomes a job warning instead of a failed import.
+///
+/// `actor` is who uploaded the document: the pin itself is the service's policy
+/// (`--default-theme`), but the operation log should say whose import caused it.
+/// Here a refused audit line degrades to a job warning rather than a failed
+/// request, because the pin is already committed and the import is best-effort.
+fn pin_default_theme(
+    catalog: &DiskCatalog,
+    default_theme: Option<&str>,
+    destination: &std::path::Path,
+    actor: &str,
+) -> Option<String> {
+    let theme_id = default_theme?;
+    let bundle = match Bundle::open(destination) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            return Some(format!("default theme {theme_id} was not pinned: {error}"));
+        }
+    };
+    if bundle
+        .manifest()
+        .map(|manifest| manifest.theme_revision_id.is_some())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    match pin_document_theme(catalog, &bundle, theme_id) {
+        Ok(manifest) => catalog
+            .record_audit(AuditRecord {
+                action: audit_action::DOCUMENT_THEME_PIN,
+                target: &manifest.document_id,
+                actor,
+                detail: &format!(
+                    "导入时按服务默认主题自动钉上 {theme_id}，写入修订 r{}",
+                    manifest.revision
+                ),
+            })
+            .err()
+            .map(|error| format!("默认主题已钉上，但操作记录没有写入: {error}")),
+        Err(error) => Some(format!("default theme {theme_id} was not pinned: {error}")),
+    }
 }
 
 #[derive(Deserialize)]
@@ -213,7 +650,10 @@ async fn import_document(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<Value>, ApiError> {
-    authorize_upload(&state, &headers)?;
+    let claims = authorize_upload(&state, &headers)?;
+    // Resolved before the job is spawned: the background task cannot reach the
+    // request headers, but the auto-pin it may perform still needs an actor.
+    let actor = audit_actor(&claims);
     let extension = std::path::Path::new(&query.filename)
         .extension()
         .and_then(|value| value.to_str())
@@ -221,7 +661,23 @@ async fn import_document(
         .to_ascii_lowercase();
     if !matches!(
         extension.as_str(),
-        "docx" | "html" | "htm" | "md" | "markdown" | "txt" | "pdf" | "pptx" | "xlsx" | "hcd"
+        "docx"
+            | "html"
+            | "htm"
+            | "md"
+            | "markdown"
+            | "txt"
+            | "pdf"
+            | "pptx"
+            | "xlsx"
+            | "csv"
+            | "tsv"
+            | "hcd"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+            | "excalidraw"
     ) {
         return Err(bad("unsupported import extension"));
     }
@@ -252,10 +708,10 @@ async fn import_document(
         return Err(bad("empty upload"));
     }
     if extension == "hcd" {
-        return import_hcd_archive(state, temporary, job_id).await;
+        return import_hcd_archive(state, temporary, job_id, actor).await;
     }
     let hash = hash_file(&temporary).map_err(internal)?;
-    let document_id = format!("doc-{}", &hash[..32]);
+    let document_id = source_document_id(&hash, &extension);
     let sources = state.root.join("sources");
     tokio::fs::create_dir_all(&sources)
         .await
@@ -272,6 +728,15 @@ async fn import_document(
     let jobs = state.root.join("jobs");
     tokio::fs::create_dir_all(&jobs).await.map_err(internal)?;
     let job_path = jobs.join(format!("{job_id}.json"));
+    write_job(
+        &job_path,
+        state.remote.as_ref(),
+        &job_id,
+        json!({"jobId": job_id, "documentId": document_id, "state": "queued",
+            "kind": "import", "filename": query.filename, "format": extension}),
+    )
+    .await
+    .map_err(internal)?;
     if destination.exists() {
         if let Some(remote) = &state.remote {
             remote
@@ -302,7 +767,9 @@ async fn import_document(
     let job_document_id = document_id.clone();
     let spawned_job_id = job_id.clone();
     let remote = state.remote.clone();
-    tokio::spawn(async move {
+    let catalog = state.catalog.clone();
+    let default_theme = state.default_theme.clone();
+    integration::backup::spawn(async move {
         let run = async {
             write_job(
                 &job_path,
@@ -327,20 +794,26 @@ async fn import_document(
                     String::from_utf8_lossy(&output.stderr)
                 ));
             }
+            let mut warnings = Vec::new();
+            if let Some(warning) =
+                pin_default_theme(&catalog, default_theme.as_deref(), &destination, &actor)
+            {
+                warnings.push(warning);
+            }
             if let Some(remote) = &remote {
                 remote
                     .publish(&job_document_id, &destination, Some(&source), None)
                     .await?;
             }
-            Result::<()>::Ok(())
+            Result::<Vec<String>>::Ok(warnings)
         }
         .await;
-        let (status, error) = match run {
-            Ok(()) => ("completed", None),
-            Err(error) => ("failed", Some(error.to_string())),
+        let (status, error, warnings) = match run {
+            Ok(warnings) => ("completed", None, warnings),
+            Err(error) => ("failed", Some(error.to_string()), Vec::new()),
         };
         let _ = write_job(&job_path, remote.as_ref(), &spawned_job_id,
-            json!({"jobId": spawned_job_id, "documentId": job_document_id, "state": status, "error": error})).await;
+            json!({"jobId": spawned_job_id, "documentId": job_document_id, "state": status, "error": error, "warnings": warnings})).await;
     });
     Ok(Json(
         json!({"jobId": job_id, "documentId": document_id, "state": "queued"}),
@@ -351,6 +824,7 @@ async fn import_hcd_archive(
     state: ServerState,
     archive: PathBuf,
     job_id: String,
+    actor: String,
 ) -> Result<Json<Value>, ApiError> {
     let inspected = match hcd_core::inspect_archive(&archive) {
         Ok(manifest) => manifest,
@@ -386,7 +860,9 @@ async fn import_hcd_archive(
     let remote = state.remote.clone();
     let spawned_job_id = job_id.clone();
     let job_document_id = document_id.clone();
-    tokio::spawn(async move {
+    let catalog = state.catalog.clone();
+    let default_theme = state.default_theme.clone();
+    integration::backup::spawn(async move {
         let run = async {
             write_job(
                 &job_path,
@@ -409,21 +885,27 @@ async fn import_hcd_archive(
                     String::from_utf8_lossy(&output.stderr)
                 ));
             }
+            let mut warnings = Vec::new();
+            if let Some(warning) =
+                pin_default_theme(&catalog, default_theme.as_deref(), &destination, &actor)
+            {
+                warnings.push(warning);
+            }
             if let Some(remote) = &remote {
                 remote
                     .publish(&job_document_id, &destination, None, None)
                     .await?;
             }
-            Result::<()>::Ok(())
+            Result::<Vec<String>>::Ok(warnings)
         }
         .await;
         let _ = tokio::fs::remove_file(&archive).await;
-        let (status, error) = match run {
-            Ok(()) => ("completed", None),
-            Err(error) => ("failed", Some(error.to_string())),
+        let (status, error, warnings) = match run {
+            Ok(warnings) => ("completed", None, warnings),
+            Err(error) => ("failed", Some(error.to_string()), Vec::new()),
         };
         let _ = write_job(&job_path, remote.as_ref(), &spawned_job_id,
-            json!({"jobId": spawned_job_id, "documentId": job_document_id, "state": status, "error": error})).await;
+            json!({"jobId": spawned_job_id, "documentId": job_document_id, "state": status, "error": error, "warnings": warnings})).await;
     });
     Ok(Json(
         json!({"jobId": job_id, "documentId": document_id, "state": "queued"}),
@@ -462,9 +944,26 @@ async fn write_job(
     path: &std::path::Path,
     remote: Option<&RemoteStore>,
     job_id: &str,
-    payload: Value,
+    mut payload: Value,
 ) -> Result<()> {
-    tokio::fs::write(path, serde_json::to_vec(&payload)?).await?;
+    let previous = tokio::fs::read(path)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    if let Some(Value::Object(previous)) = previous {
+        if let Some(object) = payload.as_object_mut() {
+            for (key, value) in previous {
+                object.entry(key).or_insert(value);
+            }
+        }
+    }
+    if payload.get("createdAtEpochMs").is_none() {
+        payload["createdAtEpochMs"] = json!(agent_now());
+    }
+    payload["updatedAtEpochMs"] = json!(agent_now());
+    let temporary = path.with_extension("tmp");
+    tokio::fs::write(&temporary, serde_json::to_vec(&payload)?).await?;
+    tokio::fs::rename(&temporary, path).await?;
     if let Some(remote) = remote {
         remote.job_set(job_id, &payload).await?;
     }
@@ -496,7 +995,7 @@ fn hcd_error(error: HcdError) -> ApiError {
     let status = match &error {
         HcdError::RevisionConflict(_) => StatusCode::CONFLICT,
         HcdError::PreconditionFailed(_) => StatusCode::PRECONDITION_FAILED,
-        HcdError::NodeNotFound(_) => StatusCode::NOT_FOUND,
+        HcdError::NodeNotFound(_) | HcdError::NotFound(_) => StatusCode::NOT_FOUND,
         HcdError::ResourceLimit(_) => StatusCode::PAYLOAD_TOO_LARGE,
         HcdError::Unsupported(_) => StatusCode::UNPROCESSABLE_ENTITY,
         HcdError::Io(_) | HcdError::Json(_) | HcdError::InvalidBundle(_) => {
@@ -546,10 +1045,34 @@ fn claims(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, 
             )
         })?
         .claims;
+    if let Some(integration) = &state.integration {
+        integration.validate_actor(&claims)?;
+    }
     if claims.doc != id || !matches!(claims.scope.as_str(), "read" | "write") {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
             "token document or scope mismatch".to_string(),
+        ));
+    }
+    let managed_actor = claims
+        .sub
+        .as_deref()
+        .and_then(|id| id.strip_prefix("agent-"))
+        .and_then(|id| id.get(..36))
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+    if managed_actor && claims.worker_generation.is_none()
+        || claims.worker_generation.as_ref().is_some_and(|generation| {
+            generation != state.worker_generation.as_ref()
+                && !state
+                    .worker_fences
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(generation)
+        })
+    {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Agent worker requires fresh authorization for this service process".into(),
         ));
     }
     Ok(claims)
@@ -571,8 +1094,152 @@ fn authorize(
     Ok(())
 }
 
+/// Which token may change the theme a document pins.
+///
+/// A theme pin is a brand decision about the document rather than an edit of its
+/// text: it commits managed stylesheet lines and touches no node, so the
+/// management console has to be able to retarget documents with the operator
+/// token it already holds instead of minting a short-lived write token per
+/// document. Every route that changes content still requires a token written for
+/// that document, so this is the one place the admin token reaches a document.
+fn authorize_theme(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, ApiError> {
+    // The claims are returned, not just checked: the pin has to record who made it.
+    if let Ok(claims) = authorize_admin(state, headers) {
+        return Ok(claims);
+    }
+    write_claims(state, headers, id)
+}
+
+fn authorize_catalog(state: &ServerState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::UNAUTHORIZED,
+                "bearer token required".to_string(),
+            )
+        })?;
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_audience(&["hcd-core"]);
+    let claims = decode::<Claims>(token, &DecodingKey::from_secret(&state.secret), &validation)
+        .map_err(|_| {
+            ApiError(
+                StatusCode::UNAUTHORIZED,
+                "invalid or expired token".to_string(),
+            )
+        })?
+        .claims;
+    if claims.scope == "admin" && claims.doc == "*" {
+        // The management console previews themes and font files.
+        return Ok(());
+    }
+    if !matches!(claims.scope.as_str(), "read" | "write") || !valid_id(&claims.doc) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "catalog read requires a document read or write token".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Catalog administration requires an operator token: scope `admin` issued for
+/// `doc: "*"`. Document-scoped read or write tokens never reach these routes.
+fn authorize_admin(state: &ServerState, headers: &HeaderMap) -> Result<Claims, ApiError> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::UNAUTHORIZED,
+                "bearer token required".to_string(),
+            )
+        })?;
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_audience(&["hcd-core"]);
+    let actor = decode::<Claims>(token, &DecodingKey::from_secret(&state.secret), &validation)
+        .map_err(|_| {
+            ApiError(
+                StatusCode::UNAUTHORIZED,
+                "invalid or expired token".to_string(),
+            )
+        })?
+        .claims;
+    if actor.scope != "admin" || actor.doc != "*" {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "catalog management requires an admin token".to_string(),
+        ));
+    }
+    Ok(actor)
+}
+
+/// Who a token belongs to, as the audit log records it.
+///
+/// Tokens already carry `--user-id` and `--display-name`, so an operator who
+/// mints one for themselves shows up by name. Control characters are stripped
+/// rather than rejected: they come from whatever the token said, and one must
+/// not be able to forge a second log line or break a record that was already
+/// written. A token with no identity still says which kind of credential acted.
+fn audit_actor(claims: &Claims) -> String {
+    let clean = |value: &str| -> String {
+        value
+            .chars()
+            .filter(|character| !character.is_control())
+            .take(64)
+            .collect::<String>()
+            .trim()
+            .to_string()
+    };
+    let name = claims.name.as_deref().map(str::trim).map(clean);
+    let id = claims.sub.as_deref().map(str::trim).map(clean);
+    match (
+        name.filter(|value| !value.is_empty()),
+        id.filter(|value| !value.is_empty()),
+    ) {
+        (Some(name), Some(id)) if name != id => format!("{name} ({id})"),
+        (Some(name), _) => name,
+        (_, Some(id)) => id,
+        (None, None) => format!("{}:{}", clean(&claims.scope), clean(&claims.doc)),
+    }
+}
+
+/// Append one finished catalog operation to the audit log.
+///
+/// Called after the change took effect, so a record never describes work that
+/// did not happen. The flip side is chosen deliberately: if the line cannot be
+/// written the request still reports failure, because an operation that changed
+/// the catalog without leaving a trace is the hole this log exists to close.
+fn record_catalog_audit(
+    catalog: &DiskCatalog,
+    claims: &Claims,
+    action: &str,
+    target: &str,
+    detail: String,
+) -> Result<(), ApiError> {
+    catalog
+        .record_audit(AuditRecord {
+            action,
+            target,
+            actor: &audit_actor(claims),
+            detail: &detail,
+        })
+        .map(|_| ())
+        .map_err(|error| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("变更已经生效，但操作记录没有写入：{error}"),
+            )
+        })
+}
+
 fn write_claims(state: &ServerState, headers: &HeaderMap, id: &str) -> Result<Claims, ApiError> {
     let actor = claims(state, headers, id)?;
+    if actor.worker_generation.is_some() {
+        state.agent_runs.ensure_healthy()?;
+    }
     if actor.scope != "write" {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -609,9 +1276,22 @@ async fn auth_check(
     let claims = claims(&state, &headers, &id)?;
     open(&state, &id)?;
     let epoch = collaboration_epoch(&state, &id).await?;
+    let host_access = integration::access(&state, &headers, &id).await?;
+    let scope = host_access
+        .as_ref()
+        .map(|decision| {
+            if decision.granted.iter().any(|op| op == "document.edit") {
+                "write"
+            } else {
+                "read"
+            }
+        })
+        .unwrap_or(&claims.scope);
     Ok(Json(
-        json!({"documentId": id, "scope": claims.scope, "userId": claims.sub,
-        "displayName": claims.name, "expiresAt": claims.exp, "collaborationEpoch": epoch}),
+        json!({"documentId": id, "scope": scope, "userId": claims.sub,
+        "displayName": claims.name, "expiresAt": claims.exp, "collaborationEpoch": epoch,
+        "hostIntegration":host_access.is_some(),"operations":host_access.as_ref().map(|v| &v.granted),
+        "serviceId": identity::service_id(&state.root).map_err(internal)?}),
     ))
 }
 
@@ -657,8 +1337,8 @@ async fn check_collaboration_epoch(
     Ok(requested)
 }
 
-async fn reset_collaboration(state: &ServerState, id: &str) -> Result<u64, ApiError> {
-    let _guard = state.collaboration_lock.lock().await;
+/// Caller holds collaboration_lock across the content commit and epoch reset.
+async fn reset_collaboration_locked(state: &ServerState, id: &str) -> Result<u64, ApiError> {
     if let Some(remote) = &state.remote {
         return remote.collaboration_reset(id).await.map_err(internal);
     }
@@ -773,10 +1453,36 @@ struct RevisionQuery {
     revision: Option<u64>,
 }
 
+/// `GET /v1/documents/{id}/theme`. `faces=only` returns just the `@font-face`
+/// rules: the pin writes the variables and the family rules into the document's
+/// own stylesheet as a content revision, so a surface that renders that
+/// stylesheet asks for the font bytes alone instead of getting the same
+/// declarations twice.
+#[derive(Deserialize)]
+struct ThemeQuery {
+    revision: Option<u64>,
+    faces: Option<String>,
+}
+
+/// Keep only the `@font-face` lines of a resolved theme stylesheet. Each rule is
+/// emitted on its own line by `DiskCatalog::resolve`, and the declarations that
+/// belong to the document are the rest.
+fn font_faces_only(css: &str) -> String {
+    css.lines()
+        .filter(|line| line.starts_with("@font-face{"))
+        .fold(String::new(), |mut kept, line| {
+            kept.push_str(line);
+            kept.push('\n');
+            kept
+        })
+}
+
 #[derive(Deserialize)]
 struct SearchQuery {
     q: String,
     revision: Option<u64>,
+    #[serde(default)]
+    workspace: bool,
 }
 
 #[derive(Deserialize)]
@@ -788,12 +1494,14 @@ struct ExpectedRevision {
 async fn manifest(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, false)?;
-    Ok(Json(
-        serde_json::to_value(open(&state, &id)?.manifest().map_err(internal)?).map_err(internal)?,
-    ))
+    let bundle = open(&state, &id)?;
+    let head = bundle.manifest().map_err(internal)?;
+    let (manifest, _) = manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
+    Ok(Json(serde_json::to_value(manifest).map_err(internal)?))
 }
 
 async fn editor(
@@ -803,7 +1511,14 @@ async fn editor(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, false)?;
-    let projection = editor_projection(&open(&state, &id)?, query.revision).map_err(bad)?;
+    let bundle = open(&state, &id)?;
+    // Large source documents must not occupy the async worker while their
+    // immutable editor projection is parsed and verified.
+    let projection =
+        tokio::task::spawn_blocking(move || editor_projection(&bundle, query.revision))
+            .await
+            .map_err(internal)?
+            .map_err(bad)?;
     Ok(Json(serde_json::to_value(projection).map_err(internal)?))
 }
 
@@ -815,12 +1530,387 @@ async fn search(
 ) -> Result<Json<Value>, ApiError> {
     authorize(&state, &headers, &id, false)?;
     let bundle = open(&state, &id)?;
-    let result =
-        tokio::task::spawn_blocking(move || search_bundle(&bundle, query.revision, &query.q))
-            .await
-            .map_err(internal)?
-            .map_err(hcd_error)?;
+    let result = tokio::task::spawn_blocking(move || {
+        if query.workspace && query.revision.is_none() {
+            hcd_core::search_workspace(&bundle, &query.q)
+        } else {
+            search_bundle(&bundle, query.revision, &query.q)
+        }
+    })
+    .await
+    .map_err(internal)?
+    .map_err(hcd_error)?;
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
+}
+
+async fn text_node(
+    State(state): State<ServerState>,
+    Path((id, node_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    match hcd_core::get_text_node(&bundle, &node_id) {
+        Ok(node) => Ok(Json(serde_json::to_value(node).map_err(internal)?)),
+        Err(hcd_core::HcdError::NodeNotFound(_)) => {
+            // Images intentionally do not participate in textual lookup.
+            let image = hcd_core::get_image_node(&bundle, &node_id).map_err(hcd_error)?;
+            let mut value = serde_json::to_value(image).map_err(internal)?;
+            value["nodeHash"] = json!(hcd_core::hash_bytes(b""));
+            value["text"] = json!("");
+            Ok(Json(value))
+        }
+        Err(error) => Err(hcd_error(error)),
+    }
+}
+
+fn agent_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+async fn agent_list(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let revision = open(&state, &id)?.manifest().map_err(hcd_error)?.revision;
+    let epoch = collaboration_epoch(&state, &id).await?;
+    let mut agents = state.agents.lock().await;
+    let now = agent_now();
+    agents.retain(|_, item| now.saturating_sub(item.updated_at_epoch_ms) < 15_000);
+    let mut current: Vec<_> = agents
+        .iter()
+        .filter(|((doc, _), activity)| doc == &id && activity.collaboration_epoch == epoch)
+        .map(|(_, activity)| activity.clone())
+        .collect();
+    current.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+    drop(agents);
+    let operations = agent_operations::list(&state, &id, epoch, revision).await;
+    Ok(Json(
+        json!({"documentId":id,"collaborationEpoch":epoch,"agents":current,"operations":operations}),
+    ))
+}
+
+async fn agent_focus(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(mut focus): Json<AgentFocus>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = write_claims(&state, &headers, &id)?;
+    let actor = agent_identity::for_presence(&actor, &headers);
+    let agent_id = actor
+        .sub
+        .clone()
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .ok_or_else(|| bad("agent token requires a distinct user-id"))?;
+    let _guard = state.collaboration_lock.lock().await;
+    let epoch = check_collaboration_epoch(&state, &id, &headers).await?;
+    let bundle = open(&state, &id)?;
+    let manifest = bundle.manifest().map_err(hcd_error)?;
+    if manifest.revision != focus.expected_revision {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "agent focus revision changed; reread document".into(),
+        ));
+    }
+    if !["locating", "reading", "planning", "editing", "idle"].contains(&focus.status.as_str())
+        || focus
+            .message
+            .as_ref()
+            .is_some_and(|m| m.chars().count() > 160)
+    {
+        return Err(bad("invalid agent status or message"));
+    }
+    if focus.node_id.is_some() && focus.block_id.is_some() {
+        return Err(bad("choose nodeId or blockId"));
+    }
+    if let Some(node_id) = &focus.node_id {
+        let chunk_id = match hcd_core::get_text_node(&bundle, node_id) {
+            Ok(node) => node.node.chunk_id,
+            Err(_) => {
+                hcd_core::get_image_node(&bundle, node_id)
+                    .map_err(hcd_error)?
+                    .chunk_id
+            }
+        };
+        if focus.chunk_sequence.is_none() {
+            for page in 0..manifest.index_page_count {
+                if let Some(chunk) = bundle
+                    .read_index_page(&manifest, page)
+                    .map_err(hcd_error)?
+                    .chunks
+                    .iter()
+                    .find(|chunk| chunk.chunk_id == chunk_id)
+                {
+                    focus.chunk_sequence = Some(chunk.sequence);
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(block_id) = &focus.block_id {
+        if !editor_projection(&bundle, None)
+            .map_err(hcd_error)?
+            .blocks
+            .iter()
+            .any(|block| &block.block_id == block_id)
+        {
+            return Err(bad("unknown agent blockId"));
+        }
+    }
+    if focus
+        .chunk_sequence
+        .is_some_and(|n| n >= manifest.chunk_count)
+    {
+        return Err(bad("agent chunkSequence out of bounds"));
+    }
+    let targets = agent_operations::validate_targets(&bundle, &focus.targets)?;
+    if focus.status == "idle" {
+        agent_operations::stop(&state, &id, &agent_id, "cancelled").await;
+    }
+    if matches!(focus.status.as_str(), "planning" | "editing") {
+        let targets = if targets.is_empty()
+            && focus.node_id.is_none()
+            && focus.block_id.is_none()
+            && focus.chunk_sequence.is_none()
+        {
+            Vec::new()
+        } else if targets.is_empty() {
+            vec![agent_operations::OperationTarget {
+                node_id: focus.node_id.clone(),
+                block_id: focus.block_id.clone(),
+                chunk_sequence: focus.chunk_sequence,
+                ..Default::default()
+            }]
+        } else {
+            targets
+        };
+        agent_operations::record(
+            &state,
+            &id,
+            &actor,
+            "pending",
+            manifest.revision,
+            epoch,
+            targets,
+        )
+        .await;
+    }
+    let mut agents = state.agents.lock().await;
+    agents.retain(|_, item| agent_now().saturating_sub(item.updated_at_epoch_ms) < 15_000);
+    if focus.status == "idle" {
+        agents.remove(&(id.clone(), agent_id));
+        return Ok(Json(json!({"ok":true})));
+    }
+    if agents.len() >= 1024 && !agents.contains_key(&(id.clone(), agent_id.clone())) {
+        return Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "agent activity capacity reached".into(),
+        ));
+    }
+    let activity = AgentActivity {
+        name: actor
+            .name
+            .unwrap_or_else(|| agent_id.clone())
+            .chars()
+            .take(64)
+            .collect(),
+        agent_id: agent_id.clone(),
+        status: focus.status,
+        node_id: focus.node_id,
+        block_id: focus.block_id,
+        chunk_sequence: focus.chunk_sequence,
+        message: focus.message.unwrap_or_default(),
+        revision: manifest.revision,
+        collaboration_epoch: epoch,
+        updated_at_epoch_ms: agent_now(),
+        operation_at_epoch_ms: agent_now(),
+    };
+    agents.insert((id, agent_id), activity.clone());
+    Ok(Json(serde_json::to_value(activity).map_err(internal)?))
+}
+
+async fn agent_result(
+    state: &ServerState,
+    id: &str,
+    actor: &Claims,
+    headers: &HeaderMap,
+    status: &str,
+    revision: u64,
+    target: Option<Value>,
+) -> Result<(), ApiError> {
+    let display = agent_identity::for_presence(actor, headers);
+    let Some(agent) = &display.sub else {
+        return Ok(());
+    };
+    let epoch = collaboration_epoch(state, id).await?;
+    if headers
+        .get("x-hcd-agent-edit")
+        .and_then(|value| value.to_str().ok())
+        == Some("true")
+    {
+        agent_operations::result(
+            state,
+            id,
+            &display,
+            status,
+            revision,
+            epoch,
+            target.as_ref(),
+        )
+        .await;
+    }
+    if let Some(activity) = state
+        .agents
+        .lock()
+        .await
+        .get_mut(&(id.to_string(), agent.clone()))
+    {
+        activity.status = status.into();
+        activity.message = if status == "applied" {
+            "修改已提交"
+        } else {
+            "操作未提交，等待重新读取"
+        }
+        .into();
+        activity.revision = revision;
+        activity.collaboration_epoch = epoch;
+        activity.updated_at_epoch_ms = agent_now();
+        activity.operation_at_epoch_ms = activity.updated_at_epoch_ms;
+        // A commit can affect a different target from the last reading focus.
+        // Show its first addressed operation rather than highlighting stale focus.
+        if let Some(target) = target
+            .as_ref()
+            .and_then(|value| value.as_array().and_then(|v| v.first()).or(Some(value)))
+        {
+            let node = target.get("nodeId").and_then(Value::as_str);
+            let block = target.get("blockId").and_then(Value::as_str);
+            if node.is_some() || block.is_some() {
+                activity.node_id = node.map(str::to_string);
+                activity.block_id = block.map(str::to_string);
+                activity.chunk_sequence = None;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PendingCollaboration {
+    dirty: bool,
+    sequence: u64,
+}
+
+async fn collaboration_pending(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(pending): Json<PendingCollaboration>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = write_claims(&state, &headers, &id)?;
+    if actor.sub.as_deref() != Some("hcd-collaboration") {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "collaboration service identity required".into(),
+        ));
+    }
+    let _guard = state.collaboration_lock.lock().await;
+    let epoch = check_collaboration_epoch(&state, &id, &headers).await?;
+    open(&state, &id)?;
+    let path = state
+        .root
+        .join("collaboration")
+        .join(format!("{id}.{epoch}.pending"));
+    if let Ok(bytes) = tokio::fs::read(&path).await {
+        let previous: PendingCollaboration = serde_json::from_slice(&bytes).map_err(internal)?;
+        if previous.sequence >= pending.sequence {
+            return Ok(Json(json!({"ok":true})));
+        }
+    }
+    tokio::fs::create_dir_all(path.parent().expect("collaboration directory"))
+        .await
+        .map_err(internal)?;
+    tokio::fs::write(path, serde_json::to_vec(&pending).map_err(internal)?)
+        .await
+        .map_err(internal)?;
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn agent_edit_preflight(
+    state: &ServerState,
+    id: &str,
+    headers: &HeaderMap,
+    actor: &Claims,
+) -> Result<(), ApiError> {
+    if headers
+        .get("x-hcd-agent-edit")
+        .and_then(|h| h.to_str().ok())
+        != Some("true")
+    {
+        return Ok(());
+    }
+    if actor.sub.as_ref().is_none_or(|id| id.is_empty()) {
+        return Err(bad("agent edit requires a distinct user-id"));
+    }
+    require_clean_collaboration(state, id, headers).await
+}
+
+// Source-mapped semantic edits invalidate the shared block projection. Protect
+// pending human edits for these writes too, regardless of the caller's identity.
+async fn require_clean_collaboration(
+    state: &ServerState,
+    id: &str,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    let epoch = check_collaboration_epoch(state, id, headers).await?;
+    let path = state
+        .root
+        .join("collaboration")
+        .join(format!("{id}.{epoch}.pending"));
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            let pending: PendingCollaboration = serde_json::from_slice(&bytes).map_err(internal)?;
+            if pending.dirty {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "collaborators have unsaved edits; wait for a checkpoint, reread and replan"
+                        .into(),
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(internal(error)),
+    }
+    Ok(())
+}
+
+async fn check_agent_patch(
+    state: &ServerState,
+    id: &str,
+    headers: &HeaderMap,
+    actor: &Claims,
+) -> Result<(), ApiError> {
+    let result = async {
+        if actor.worker_generation.is_some() {
+            agent_workflows::guard_write(state, id, actor).await?;
+        }
+        if headers.contains_key("x-hcd-collaboration-epoch") {
+            check_collaboration_epoch(state, id, headers).await?;
+        }
+        agent_edit_preflight(state, id, headers, actor).await
+    }
+    .await;
+    if result.is_err() {
+        let revision = open(state, id)?.manifest().map_err(hcd_error)?.revision;
+        agent_result(state, id, actor, headers, "conflict", revision, None).await?;
+    }
+    result
 }
 
 async fn project(
@@ -830,6 +1920,8 @@ async fn project(
     Json(request): Json<ExpectedRevision>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
+    let _guard = state.collaboration_lock.lock().await;
+    check_agent_patch(&state, &id, &headers, &actor).await?;
     let bundle = open(&state, &id)?;
     let result = project_editor(&bundle, request.expected_revision).map_err(hcd_error)?;
     stamp_revision_author(&bundle, result.revision, &actor)?;
@@ -844,17 +1936,76 @@ async fn patch(
     Json(patch): Json<StructurePatchBatch>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
+    let _guard = state.collaboration_lock.lock().await;
+    let result = patch_structure_locked(&state, &id, &headers, &actor, patch).await?;
+    Ok(Json(serde_json::to_value(result).map_err(internal)?))
+}
+
+async fn patch_structure_locked(
+    state: &ServerState,
+    id: &str,
+    headers: &HeaderMap,
+    actor: &Claims,
+    patch: StructurePatchBatch,
+) -> Result<hcd_core::ApplyResult, ApiError> {
+    check_agent_patch(state, id, headers, actor).await?;
+    if patch.operations.iter().any(|op| {
+        matches!(
+            op,
+            hcd_core::StructureOperation::TableInsert { .. }
+                | hcd_core::StructureOperation::TableEdit { .. }
+                | hcd_core::StructureOperation::TableCellsMerge { .. }
+                | hcd_core::StructureOperation::TableCellSplit { .. }
+                | hcd_core::StructureOperation::TableDelete { .. }
+                | hcd_core::StructureOperation::TableRestore { .. }
+        )
+    }) {
+        require_clean_collaboration(state, id, headers).await?;
+    }
     if patch.document_id != id {
         return Err(bad("patch document ID mismatch"));
     }
-    let bundle = open(&state, &id)?;
-    let result = apply_structure_patch(&bundle, &patch, patch.base_revision).map_err(hcd_error)?;
+    agent_team::check_write(
+        state,
+        id,
+        actor,
+        headers,
+        &serde_json::to_value(&patch.operations).map_err(internal)?,
+    )
+    .await?;
+    let bundle = open(state, id)?;
+    let result = match apply_structure_patch(&bundle, &patch, patch.base_revision) {
+        Ok(result) => result,
+        Err(error) => {
+            agent_result(
+                state,
+                id,
+                actor,
+                headers,
+                "conflict",
+                bundle.manifest().map_err(hcd_error)?.revision,
+                None,
+            )
+            .await?;
+            return Err(hcd_error(error));
+        }
+    };
     if !result.idempotent_replay {
-        stamp_revision_author(&bundle, result.revision, &actor)?;
-        publish_mutation(&state, &id, &bundle, patch.base_revision).await?;
-        reset_collaboration(&state, &id).await?;
+        stamp_revision_author(&bundle, result.revision, actor)?;
+        publish_mutation(state, id, &bundle, patch.base_revision).await?;
+        reset_collaboration_locked(state, id).await?;
     }
-    Ok(Json(serde_json::to_value(result).map_err(internal)?))
+    agent_result(
+        state,
+        id,
+        actor,
+        headers,
+        "applied",
+        result.revision,
+        serde_json::to_value(&patch.operations).ok(),
+    )
+    .await?;
+    Ok(result)
 }
 
 async fn node_patch(
@@ -864,20 +2015,154 @@ async fn node_patch(
     Json(patch): Json<PatchBatch>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
+    let _guard = state.collaboration_lock.lock().await;
+    check_agent_patch(&state, &id, &headers, &actor).await?;
     if patch.document_id != id {
         return Err(bad("patch document ID mismatch"));
     }
+    agent_team::check_write(
+        &state,
+        &id,
+        &actor,
+        &headers,
+        &serde_json::to_value(&patch.operations).map_err(internal)?,
+    )
+    .await?;
     let bundle = open(&state, &id)?;
-    let format = bundle.manifest().map_err(hcd_error)?.source.format;
-    if !matches!(format.as_str(), "pdf" | "pptx" | "xlsx") {
-        return Err(bad("node patch endpoint accepts PDF, PPTX or XLSX bundles"));
+    let manifest = bundle.manifest().map_err(hcd_error)?;
+    let format = manifest.source.format.as_str();
+    if let Some(hcd_core::PatchOperation::XlsxAutoFilterSet {
+        sheet_id,
+        filter: Some(filter),
+    }) = patch.operations.first()
+    {
+        let source = state.root.join("sources").join(format!("{id}.xlsx"));
+        hcd_formats::verify_xlsx_filter_source(&source, &manifest, sheet_id, filter)
+            .map_err(hcd_error)?;
     }
-    let result = apply_patch(&bundle, &patch, patch.base_revision).map_err(hcd_error)?;
+    let semantic = matches!(format, "docx" | "html" | "md" | "txt");
+    if semantic {
+        require_clean_collaboration(&state, &id, &headers).await?;
+        if patch.operations.iter().any(|op| {
+            !matches!(
+                op,
+                hcd_core::PatchOperation::TextSplice { .. }
+                    | hcd_core::PatchOperation::ImageInsert { .. }
+                    | hcd_core::PatchOperation::ImageReplace { .. }
+                    | hcd_core::PatchOperation::ImageGeometry { .. }
+                    | hcd_core::PatchOperation::DocxPictureLayoutSet { .. }
+            )
+        }) {
+            return Err(bad("semantic node edits accept mapped text and image operations; use structure patches for block changes"));
+        }
+        if let [hcd_core::PatchOperation::DocxPictureLayoutSet {
+            node_id, layout, ..
+        }] = patch.operations.as_slice()
+        {
+            let source = state.root.join("sources").join(format!("{id}.docx"));
+            hcd_formats::validate_docx_picture_target(&bundle, &source, node_id, layout.as_ref())
+                .map_err(hcd_error)?;
+        }
+    } else if !matches!(
+        format,
+        "pdf" | "pptx" | "xlsx" | "csv" | "tsv" | "png" | "jpg" | "jpeg" | "webp"
+    ) {
+        return Err(bad("unsupported node patch source format"));
+    }
+    if hcd_formats::images::is_image_format(format) {
+        check_collaboration_epoch(&state, &id, &headers).await?;
+        image_workspace::check_region(&state, &id, None).await?;
+    }
+    let result = match hcd_formats::worksheet_pivots::apply_workbook_patch(
+        &bundle,
+        &patch,
+        patch.base_revision,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            agent_result(
+                &state,
+                &id,
+                &actor,
+                &headers,
+                "conflict",
+                bundle.manifest().map_err(hcd_error)?.revision,
+                None,
+            )
+            .await?;
+            return Err(hcd_error(error));
+        }
+    };
     if !result.idempotent_replay {
         stamp_revision_author(&bundle, result.revision, &actor)?;
         publish_mutation(&state, &id, &bundle, patch.base_revision).await?;
+        if semantic {
+            reset_collaboration_locked(&state, &id).await?;
+        }
     }
+    agent_result(
+        &state,
+        &id,
+        &actor,
+        &headers,
+        "applied",
+        result.revision,
+        serde_json::to_value(&patch.operations).ok(),
+    )
+    .await?;
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GridFilterQuery {
+    sheet_id: String,
+    revision: u64,
+}
+
+async fn grid_filter(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<GridFilterQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Option<hcd_core::GridFilterView>>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    let view = tokio::task::spawn_blocking(move || {
+        let head = bundle.manifest()?;
+        let (manifest, _) = manifest_at_revision(&bundle, &head, Some(query.revision))?;
+        hcd_core::worksheet_filter(&bundle, &manifest, &query.sheet_id)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(hcd_error)?;
+    Ok(Json(view))
+}
+
+async fn grid_sort(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<GridSortRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = write_claims(&state, &headers, &id)?;
+    let bundle = open(&state, &id)?;
+    let base = request.base_revision;
+    let sort_bundle = bundle.clone();
+    let sorted = tokio::task::spawn_blocking(move || sort_grid(&sort_bundle, request))
+        .await
+        .map_err(internal)?
+        .map_err(hcd_error)?;
+    let Some(result) = sorted else {
+        return Ok(Json(json!({ "revision": base, "changed": false })));
+    };
+    if !result.idempotent_replay {
+        stamp_revision_author(&bundle, result.revision, &actor)?;
+        publish_mutation(&state, &id, &bundle, base).await?;
+    }
+    Ok(Json(
+        json!({ "revision": result.revision, "changed": true }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -905,6 +2190,7 @@ fn normalized(mut content: EditorBlockContent) -> EditorBlockContent {
             if previous.bold == inline.bold
                 && previous.italic == inline.italic
                 && previous.link == inline.link
+                && previous.format == inline.format
             {
                 previous.text.push_str(&inline.text);
                 continue;
@@ -916,13 +2202,57 @@ fn normalized(mut content: EditorBlockContent) -> EditorBlockContent {
     content
 }
 
+/// The trusted sidecar reports an author only when all accepted changes since
+/// the previous checkpoint came from that authenticated connection identity.
+/// Ordinary document sessions cannot override their own revision attribution.
+fn checkpoint_author(mut actor: Claims, headers: &HeaderMap) -> Result<Claims, ApiError> {
+    use base64::Engine;
+    let Some(header) = headers.get("x-hcd-checkpoint-author") else {
+        return Ok(actor);
+    };
+    if actor.sub.as_deref() != Some("hcd-collaboration") {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "collaboration service identity required".into(),
+        ));
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Author {
+        id: String,
+        name: String,
+    }
+    let encoded = header
+        .to_str()
+        .map_err(|_| bad("invalid checkpoint author"))?;
+    if encoded.len() > 2048 {
+        return Err(bad("checkpoint author limit exceeded"));
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| bad("invalid checkpoint author"))?;
+    let author: Author =
+        serde_json::from_slice(&bytes).map_err(|_| bad("invalid checkpoint author"))?;
+    if [&author.id, &author.name].iter().any(|value| {
+        value.trim().is_empty()
+            || value.chars().count() > 128
+            || value.chars().any(char::is_control)
+    }) {
+        return Err(bad("invalid checkpoint author identity"));
+    }
+    actor.sub = Some(author.id);
+    actor.name = Some(author.name);
+    Ok(actor)
+}
+
 async fn checkpoint(
     State(state): State<ServerState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     Json(request): Json<SnapshotRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let actor = write_claims(&state, &headers, &id)?;
+    let actor = checkpoint_author(write_claims(&state, &headers, &id)?, &headers)?;
+    let _guard = state.collaboration_lock.lock().await;
     check_collaboration_epoch(&state, &id, &headers).await?;
     if request.blocks.len() > 1_000_000 {
         return Err(bad("snapshot block limit exceeded"));
@@ -953,7 +2283,8 @@ async fn checkpoint(
                     return Err(bad("duplicate block ID in snapshot"));
                 }
                 if original.read_only
-                    && normalized(block.content.clone()) != normalized(original.content.clone())
+                    && block.content != original.content
+                    && original.editable_text_node_ids.is_empty()
                 {
                     return Err(bad("read-only block was changed"));
                 }
@@ -1017,11 +2348,19 @@ async fn checkpoint(
         let Some(original) = existing.get(block_id) else {
             continue;
         };
-        let desired = normalized(block.content.clone());
-        if desired != normalized(original.content.clone()) {
-            if original.read_only {
-                return Err(bad("read-only block cannot be replaced"));
-            }
+        // Opaque table text retains every mapped run, including empty runs and
+        // mixed formatting. The core validates all identities and permissions.
+        let desired = if original.read_only {
+            block.content.clone()
+        } else {
+            normalized(block.content.clone())
+        };
+        let baseline = if original.read_only {
+            original.content.clone()
+        } else {
+            normalized(original.content.clone())
+        };
+        if desired != baseline {
             operations.push(StructureOperation::Replace {
                 block_id: block_id.to_string(),
                 block: desired,
@@ -1100,6 +2439,124 @@ struct RevisionListQuery {
     limit: Option<u64>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchReceiptQuery {
+    base_revision: u64,
+    #[serde(default)]
+    include_added: bool,
+}
+
+async fn patch_receipt(
+    State(state): State<ServerState>,
+    Path((id, patch_id)): Path<(String, uuid::Uuid)>,
+    Query(query): Query<PatchReceiptQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let actor = write_claims(&state, &headers, &id)?;
+    let author = actor.sub.ok_or_else(|| {
+        ApiError(
+            StatusCode::FORBIDDEN,
+            "patch receipts require a user identity".into(),
+        )
+    })?;
+    let bundle = open(&state, &id)?;
+    let patch_id = patch_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let head = bundle.manifest().map_err(hcd_error)?;
+        let oldest = query
+            .base_revision
+            .saturating_add(1)
+            .max(head.revision.saturating_sub(4095));
+        for number in (oldest..=head.revision).rev() {
+            let record = bundle.revision(number).map_err(hcd_error)?;
+            if record.patch_id.as_deref() == Some(patch_id.as_str())
+                && record.patch_base_revision == Some(query.base_revision)
+                && record.author_id.as_deref() == Some(author.as_str())
+            {
+                let mut receipt = json!({ "patchId": patch_id, "revision": number });
+                if query.include_added {
+                    receipt["added"] = added_patch_targets(&bundle, &head.source.format, &record)?;
+                }
+                return Ok(Json(receipt));
+            }
+        }
+        Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "patch receipt not found".into(),
+        ))
+    })
+    .await
+    .map_err(internal)?
+}
+
+// A receipt exposes only the identities and hashes of new objects attributed
+// to the caller's patch. Undo does not require reading either historical file.
+fn added_patch_targets(
+    bundle: &Bundle,
+    format: &str,
+    record: &hcd_core::RevisionRecord,
+) -> Result<Value, ApiError> {
+    use std::collections::HashSet;
+
+    let parent = record
+        .parent_revision
+        .ok_or_else(|| bad("append receipt has no parent revision"))?;
+    let dirty: HashSet<_> = record.dirty_node_ids.iter().map(String::as_str).collect();
+    if format == "excalidraw" {
+        let before = hcd_core::canvas::read_scene(bundle, Some(parent)).map_err(hcd_error)?;
+        let after =
+            hcd_core::canvas::read_scene(bundle, Some(record.revision)).map_err(hcd_error)?;
+        let existing: HashSet<_> = before
+            .elements
+            .iter()
+            .filter_map(|element| element["id"].as_str())
+            .collect();
+        let added: Vec<_> = after
+            .elements
+            .iter()
+            .filter_map(|element| {
+                let id = element["id"].as_str()?;
+                if existing.contains(id)
+                    || !dirty.contains(hcd_core::canvas::node_id(&record.document_id, id).as_str())
+                {
+                    return None;
+                }
+                Some(json!({ "id": id, "hash": canvas_core::element_hash(element) }))
+            })
+            .collect();
+        return Ok(json!(added));
+    }
+    if matches!(format, "xlsx" | "csv" | "tsv") {
+        return Ok(json!(
+            hcd_core::xlsx_added_literals(bundle, record).map_err(hcd_error)?
+        ));
+    }
+    let before = editor_projection(bundle, Some(parent)).map_err(hcd_error)?;
+    let after = editor_projection(bundle, Some(record.revision)).map_err(hcd_error)?;
+    let existing: HashSet<_> = before
+        .blocks
+        .iter()
+        .map(|block| block.block_id.as_str())
+        .collect();
+    Ok(json!(after
+        .blocks
+        .iter()
+        .filter(|block| {
+            !existing.contains(block.block_id.as_str())
+                && !block.read_only
+                && block.region == "body"
+                && !block.content.inlines.is_empty()
+                && block
+                    .content
+                    .inlines
+                    .iter()
+                    .all(|run| run.node_id.as_deref().is_some_and(|id| dirty.contains(id)))
+        })
+        .map(|block| json!({ "id": block.block_id, "hash": block.block_hash }))
+        .collect::<Vec<_>>()))
+}
+
 async fn revision(
     State(state): State<ServerState>,
     Path((id, number)): Path<(String, u64)>,
@@ -1126,11 +2583,21 @@ async fn restore(
     Json(request): Json<ExpectedRevision>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
+    let _guard = state.collaboration_lock.lock().await;
     let bundle = open(&state, &id)?;
+    if hcd_formats::images::is_image_format(&bundle.manifest().map_err(hcd_error)?.source.format) {
+        check_collaboration_epoch(&state, &id, &headers).await?;
+        image_workspace::check_region(&state, &id, None).await?;
+        let result =
+            restore_revision(&bundle, number, request.expected_revision).map_err(hcd_error)?;
+        stamp_revision_author(&bundle, result.revision, &actor)?;
+        publish_mutation(&state, &id, &bundle, request.expected_revision).await?;
+        return Ok(Json(serde_json::to_value(result).map_err(internal)?));
+    }
     let result = restore_revision(&bundle, number, request.expected_revision).map_err(hcd_error)?;
     stamp_revision_author(&bundle, result.revision, &actor)?;
     publish_mutation(&state, &id, &bundle, request.expected_revision).await?;
-    reset_collaboration(&state, &id).await?;
+    reset_collaboration_locked(&state, &id).await?;
     Ok(Json(serde_json::to_value(result).map_err(internal)?))
 }
 
@@ -1159,6 +2626,32 @@ async fn publish_mutation(
         ));
     }
     Ok(())
+}
+
+async fn pdf_layout(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    tokio::task::spawn_blocking(move || {
+        let head = bundle.manifest().map_err(internal)?;
+        let (manifest, revision) =
+            manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
+        let pages = hcd_core::pdf_page_layout(&bundle, &manifest).map_err(bad)?;
+        let page_count = if pages.is_empty() {
+            hcd_core::pdf_page_count(&bundle, &manifest).map_err(bad)?
+        } else {
+            pages.len()
+        };
+        Ok(Json(
+            json!({"revision": revision, "pageCount": page_count, "pages": pages}),
+        ))
+    })
+    .await
+    .map_err(internal)?
 }
 
 async fn index_page(
@@ -1203,6 +2696,34 @@ async fn chunk(
     }
     Ok(Json(
         json!({"revision": revision, "descriptor": descriptor, "html": html, "map": map}),
+    ))
+}
+
+async fn stage_raster_asset(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    write_claims(&state, &headers, &id)?;
+    let bundle = open(&state, &id)?;
+    let format = bundle.manifest().map_err(hcd_error)?.source.format;
+    if format != "pptx" && !hcd_formats::images::is_image_format(&format) {
+        return Err(bad(
+            "positioned image upload requires a presentation or raster document",
+        ));
+    }
+    let (hash, width, height) = tokio::task::spawn_blocking(move || {
+        let (image, _) = hcd_formats::images::decode_raster(&body)?;
+        let png = hcd_formats::images::png_bytes(&image)?;
+        let asset = bundle.stage_asset_from_reader("png", &mut png.as_slice())?;
+        Ok::<_, hcd_core::HcdError>((asset.hash, image.width(), image.height()))
+    })
+    .await
+    .map_err(internal)?
+    .map_err(hcd_error)?;
+    Ok(Json(
+        json!({"assetHash":hash,"width":width,"height":height}),
     ))
 }
 
@@ -1271,11 +2792,13 @@ async fn asset(
 async fn styles(
     State(state): State<ServerState>,
     Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     authorize(&state, &headers, &id, false)?;
     let bundle = open(&state, &id)?;
-    let manifest = bundle.manifest().map_err(internal)?;
+    let head = bundle.manifest().map_err(internal)?;
+    let (manifest, _) = manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
     let path = bundle.resolve_href(&manifest.styles_href).map_err(bad)?;
     let bytes = tokio::fs::read(path).await.map_err(internal)?;
     if bytes.len() > 1024 * 1024 {
@@ -1288,297 +2811,5491 @@ async fn styles(
         .into_response())
 }
 
-#[derive(Clone, Copy, Deserialize)]
-struct ExportQuery {
-    revision: Option<u64>,
-    source: Option<bool>,
+/// A derived, revision-pinned Word preview. It shares its pagination renderer
+/// with CLI HTML export; it never saves or advances the authoritative head.
+async fn word_presentation(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ApiError> {
+        let bundle = open(&state, &id)?;
+        let head = bundle.manifest().map_err(internal)?;
+        let (manifest, revision) =
+            manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
+        if manifest.source.format != "docx" {
+            return Err(bad("paginated presentation requires a DOCX document"));
+        }
+        let options = hcd_core::HtmlPresentationOptions {
+            revision: Some(revision),
+            max_output_bytes: 32 * 1024 * 1024,
+            text_hitboxes_enabled: false,
+            image_hitboxes_enabled: false,
+            theme_stylesheet: hcd_core::theme_presentation_css(
+                &state.catalog,
+                &bundle,
+                Some(revision),
+            )
+            .map_err(internal)?,
+            ..Default::default()
+        };
+        let mut output = Vec::new();
+        hcd_core::render_standalone_html(&bundle, &options, &mut output).map_err(bad)?;
+        Ok(output)
+    })
+    .await
+    .map_err(internal)??;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        Body::from(bytes),
+    )
+        .into_response())
 }
 
-async fn prepare_download(
+fn document_font_href(
+    document_id: &str,
+    _font_id: &str,
+    _font_revision_id: &str,
+    sha256: &str,
+) -> String {
+    format!("/v1/documents/{document_id}/theme/files/{sha256}")
+}
+
+fn theme_font_href(
+    theme_revision_id: &str,
+    font_id: &str,
+    font_revision_id: &str,
+    sha256: &str,
+) -> String {
+    format!("/v1/themes/{theme_revision_id}/files/{font_id}/{font_revision_id}/{sha256}")
+}
+
+async fn document_theme(
     State(state): State<ServerState>,
-    Path((id, format)): Path<(String, String)>,
-    Query(query): Query<ExportQuery>,
+    Path(id): Path<String>,
+    Query(query): Query<ThemeQuery>,
     headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<hcd_core::DocumentThemeResolution>, ApiError> {
     authorize(&state, &headers, &id, false)?;
     let bundle = open(&state, &id)?;
+    let mut resolved = resolve_document_theme(
+        &state.catalog,
+        &bundle,
+        query.revision,
+        |font_id, revision, sha| document_font_href(&id, font_id, revision, sha),
+    )
+    .map_err(hcd_error)?;
+    match query.faces.as_deref() {
+        None | Some("") => {}
+        Some("only") => resolved.theme.css = font_faces_only(&resolved.theme.css),
+        Some(other) => {
+            return Err(bad(format!(
+                "unknown faces value {other}; only faces=only is supported"
+            )))
+        }
+    }
+    Ok(Json(resolved))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FontPlanQuery {
+    /// Which export to answer for. `docx` and `pptx` share the OOXML rules, `pdf`
+    /// has its own flag, and `xlsx` registers names and never carries bytes.
+    kind: String,
+    /// Ask about one revision — the version the file in hand was exported from.
+    /// Absent means the head.
+    revision: Option<u64>,
+}
+
+/// Which set of embedding rules a requested format lives under.
+fn embed_kind(format: &str) -> Option<ThemeEmbedKind> {
+    match format {
+        "docx" | "pptx" => Some(ThemeEmbedKind::Ooxml),
+        "pdf" => Some(ThemeEmbedKind::Pdf),
+        "xlsx" => Some(ThemeEmbedKind::Spreadsheet),
+        _ => None,
+    }
+}
+
+/// Say, face by face, whether an export would embed the font file or only write
+/// its name, and why.
+///
+/// The answer comes from the same decision the exporter makes, but nothing is
+/// read out of the blob store, so it stays cheap enough to open from a table row
+/// and it still answers when a face cannot be produced. The document's own read
+/// token is the audience — this names the same faces, sizes and license flags
+/// `GET /v1/documents/{id}/theme` already shows it — and the operator token reads
+/// it as well, because telling someone why the downloaded file has no Chinese
+/// font is the management console's job.
+///
+/// A document with no theme pinned answers an empty list rather than 404:
+/// carrying no managed theme *is* the answer, and the export really does fall
+/// back to the faces the document brings.
+async fn document_font_plan(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    Query(query): Query<FontPlanQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let kind = query.kind.trim();
+    let Some(kind_id) = embed_kind(kind) else {
+        return Err(bad(format!(
+            "unknown font plan kind {kind}; ask for docx, pptx, pdf or xlsx"
+        )));
+    };
+    authorize_theme_read(&state, &headers, &id)?;
+    let bundle = open(&state, &id)?;
     let head = bundle.manifest().map_err(internal)?;
-    let revision = query.revision.unwrap_or(head.revision);
-    if revision > head.revision {
-        return Err(bad("revision ahead of head"));
-    }
-    if format == "hcd" && revision != head.revision {
-        return Err(bad(
-            "portable HCD includes history through the current revision",
-        ));
-    }
-    if !matches!(
-        format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "hcd"
-    ) {
-        return Err(bad("unsupported export format"));
-    }
-    let ticket = uuid::Uuid::new_v4().to_string();
-    let mut downloads = state.downloads.lock().await;
-    downloads.retain(|_, item| item.expires_at > Instant::now());
-    if downloads.len() >= 256 {
-        return Err(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many pending downloads".to_string(),
-        ));
-    }
-    downloads.insert(
-        ticket.clone(),
-        DownloadTicket {
-            document_id: id.clone(),
-            format: format.clone(),
-            query: ExportQuery {
-                revision: Some(revision),
-                source: query.source,
-            },
-            expires_at: Instant::now() + Duration::from_secs(300),
-        },
-    );
+    let (manifest, revision) = manifest_at_revision(&bundle, &head, query.revision).map_err(bad)?;
+    let entries =
+        theme_font_report(&state.catalog, &bundle, Some(revision), kind_id).map_err(hcd_error)?;
     Ok(Json(json!({
-        "url": format!("/v1/downloads/{ticket}"),
-        "filename": format!("{id}-r{revision}.{format}"),
+        "documentId": id,
+        "revision": revision,
+        "themeRevisionId": manifest.theme_revision_id,
+        "kind": kind,
+        // The line the exporter warns on, answered from the Rust constant, so a
+        // page never has to guess how soon "soon" is.
+        "licenseWarnWindowDays": LICENSE_WARN_WINDOW_DAYS,
+        "entries": entries,
+        // Only a PDF carries somebody else's rendered text for a pin to move, so
+        // only a PDF export has a run cost to show before the pin.
+        "textForecast": if kind_id == ThemeEmbedKind::Pdf {
+            pdf_text_forecast_payload(&state, &id, &bundle, &head, &manifest, revision)
+        } else {
+            Value::Null
+        },
     })))
 }
 
-async fn download_ticket(
-    State(state): State<ServerState>,
-    Path(ticket): Path<String>,
-) -> Result<Response, ApiError> {
-    let download = resolve_download_ticket(&state, &ticket).await?;
-    export_document_inner(state, download.document_id, download.format, download.query).await
+/// How large a stored source the forecast will copy and parse for one request.
+///
+/// A forecast is a whole-file job — the copy, the face embeds and the page walk —
+/// so it is capped well below the 512 MiB an upload accepts. Past the cap the
+/// answer says so instead of stalling the console on a number nobody asked for.
+const MAX_FORECAST_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// What a source-backed PDF export would do to the text the file already carries.
+///
+/// The face list says which files go in; this says how many runs those files
+/// would actually take and which ones stay, in the export's own words
+/// (`hcd_formats::pdf_text_forecast`), so the operator sees the cost of a pin
+/// before committing it rather than in the report afterwards.
+///
+/// The forecast reads the source the server holds, which is the file
+/// `POST /v1/import` stored — a bundle imported from the command line has no
+/// copy here, and inventing "0 runs would move" for it would read as a clean
+/// bill. Every state that is not `ready` names what is missing instead:
+/// `noTheme` (this revision carries no pin), `otherFormat` (the source is not a
+/// PDF), `noSource`, `tooLarge`, `unreadable`, `catalogError` and `unavailable`.
+///
+/// `sourceMatches` says whether the stored file still hashes to what the
+/// manifest recorded. The export would use the stored file either way, so the
+/// forecast runs and counts it, but the page can say the file on disk is not the
+/// one this document was imported from.
+fn pdf_text_forecast_payload(
+    state: &ServerState,
+    id: &str,
+    bundle: &Bundle,
+    head: &hcd_core::HcdManifest,
+    manifest: &hcd_core::HcdManifest,
+    revision: u64,
+) -> Value {
+    let refused =
+        |state_name: &str, message: String| json!({"state": state_name, "message": message});
+    if manifest.theme_revision_id.is_none() {
+        return refused(
+            "noTheme",
+            format!(
+                "revision {revision} carries no managed theme, so the export would leave the PDF's own text on the fonts that drew it"
+            ),
+        );
+    }
+    if head.source.format != "pdf" {
+        return refused(
+            "otherFormat",
+            format!(
+                "this document was imported from {}, which has no rendered PDF text of its own for a theme to re-point",
+                head.source.format
+            ),
+        );
+    }
+    let source = state
+        .root
+        .join("sources")
+        .join(format!("{id}.{}", head.source.format));
+    let Ok(metadata) = std::fs::metadata(&source) else {
+        return refused(
+            "noSource",
+            "this server holds no copy of the document's source PDF — a bundle imported from the command line, for instance, exports from whichever file the caller passes — so the run-by-run cost can only be read from that export's report".to_string(),
+        );
+    };
+    let bytes = metadata.len();
+    if bytes > MAX_FORECAST_SOURCE_BYTES {
+        return refused(
+            "tooLarge",
+            format!(
+                "the stored source PDF is {bytes} bytes, over the {} MiB a font forecast reads per request",
+                MAX_FORECAST_SOURCE_BYTES / (1024 * 1024)
+            ),
+        );
+    }
+    let source_matches = match hash_file(&source) {
+        Ok(hash) => hash == head.source.sha256,
+        Err(error) => {
+            return refused(
+                "unreadable",
+                format!("the stored source PDF could not be read for the font forecast: {error}"),
+            )
+        }
+    };
+
+    let plan = match theme_font_plan(&state.catalog, bundle, Some(revision), ThemeEmbedKind::Pdf) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return refused(
+                "catalogError",
+                format!("the pinned theme could not be resolved for the font forecast: {error}"),
+            )
+        }
+    };
+    let staged = match tempfile::tempdir() {
+        Ok(staged) => staged,
+        Err(error) => {
+            return refused(
+                "unavailable",
+                format!("the font forecast could not be prepared on this server: {error}"),
+            )
+        }
+    };
+    match hcd_formats::pdf_text_forecast(&source, &staged.path().join("forecast.pdf"), &plan) {
+        Ok(forecast) => match serde_json::to_value(forecast) {
+            Ok(mut payload) => {
+                payload["state"] = json!("ready");
+                payload["sourceBytes"] = json!(bytes);
+                payload["sourceMatches"] = json!(source_matches);
+                if !source_matches {
+                    payload["message"] = json!(
+                        "the stored source PDF does not match the digest this document was imported with, so these are the runs of the file on disk"
+                    );
+                }
+                payload
+            }
+            Err(error) => refused(
+                "unreadable",
+                format!("the font forecast could not be reported: {error}"),
+            ),
+        },
+        Err(error) => refused(
+            "unreadable",
+            format!("the stored source PDF could not be read for the font forecast: {error}"),
+        ),
+    }
 }
 
-async fn preview_download_ticket(
-    State(state): State<ServerState>,
-    Path(ticket): Path<String>,
-) -> Result<Response, ApiError> {
-    let download = resolve_download_ticket(&state, &ticket).await?;
-    if download.format != "pdf" {
-        return Err(bad("inline preview supports only PDF downloads"));
+/// Which token may ask what a document's export would carry.
+///
+/// Reading a face list, its size and its license flags is what a document read
+/// token already buys, so the document's own reader stays the primary audience.
+/// The console only holds the operator token, and an operator is the one whoever
+/// asks this question, so that token reads it too. Anything else is refused the
+/// way the theme routes refuse it.
+fn authorize_theme_read(
+    state: &ServerState,
+    headers: &HeaderMap,
+    id: &str,
+) -> Result<(), ApiError> {
+    if authorize_admin(state, headers).is_ok() {
+        return Ok(());
     }
-    let mut response =
-        export_document_inner(state, download.document_id, download.format, download.query).await?;
-    let disposition = response
-        .headers()
-        .get(header::CONTENT_DISPOSITION)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| bad("PDF export has no content disposition"))?
-        .replacen("attachment;", "inline;", 1);
+    authorize(state, headers, id, false)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PinThemeBody {
+    /// The catalog theme to pin. `null` removes the current pin and leaves the
+    /// document on the faces it carries itself. The field must be present: an empty
+    /// `{}` body silently unpinning a document would make a typo destructive.
+    #[serde(deserialize_with = "explicit_theme_pin")]
+    theme_revision_id: Option<String>,
+}
+
+/// Reads `themeRevisionId` so that a string pins, an explicit `null` unpins, and an
+/// absent field is a bad request. Plain `Option<String>` would treat absent and
+/// null alike, and the two mean opposite things here.
+fn explicit_theme_pin<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
+
+async fn pin_theme(
+    State(state): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<PinThemeBody>,
+) -> Result<Json<hcd_core::DocumentThemeResolution>, ApiError> {
+    let claims = authorize_theme(&state, &headers, &id)?;
+    let _guard = state.collaboration_lock.lock().await;
+    let bundle = open(&state, &id)?;
+    // A re-pin of the theme already on the head, or an unpin of a document that
+    // carries nothing, is a no-op the commit path reports with the same revision
+    // number. Those requests are not recorded: the log answers "who changed
+    // what", and a repeated click on an unchanged document changed nothing.
+    let before = bundle.manifest().map_err(internal)?.revision;
+    let expected_revision = headers
+        .get("x-hcd-expected-revision")
+        .map(|value| value.to_str().map_err(bad)?.parse::<u64>().map_err(bad))
+        .transpose()?;
+    let (manifest, action, detail) = match body.theme_revision_id.as_deref() {
+        Some(theme_revision_id) => {
+            let manifest = match expected_revision {
+                Some(expected) => hcd_core::set_document_theme_at_revision(
+                    &state.catalog,
+                    &bundle,
+                    Some(theme_revision_id),
+                    expected,
+                ),
+                None => pin_document_theme(&state.catalog, &bundle, theme_revision_id),
+            }
+            .map_err(hcd_error)?;
+            // The name comes from the catalog, which the pin already proved
+            // resolves; a theme deleted out from under us still leaves the digest.
+            let named = state
+                .catalog
+                .get_theme(theme_revision_id)
+                .map(|theme| format!("「{}」", theme.name))
+                .unwrap_or_default();
+            (
+                manifest,
+                audit_action::DOCUMENT_THEME_PIN,
+                format!("钉上主题{named}（{}）", short_digest(theme_revision_id)),
+            )
+        }
+        None => (
+            match expected_revision {
+                Some(expected) => hcd_core::set_document_theme_at_revision(
+                    &state.catalog,
+                    &bundle,
+                    None,
+                    expected,
+                ),
+                None => unpin_document_theme(&state.catalog, &bundle),
+            }
+            .map_err(hcd_error)?,
+            audit_action::DOCUMENT_THEME_UNPIN,
+            "取消钉版，文档回到自己的样式".to_string(),
+        ),
+    };
+    if manifest.revision != before {
+        record_catalog_audit(
+            &state.catalog,
+            &claims,
+            action,
+            &manifest.document_id,
+            format!("{}，修订 r{before} → r{}", detail, manifest.revision),
+        )?;
+    }
+    if body.theme_revision_id.is_none() {
+        // An unpin leaves nothing to resolve: resolve_document_theme reports a
+        // missing pin as 404, and answering a successful call with that would
+        // make the console show an error for work that is done. Report the new
+        // revision with an empty theme instead.
+        return Ok(Json(hcd_core::DocumentThemeResolution {
+            document_id: manifest.document_id,
+            revision: manifest.revision,
+            theme_revision_id: String::new(),
+            theme: hcd_core::ResolvedTheme {
+                theme_revision_id: String::new(),
+                name: String::new(),
+                css: String::new(),
+                faces: Vec::new(),
+                warnings: Vec::new(),
+            },
+        }));
+    }
+    let resolved =
+        resolve_document_theme(&state.catalog, &bundle, None, |font_id, revision, sha| {
+            document_font_href(&id, font_id, revision, sha)
+        })
+        .map_err(hcd_error)?;
+    Ok(Json(resolved))
+}
+
+async fn document_theme_file(
+    State(state): State<ServerState>,
+    Path((id, sha256)): Path<(String, String)>,
+    Query(query): Query<RevisionQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers, &id, false)?;
+    let bundle = open(&state, &id)?;
+    let resolved = resolve_document_theme(
+        &state.catalog,
+        &bundle,
+        query.revision,
+        |font_id, revision, sha| document_font_href(&id, font_id, revision, sha),
+    )
+    .map_err(hcd_error)?;
+    let face = resolved
+        .theme
+        .faces
+        .iter()
+        .find(|face| face.sha256 == sha256 && face.web_preview)
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::NOT_FOUND,
+                "preview face is not in the pinned theme".to_string(),
+            )
+        })?;
+    let (bytes, format) = state
+        .catalog
+        .read_web_face(
+            &resolved.theme_revision_id,
+            &face.font_id,
+            &face.font_revision_id,
+            &sha256,
+        )
+        .map_err(hcd_error)?;
+    font_response(bytes, format)
+}
+
+async fn theme_revision(
+    State(state): State<ServerState>,
+    Path(theme_revision_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<hcd_core::ResolvedTheme>, ApiError> {
+    authorize_catalog(&state, &headers)?;
+    let theme = state
+        .catalog
+        .resolve(&theme_revision_id, |font_id, revision, sha| {
+            theme_font_href(&theme_revision_id, font_id, revision, sha)
+        })
+        .map_err(hcd_error)?;
+    Ok(Json(theme))
+}
+
+async fn theme_file(
+    State(state): State<ServerState>,
+    Path((theme_revision_id, font_id, font_revision_id, sha256)): Path<(
+        String,
+        String,
+        String,
+        String,
+    )>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize_catalog(&state, &headers)?;
+    let (bytes, format) = state
+        .catalog
+        .read_web_face(&theme_revision_id, &font_id, &font_revision_id, &sha256)
+        .map_err(hcd_error)?;
+    font_response(bytes, format)
+}
+
+fn font_response(bytes: Vec<u8>, format: hcd_core::FontFileFormat) -> Result<Response, ApiError> {
+    let mut response = Response::new(Body::from(bytes));
     response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        disposition.parse().map_err(internal)?,
+        header::CONTENT_TYPE,
+        format.media_type().parse().map_err(internal)?,
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        "private, immutable, max-age=31536000"
+            .parse()
+            .map_err(internal)?,
     );
     Ok(response)
 }
 
-async fn resolve_download_ticket(
-    state: &ServerState,
-    ticket: &str,
-) -> Result<DownloadTicket, ApiError> {
-    let download = state
-        .downloads
-        .lock()
-        .await
-        .get(ticket)
-        .cloned()
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "download link not found".to_string()))?;
-    if download.expires_at <= Instant::now() {
-        state.downloads.lock().await.remove(ticket);
-        return Err(ApiError(
-            StatusCode::GONE,
-            "download link expired".to_string(),
-        ));
-    }
-    Ok(download)
-}
+/// Same-machine font catalog console. The built page is embedded so `hdoc serve`
+/// serves it same-origin and the binary stays self-contained; every call carries
+/// the pasted admin token.
+///
+/// Source: `examples/hdoc/admin-app` (React + Tailwind + shadcn/ui primitives),
+/// built with `npm run build`, which inlines the bundle into this one HTML file.
+/// The checked-in `embed/index.html` is what ships — edit the app and rebuild,
+/// not the built file.
+const CATALOG_ADMIN_HTML: &str = include_str!("../../../examples/hdoc/admin-app/embed/index.html");
 
-async fn export_document(
-    State(state): State<ServerState>,
-    Path((id, format)): Path<(String, String)>,
-    Query(query): Query<ExportQuery>,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    authorize(&state, &headers, &id, false)?;
-    export_document_inner(state, id, format, query).await
-}
-
-async fn export_document_inner(
-    state: ServerState,
-    id: String,
-    format: String,
-    query: ExportQuery,
-) -> Result<Response, ApiError> {
-    let bundle = open(&state, &id)?;
-    let head = bundle.manifest().map_err(internal)?;
-    let requested = query.revision.unwrap_or(head.revision);
-    if requested > head.revision {
-        return Err(bad("revision ahead of head"));
-    }
-    if format == "hcd" && requested != head.revision {
-        return Err(bad(
-            "portable HCD includes history through the current revision",
-        ));
-    }
-    if !matches!(
-        format.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt" | "hcd"
-    ) {
-        return Err(bad("unsupported export format"));
-    }
-    let mime = match format.as_str() {
-        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "pdf" => "application/pdf",
-        "hcd" => "application/zip",
-        "html" => "text/html; charset=utf-8",
-        "md" => "text/markdown; charset=utf-8",
-        _ => "text/plain; charset=utf-8",
-    };
-    let bytes = if format == "hcd" {
-        let temp = tempfile::tempdir().map_err(internal)?;
-        let output = temp.path().join("document.hcd");
-        let bundle_path = bundle.root().to_path_buf();
-        let archive_path = output.clone();
-        tokio::task::spawn_blocking(move || {
-            let snapshot = Bundle::open(bundle_path)?;
-            hcd_core::pack_archive(&snapshot, archive_path)
-        })
-        .await
-        .map_err(internal)?
-        .map_err(bad)?;
-        if tokio::fs::metadata(&output).await.map_err(internal)?.len() > 256 * 1024 * 1024 {
-            return Err(bad("HCD archive exceeds 256 MiB HTTP limit"));
-        }
-        tokio::fs::read(output).await.map_err(internal)?
-    } else if format == "html" {
-        let mut output = Vec::new();
-        let assets = bundle
-            .read_asset_index_for_revision(requested)
-            .map_err(bad)?;
-        let known: HashMap<String, _> = assets
-            .into_iter()
-            .map(|asset| (asset.hash.clone(), asset))
-            .collect();
-        let pattern = Regex::new(r"asset://sha256/([0-9a-f]{64})").map_err(internal)?;
-        let mut cache = HashMap::<String, String>::new();
-        let options = hcd_core::HtmlPresentationOptions {
-            revision: Some(requested),
-            max_output_bytes: 256 * 1024 * 1024,
-            ..Default::default()
-        };
-        hcd_core::render_standalone_html_with_transform(&bundle, &options, &mut output, |html| {
-            let mut transformed = String::with_capacity(html.len());
-            let mut previous = 0;
-            for matched in pattern.captures_iter(html) {
-                let full = matched.get(0).expect("regex match");
-                let hash = matched.get(1).expect("regex hash").as_str();
-                transformed.push_str(&html[previous..full.start()]);
-                if !cache.contains_key(hash) {
-                    let asset = known.get(hash).ok_or_else(|| {
-                        hcd_core::HcdError::InvalidBundle(format!("unknown asset {hash}"))
-                    })?;
-                    if asset.byte_length > 64 * 1024 * 1024 {
-                        return Err(hcd_core::HcdError::ResourceLimit(
-                            "asset exceeds HTML export limit".to_string(),
-                        ));
-                    }
-                    let path = bundle.resolve_href(&asset.href)?;
-                    if hash_file(&path)? != hash {
-                        return Err(hcd_core::HcdError::InvalidBundle(format!(
-                            "asset {hash} hash mismatch"
-                        )));
-                    }
-                    let bytes = std::fs::read(&path)?;
-                    if bytes.len() as u64 != asset.byte_length {
-                        return Err(hcd_core::HcdError::InvalidBundle(format!(
-                            "asset {hash} length mismatch"
-                        )));
-                    }
-                    let mime = match path
-                        .extension()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or_default()
-                    {
-                        "png" => "image/png",
-                        "jpg" | "jpeg" => "image/jpeg",
-                        "gif" => "image/gif",
-                        "webp" => "image/webp",
-                        "svg" => "image/svg+xml",
-                        _ => "application/octet-stream",
-                    };
-                    cache.insert(
-                        hash.to_string(),
-                        format!(
-                            "data:{mime};base64,{}",
-                            base64::engine::general_purpose::STANDARD.encode(bytes)
-                        ),
-                    );
-                }
-                transformed.push_str(&cache[hash]);
-                previous = full.end();
-            }
-            transformed.push_str(&html[previous..]);
-            Ok(transformed)
-        })
-        .map_err(bad)?;
-        output
-    } else {
-        let temp = tempfile::tempdir().map_err(internal)?;
-        let output = temp.path().join(format!("export.{format}"));
-        let mut command = tokio::process::Command::new(std::env::current_exe().map_err(internal)?);
-        command
-            .arg("hdoc")
-            .arg("export")
-            .arg(bundle.root())
-            .arg("--output")
-            .arg(&output)
-            .arg("--revision")
-            .arg(requested.to_string());
-        if query.source.unwrap_or(false) {
-            let source = state
-                .root
-                .join("sources")
-                .join(format!("{id}.{}", head.source.format));
-            if !source.is_file() {
-                return Err(bad("immutable source is unavailable"));
-            }
-            command.arg("--source").arg(source);
-        }
-        let result = command.output().await.map_err(internal)?;
-        if !result.status.success() {
-            return Err(bad(format!(
-                "export failed: {}",
-                String::from_utf8_lossy(&result.stderr)
-            )));
-        }
-        let metadata = tokio::fs::metadata(&output).await.map_err(internal)?;
-        if metadata.len() > 256 * 1024 * 1024 {
-            return Err(bad("export exceeds 256 MiB HTTP limit"));
-        }
-        tokio::fs::read(output).await.map_err(internal)?
-    };
-    let mut response = Response::new(Body::from(bytes));
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, mime.parse().map_err(internal)?);
+async fn catalog_admin() -> Result<Response, ApiError> {
+    let mut response = Response::new(Body::from(CATALOG_ADMIN_HTML));
     response.headers_mut().insert(
-        header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{id}-r{requested}.{format}\"")
-            .parse()
-            .map_err(internal)?,
+        header::CONTENT_TYPE,
+        "text/html; charset=utf-8".parse().map_err(internal)?,
     );
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, "no-store".parse().map_err(internal)?);
-    response.headers_mut().insert(
-        header::REFERRER_POLICY,
-        "no-referrer".parse().map_err(internal)?,
-    );
     Ok(response)
+}
+
+fn valid_font_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        && !id.starts_with('-')
+        && !id.ends_with('-')
+}
+
+/// A content-addressed catalog id is a 64-character lowercase hex digest.
+fn valid_digest_hex(id: &str) -> bool {
+    id.len() == 64
+        && id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn parse_font_format(value: &str) -> Result<FontFileFormat, ApiError> {
+    match value {
+        "woff2" => Ok(FontFileFormat::Woff2),
+        "otf" => Ok(FontFileFormat::Otf),
+        "ttf" => Ok(FontFileFormat::Ttf),
+        other => Err(bad(format!("unsupported font format {other}"))),
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogFontEntry {
+    font_id: String,
+    family: String,
+    revisions: Vec<FontRevision>,
+}
+
+async fn catalog_fonts(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<CatalogFontEntry>>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    let mut fonts = Vec::new();
+    for font_id in state.catalog.list_font_ids().map_err(hcd_error)? {
+        let revisions = state.catalog.font_revisions(&font_id).map_err(hcd_error)?;
+        let family = revisions
+            .first()
+            .map(|revision| revision.family.clone())
+            .unwrap_or_default();
+        fonts.push(CatalogFontEntry {
+            font_id,
+            family,
+            revisions,
+        });
+    }
+    Ok(Json(fonts))
+}
+
+async fn catalog_font(
+    State(state): State<ServerState>,
+    Path(font_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<FontRevision>>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    if !valid_font_id(&font_id) {
+        return Err(bad(
+            "fontId must be 1-64 lowercase letters, digits, or hyphens",
+        ));
+    }
+    Ok(Json(
+        state.catalog.font_revisions(&font_id).map_err(hcd_error)?,
+    ))
+}
+
+async fn catalog_delete_font(
+    State(state): State<ServerState>,
+    Path(font_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<FontDeleteReport>, ApiError> {
+    let claims = authorize_admin(&state, &headers)?;
+    if !valid_font_id(&font_id) {
+        return Err(bad(
+            "fontId must be 1-64 lowercase letters, digits, or hyphens",
+        ));
+    }
+    let report = state.catalog.delete_font(&font_id).map_err(hcd_error)?;
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::FONT_DELETE,
+        &font_id,
+        format!(
+            "删除 {} 个字体修订；{}{}。",
+            report.removed_revisions.len(),
+            if report.removed_blobs.is_empty() {
+                "没有字库失去最后一个引用".to_string()
+            } else {
+                format!("回收 {} 个字库", report.removed_blobs.len())
+            },
+            // The ids are the log's own evidence, so a few are named in full.
+            match report.removed_revisions.len() {
+                0 => String::new(),
+                1 => format!("（修订 {}）", short_digest(&report.removed_revisions[0])),
+                count => format!(
+                    "（含最近的 {}）",
+                    short_digest(&report.removed_revisions[count - 1])
+                ),
+            }
+        ),
+    )?;
+    Ok(Json(report))
+}
+
+async fn catalog_delete_font_revision(
+    State(state): State<ServerState>,
+    Path((font_id, revision)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<FontDeleteReport>, ApiError> {
+    let claims = authorize_admin(&state, &headers)?;
+    if !valid_font_id(&font_id) {
+        return Err(bad(
+            "fontId must be 1-64 lowercase letters, digits, or hyphens",
+        ));
+    }
+    if !valid_digest_hex(&revision) {
+        return Err(bad("fontRevisionId must be a lowercase SHA-256 digest"));
+    }
+    let report = state
+        .catalog
+        .delete_font_revision(&font_id, &revision)
+        .map_err(hcd_error)?;
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::FONT_REVISION_DELETE,
+        &format!("{font_id}/{revision}"),
+        format!(
+            "删除修订 {}；{}。字体其它修订不受影响",
+            short_digest(&revision),
+            if report.removed_blobs.is_empty() {
+                "没有字库失去最后一个引用".to_string()
+            } else {
+                format!(
+                    "回收 {} 个字库（{}）",
+                    report.removed_blobs.len(),
+                    short_digest(&report.removed_blobs[0])
+                )
+            }
+        ),
+    )?;
+    Ok(Json(report))
+}
+
+#[derive(Deserialize)]
+struct BlobQuery {
+    format: String,
+}
+
+async fn catalog_put_blob(
+    State(state): State<ServerState>,
+    Path(font_id): Path<String>,
+    Query(query): Query<BlobQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let claims = authorize_admin(&state, &headers)?;
+    if !valid_font_id(&font_id) {
+        return Err(bad(
+            "fontId must be 1-64 lowercase letters, digits, or hyphens",
+        ));
+    }
+    let format = parse_font_format(&query.format)?;
+    if body.is_empty() {
+        return Err(bad("empty font file"));
+    }
+    match detect_font_format(&body) {
+        Some(detected) if detected == format => {}
+        Some(detected) => {
+            return Err(bad(format!(
+                "font file magic is {} but format={}",
+                detected.media_type(),
+                query.format
+            )))
+        }
+        None => return Err(bad("unrecognized font file; expected woff2, otf, or ttf")),
+    }
+    let sha256 = state
+        .catalog
+        .put_font_bytes(&body, format)
+        .map_err(hcd_error)?;
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::FONT_BYTES_PUT,
+        &font_id,
+        format!(
+            "存入字库 {sha256}（{} 字节，{}）；同一摘要的重复上传不增加字节",
+            body.len(),
+            query.format
+        ),
+    )?;
+    Ok(Json(json!({
+        "sha256": sha256,
+        "byteLength": body.len(),
+        "format": query.format,
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct UploadedFace {
+    subfamily: String,
+    weight: u16,
+    style: FontStyle,
+    stretch: FontStretch,
+    scripts: Vec<FontScript>,
+    format: FontFileFormat,
+    sha256: String,
+    byte_length: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NewFontRevisionBody {
+    family: String,
+    faces: Vec<UploadedFace>,
+    license: FontLicense,
+}
+
+async fn catalog_put_font_revision(
+    State(state): State<ServerState>,
+    Path(font_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<NewFontRevisionBody>,
+) -> Result<Json<FontRevision>, ApiError> {
+    let claims = authorize_admin(&state, &headers)?;
+    if !valid_font_id(&font_id) {
+        return Err(bad(
+            "fontId must be 1-64 lowercase letters, digits, or hyphens",
+        ));
+    }
+    let family = body.family;
+    let revision = FontRevision {
+        schema_version: FONT_CATALOG_SCHEMA.to_string(),
+        font_id: font_id.clone(),
+        font_revision_id: String::new(),
+        family: family.clone(),
+        faces: body
+            .faces
+            .into_iter()
+            .map(|face| FontFace {
+                family: family.clone(),
+                subfamily: face.subfamily,
+                weight: face.weight,
+                style: face.style,
+                stretch: face.stretch,
+                scripts: face.scripts,
+                format: face.format,
+                sha256: face.sha256,
+                byte_length: face.byte_length,
+            })
+            .collect(),
+        license: body.license,
+    };
+    let stored = state
+        .catalog
+        .put_font_revision(&revision)
+        .map_err(hcd_error)?;
+    let license = format!(
+        "许可证 {}（网页预览{}，docx/pptx{}，pdf{}，再分发{}{}）",
+        stored.license.name,
+        if stored.license.web_preview {
+            "可"
+        } else {
+            "不可"
+        },
+        if stored.license.ooxml_embed {
+            "可"
+        } else {
+            "不可"
+        },
+        if stored.license.pdf_embed {
+            "可"
+        } else {
+            "不可"
+        },
+        if stored.license.redistribution {
+            "可"
+        } else {
+            "不可"
+        },
+        match stored.license.expires_at_epoch_ms {
+            Some(expires) => format!("，到期 {expires}"),
+            None => String::new(),
+        }
+    );
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::FONT_REVISION_PUT,
+        &font_id,
+        format!(
+            "登记修订 {}，字族「{}」，{} 个 face；{license}",
+            short_digest(&stored.font_revision_id),
+            stored.family,
+            stored.faces.len()
+        ),
+    )?;
+    Ok(Json(stored))
+}
+
+/// First and last characters of a digest, for a log line a human reads.
+fn short_digest(value: &str) -> String {
+    if value.chars().count() <= 16 {
+        return value.to_string();
+    }
+    let head: String = value.chars().take(8).collect();
+    let tail: String = value
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{head}…{tail}")
+}
+
+async fn catalog_themes(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ThemeRevision>>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    Ok(Json(state.catalog.list_themes().map_err(hcd_error)?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NewThemeBody {
+    name: String,
+    major: ThemeFontSlots,
+    minor: ThemeFontSlots,
+    fallback_families: Vec<String>,
+}
+
+async fn catalog_put_theme(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(body): Json<NewThemeBody>,
+) -> Result<Json<ThemeRevision>, ApiError> {
+    let claims = authorize_admin(&state, &headers)?;
+    let theme = ThemeRevision {
+        schema_version: THEME_SCHEMA.to_string(),
+        theme_revision_id: String::new(),
+        name: body.name,
+        major: body.major,
+        minor: body.minor,
+        fallback_families: body.fallback_families,
+    };
+    let theme_revision_id = state.catalog.put_theme(&theme).map_err(hcd_error)?;
+    let stored = state
+        .catalog
+        .get_theme(&theme_revision_id)
+        .map_err(hcd_error)?;
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::THEME_PUT,
+        &theme_revision_id,
+        format!(
+            "保存主题「{}」为修订 {}；标题槽位 {}，正文槽位 {}，回退 {}",
+            stored.name,
+            short_digest(&theme_revision_id),
+            slot_count(&stored.major),
+            slot_count(&stored.minor),
+            if stored.fallback_families.is_empty() {
+                "无".to_string()
+            } else {
+                stored.fallback_families.join(" / ")
+            }
+        ),
+    )?;
+    Ok(Json(stored))
+}
+
+/// How many script slots a theme pair fills.
+fn slot_count(slots: &ThemeFontSlots) -> usize {
+    [&slots.latin, &slots.east_asia, &slots.bidi]
+        .into_iter()
+        .flatten()
+        .count()
+}
+
+async fn catalog_retired_themes(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<String>>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    Ok(Json(
+        state.catalog.list_retired_theme_ids().map_err(hcd_error)?,
+    ))
+}
+
+async fn catalog_retire_theme(
+    State(state): State<ServerState>,
+    Path(theme_revision_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let claims = authorize_admin(&state, &headers)?;
+    if !valid_digest_hex(&theme_revision_id) {
+        return Err(bad("themeRevisionId must be a lowercase SHA-256 digest"));
+    }
+    // Read before the change: a later build could refuse, and only the name
+    // already fetched is safe to quote in the record.
+    let name = state
+        .catalog
+        .get_theme(&theme_revision_id)
+        .map_err(hcd_error)?
+        .name;
+    // Asked before the change, so a repeat call can say it changed nothing.
+    let was_retired = state
+        .catalog
+        .is_theme_retired(&theme_revision_id)
+        .map_err(hcd_error)?;
+    state
+        .catalog
+        .retire_theme(&theme_revision_id)
+        .map_err(hcd_error)?;
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::THEME_RETIRE,
+        &theme_revision_id,
+        format!(
+            "退役主题「{}」（{}）；已钉住它的文档仍可正常解析，新钉版会被拒绝{}",
+            name,
+            short_digest(&theme_revision_id),
+            if was_retired {
+                "；此前已是退役状态，本次没有改变"
+            } else {
+                ""
+            }
+        ),
+    )?;
+    Ok(Json(json!({
+        "themeRevisionId": theme_revision_id,
+        "retired": true,
+    })))
+}
+
+async fn catalog_unretire_theme(
+    State(state): State<ServerState>,
+    Path(theme_revision_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let claims = authorize_admin(&state, &headers)?;
+    if !valid_digest_hex(&theme_revision_id) {
+        return Err(bad("themeRevisionId must be a lowercase SHA-256 digest"));
+    }
+    let was_retired = state
+        .catalog
+        .is_theme_retired(&theme_revision_id)
+        .map_err(hcd_error)?;
+    state
+        .catalog
+        .unretire_theme(&theme_revision_id)
+        .map_err(hcd_error)?;
+    // The theme may already be deleted, so the name is best effort: the record
+    // must still be written for a state change nobody can name any more.
+    let name = state.catalog.get_theme(&theme_revision_id).ok();
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::THEME_UNRETIRE,
+        &theme_revision_id,
+        format!(
+            "取消退役{}（{}）；该主题可以重新被钉到文档上{}",
+            match &name {
+                Some(theme) => format!("主题「{}」", theme.name),
+                None => "一个目录里已经没有记录的主题".to_string(),
+            },
+            short_digest(&theme_revision_id),
+            if was_retired {
+                ""
+            } else {
+                "；此前并没有退役，本次没有改变"
+            }
+        ),
+    )?;
+    Ok(Json(json!({
+        "themeRevisionId": theme_revision_id,
+        "retired": false,
+    })))
+}
+
+/// Content side of the catalog: every bundle in this service's document root,
+/// with the theme its head pins. A document read token only covers one document
+/// (`claims.doc` must equal the id), so an operator with the admin token has no
+/// way to see what the catalog changes actually reached without this listing.
+async fn catalog_documents(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<DocumentSummary>>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    Ok(Json(list_documents(&state.root).map_err(hcd_error)?))
+}
+
+/// Which documents pin this theme. The scan covers this service's own document
+/// root only — head pins and revision history both count — so an empty answer
+/// means "unreachable from the documents stored here", not "unused everywhere".
+async fn catalog_theme_documents(
+    State(state): State<ServerState>,
+    Path(theme_revision_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ThemeDocumentRef>>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    if !valid_digest_hex(&theme_revision_id) {
+        return Err(bad("themeRevisionId must be a lowercase SHA-256 digest"));
+    }
+    Ok(Json(
+        theme_documents(&state.root, &theme_revision_id).map_err(hcd_error)?,
+    ))
+}
+
+/// Drop a theme revision outright. Retirement only stops new pins; this is the
+/// step that removes the theme, and it is refused with 422 while any document
+/// here still reaches it, naming those documents.
+async fn catalog_delete_theme(
+    State(state): State<ServerState>,
+    Path(theme_revision_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let claims = authorize_admin(&state, &headers)?;
+    if !valid_digest_hex(&theme_revision_id) {
+        return Err(bad("themeRevisionId must be a lowercase SHA-256 digest"));
+    }
+    // Read the name first: after the delete there is nothing left to ask.
+    let name = state
+        .catalog
+        .get_theme(&theme_revision_id)
+        .map_err(hcd_error)?
+        .name;
+    state
+        .catalog
+        .delete_theme(&theme_revision_id, &state.root)
+        .map_err(hcd_error)?;
+    record_catalog_audit(
+        &state.catalog,
+        &claims,
+        audit_action::THEME_DELETE,
+        &theme_revision_id,
+        format!(
+            "彻底删除主题「{}」（{}）；删除前本服务的文档目录里没有文档钉住它，它引用的字体与字库保持不变",
+            name,
+            short_digest(&theme_revision_id)
+        ),
+    )?;
+    Ok(Json(json!({
+        "themeRevisionId": theme_revision_id,
+        "deleted": true,
+    })))
+}
+
+#[derive(Deserialize)]
+struct AuditQuery {
+    limit: Option<usize>,
+    /// Inclusive first UTC day, `YYYY-MM-DD`.
+    from: Option<String>,
+    /// Inclusive last UTC day, `YYYY-MM-DD`.
+    to: Option<String>,
+}
+
+/// The catalog operation log: who uploaded or deleted a font, who retired or
+/// deleted a theme, who pinned or unpinned a document. Newest first.
+///
+/// The log only ever records what this service did through these routes; it is
+/// admin-only because it names documents and operators.
+///
+/// `from` and `to` are inclusive UTC days, so `?from=&to=` answers "what
+/// happened last week" without paging by hand. An empty bound is an open one —
+/// a query string the browser left half-filled — but a bound that does not name
+/// a real day is refused with 400 rather than treated as open: `from=2026-02-30`
+/// matches no day file, and answering "nothing happened" to that would be a
+/// false statement about the past. The same goes for `from` after `to`.
+async fn catalog_audit(
+    State(state): State<ServerState>,
+    Query(query): Query<AuditQuery>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_admin(&state, &headers)?;
+    let limit = query.limit.unwrap_or(100).clamp(1, MAX_AUDIT_LIMIT);
+    let from = query.from.filter(|value| !value.trim().is_empty());
+    let to = query.to.filter(|value| !value.trim().is_empty());
+    for (name, bound) in [("from", &from), ("to", &to)] {
+        if let Some(day) = bound {
+            if !hcd_core::is_audit_calendar_day(day) {
+                return Err(bad(format!(
+                    "audit {name} must name a real UTC day as YYYY-MM-DD, got {day}"
+                )));
+            }
+        }
+    }
+    if let (Some(first), Some(last)) = (&from, &to) {
+        if first > last {
+            return Err(bad(format!("audit window from {first} is after to {last}")));
+        }
+    }
+    let page = state
+        .catalog
+        .audit_entries_in(
+            hcd_core::AuditWindow {
+                from: from.as_deref(),
+                to: to.as_deref(),
+            },
+            limit,
+        )
+        .map_err(hcd_error)?;
+    Ok(Json(json!({
+        "entries": page.entries,
+        "unreadable": page.unreadable,
+        // Older lines inside the window that this page did not return, as
+        // opposed to `unreadable`: those exist, they were just not read.
+        "truncated": page.truncated,
+        "limit": limit,
+        "from": from,
+        "to": to,
+    })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hcd_core::FontRef;
+
+    #[test]
+    fn checkpoint_authors_require_the_sidecar_and_valid_identity() {
+        use base64::Engine;
+        let actor = |id: &str| -> Claims {
+            serde_json::from_value(json!({
+                "doc":"example", "scope":"write", "sub":id, "name":"Original",
+                "aud":"hcd-core", "iat":0, "exp":1
+            }))
+            .unwrap()
+        };
+        let mut headers = HeaderMap::new();
+        let guest = json!({"id":"host-guest-7f2a", "name":"访客 7F2A"});
+        headers.insert(
+            "x-hcd-checkpoint-author",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&guest).unwrap())
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            checkpoint_author(actor("ordinary-editor"), &headers)
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        let accepted = checkpoint_author(actor("hcd-collaboration"), &headers).unwrap();
+        assert_eq!(accepted.sub.as_deref(), Some("host-guest-7f2a"));
+        assert_eq!(accepted.name.as_deref(), Some("访客 7F2A"));
+        for value in [
+            json!({"id":"", "name":"Visitor"}),
+            json!({"id":"guest", "name":"bad\nname"}),
+            json!({"id":"guest", "name":"Visitor", "scope":"admin"}),
+        ] {
+            headers.insert(
+                "x-hcd-checkpoint-author",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(&value).unwrap())
+                    .parse()
+                    .unwrap(),
+            );
+            assert_eq!(
+                checkpoint_author(actor("hcd-collaboration"), &headers)
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let unchanged = checkpoint_author(actor("hcd-collaboration"), &HeaderMap::new()).unwrap();
+        assert_eq!(unchanged.sub.as_deref(), Some("hcd-collaboration"));
+    }
+
+    const TTF: &[u8] = b"\x00\x01\x00\x00glyh font";
+
+    async fn export_plan(
+        state: &ServerState,
+        secret: &[u8],
+        id: &str,
+        revision: Option<u64>,
+    ) -> Value {
+        serde_json::to_value(
+            exports::capabilities(
+                State(state.clone()),
+                Path(id.into()),
+                Query(exports::ExportQuery {
+                    revision,
+                    ..Default::default()
+                }),
+                bearer(secret, id, "read"),
+            )
+            .await
+            .unwrap()
+            .0,
+        )
+        .unwrap()
+    }
+
+    fn export_fixture(state: &ServerState, id: &str, fixture: &str) -> (Bundle, PathBuf) {
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(fixture);
+        let extension = source.extension().unwrap().to_str().unwrap();
+        std::fs::create_dir_all(state.root.join("sources")).unwrap();
+        let stored = state.root.join("sources").join(format!("{id}.{extension}"));
+        std::fs::copy(source, &stored).unwrap();
+        hcd_formats::import_document(
+            &stored,
+            state.root.join(format!("{id}.hcd")),
+            &hcd_formats::ImportOptions::new(id),
+            |_| Ok(()),
+        )
+        .unwrap();
+        (open(state, id).unwrap(), stored)
+    }
+
+    #[tokio::test]
+    async fn semantic_node_edits_round_trip_html_markdown_and_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"semantic-node-formats-test-secret-012345";
+        let state = test_state(secret, temp.path());
+        for (format, text) in [
+            ("html", "<!doctype html><html><body><p>Editable text</p><table><tr><td>Cell</td></tr></table></body></html>"),
+            ("md", "# Title\n\nEditable text\n"),
+            ("txt", "Editable text\n"),
+        ] {
+            let id = format!("semantic-{format}");
+            let source = temp.path().join(format!("source.{format}"));
+            std::fs::write(&source, text).unwrap();
+            hcd_formats::import_document(&source, temp.path().join(format!("{id}.hcd")),
+                &hcd_formats::ImportOptions::new(&id), |_| Ok(())).unwrap();
+            let bundle = open(&state, &id).unwrap();
+            let projection = editor_projection(&bundle, None).unwrap();
+            let node_id = projection.blocks.iter().flat_map(|block| &block.content.inlines)
+                .find(|inline| inline.text == "Editable text").unwrap().node_id.as_ref().unwrap();
+            let node = hcd_core::get_text_node(&bundle, node_id).unwrap();
+            let mut headers = bearer_as(secret, &id, "write", Some("format-agent"), None);
+            headers.insert("x-hcd-collaboration-epoch", "0".parse().unwrap());
+            headers.insert("x-hcd-agent-edit", "true".parse().unwrap());
+            let patch = serde_json::from_value(json!({
+                "schemaVersion":"hcd-patch/1", "documentId":id, "patchId":"mapped-text-edit",
+                "baseRevision":projection.revision,
+                "operations":[{"op":"text.splice", "nodeId":node_id, "start":0,
+                    "deleteCount":0,"insertText":"协同🙂 ","precondition":{"nodeHash":node.node.node_hash}}]
+            })).unwrap();
+            let _ = node_patch(State(state.clone()), Path(id.clone()), headers, Json(patch)).await.unwrap();
+            assert_eq!(collaboration_epoch(&state, &id).await.unwrap(), 1);
+            let output = temp.path().join(format!("edited.{format}"));
+            hcd_formats::export_document(bundle.root(), &source, &output, &hcd_formats::ExportOptions::default()).unwrap();
+            assert!(std::fs::read_to_string(&output).unwrap().contains("协同🙂 Editable text"));
+            assert_eq!(std::fs::read_to_string(&source).unwrap(), text);
+            let reimported = temp.path().join(format!("{id}-reopened.hcd"));
+            hcd_formats::import_document(&output, &reimported, &hcd_formats::ImportOptions::new(format!("reopened-{format}")), |_| Ok(())).unwrap();
+            assert!(hcd_core::validate_bundle(&Bundle::open(reimported).unwrap()).unwrap().valid);
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_table_node_edits_preserve_source_and_guard_collaborators() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"semantic-table-test-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let id = "table-edit";
+        let (bundle, source) = export_fixture(
+            &state,
+            id,
+            "examples/hdoc/editor/e2e/fixtures/word-page-layout.docx",
+        );
+        project_editor(&bundle, 0).unwrap();
+        let original = editor_projection(&bundle, None).unwrap();
+        let table = original
+            .blocks
+            .iter()
+            .find(|block| {
+                block
+                    .read_only_html
+                    .as_ref()
+                    .is_some_and(|html| html.contains("<table"))
+            })
+            .unwrap();
+        let node_id = table.content.inlines[0].node_id.as_ref().unwrap();
+        let node = hcd_core::get_text_node(&bundle, node_id).unwrap();
+        let headers = |scope, user, epoch: u64| {
+            let mut headers = bearer_as(secret, id, scope, Some(user), None);
+            headers.insert(
+                "x-hcd-collaboration-epoch",
+                epoch.to_string().parse().unwrap(),
+            );
+            headers
+        };
+        let make_patch = || {
+            serde_json::from_value(json!({
+                "schemaVersion":"hcd-patch/1", "documentId":id, "patchId":"table-text",
+                "baseRevision":original.revision,
+                "operations":[{"op":"text.splice", "nodeId":node_id,
+                    "start":node.node.text.chars().count(),"deleteCount":0,"insertText":"🙂已更新",
+                    "precondition":{"nodeHash":node.node.node_hash}}]
+            }))
+            .unwrap()
+        };
+        for scope in ["read", "wrong-document"] {
+            let auth = if scope == "read" {
+                headers("read", "reader", 0)
+            } else {
+                bearer(secret, "other-doc", "write")
+            };
+            assert_eq!(
+                node_patch(
+                    State(state.clone()),
+                    Path(id.into()),
+                    auth,
+                    Json(make_patch())
+                )
+                .await
+                .unwrap_err()
+                .0,
+                StatusCode::FORBIDDEN
+            );
+        }
+        for (dirty, sequence) in [(true, 1), (false, 2)] {
+            let _ = collaboration_pending(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "hcd-collaboration", 0),
+                Json(PendingCollaboration { dirty, sequence }),
+            )
+            .await
+            .unwrap();
+            if dirty {
+                assert_eq!(
+                    node_patch(
+                        State(state.clone()),
+                        Path(id.into()),
+                        headers("write", "human", 0),
+                        Json(make_patch())
+                    )
+                    .await
+                    .unwrap_err()
+                    .0,
+                    StatusCode::CONFLICT
+                );
+                assert_eq!(bundle.manifest().unwrap().revision, original.revision);
+            }
+        }
+        let mut stale_hash: hcd_core::PatchBatch = make_patch();
+        if let hcd_core::PatchOperation::TextSplice { precondition, .. } =
+            &mut stale_hash.operations[0]
+        {
+            precondition.node_hash = "0".repeat(64);
+        }
+        assert_eq!(
+            node_patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "human", 0),
+                Json(stale_hash)
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::PRECONDITION_FAILED
+        );
+        assert_eq!(collaboration_epoch(&state, id).await.unwrap(), 0);
+        let (a, b) = tokio::join!(
+            node_patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "agent-a", 0),
+                Json(make_patch())
+            ),
+            node_patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "agent-b", 0),
+                Json(make_patch())
+            ),
+        );
+        assert_ne!(a.is_ok(), b.is_ok());
+        assert_eq!(a.err().or(b.err()).unwrap().0, StatusCode::CONFLICT);
+        assert_eq!(collaboration_epoch(&state, id).await.unwrap(), 1);
+        let current = editor_projection(&bundle, None).unwrap();
+        assert_eq!(current.revision, original.revision + 1);
+        assert_eq!(current.blocks.len(), original.blocks.len());
+        assert!(current.blocks.iter().any(|block| block
+            .read_only_html
+            .as_ref()
+            .is_some_and(|html| html.contains("🙂已更新"))));
+        let stale_snapshot = SnapshotRequest {
+            expected_revision: current.revision,
+            blocks: original
+                .blocks
+                .iter()
+                .filter(|block| block.region == "body")
+                .map(|block| SnapshotBlock {
+                    block_id: Some(block.block_id.clone()),
+                    content: block.content.clone(),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            checkpoint(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "human", 0),
+                Json(stale_snapshot)
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::CONFLICT
+        );
+        let output = temp.path().join("edited.docx");
+        let source_before = std::fs::read(&source).unwrap();
+        hcd_formats::export_document(
+            bundle.root(),
+            &source,
+            &output,
+            &hcd_formats::ExportOptions::default(),
+        )
+        .unwrap();
+        let source_package = oxml::OxmlPackage::open(source.to_str().unwrap(), false).unwrap();
+        let output_package = oxml::OxmlPackage::open(output.to_str().unwrap(), false).unwrap();
+        assert_eq!(
+            source_package.list_parts().len(),
+            output_package.list_parts().len()
+        );
+        for part in source_package.list_parts() {
+            let before = source_package.read_part_bytes(part).unwrap();
+            let after = output_package.read_part_bytes(part).unwrap();
+            if part.trim_start_matches('/') == "word/document.xml" {
+                let expected = String::from_utf8(before.clone()).unwrap().replacen(
+                    &format!(">{}<", node.node.text),
+                    &format!(">{}🙂已更新<", node.node.text),
+                    1,
+                );
+                assert_eq!(String::from_utf8(after.clone()).unwrap(), expected);
+            } else {
+                assert_eq!(before, after, "unmodified part {part}");
+            }
+        }
+        assert_eq!(std::fs::read(source).unwrap(), source_before);
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[tokio::test]
+    async fn table_structure_edits_guard_human_drafts_epochs_and_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"table-structure-test-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let id = "table-structure";
+        let (bundle, _) = export_fixture(
+            &state,
+            id,
+            "examples/hdoc/editor/e2e/fixtures/word-table-edit.docx",
+        );
+        project_editor(&bundle, 0).unwrap();
+        let original = editor_projection(&bundle, None).unwrap();
+        let table = original
+            .blocks
+            .iter()
+            .find(|block| {
+                block
+                    .read_only_html
+                    .as_ref()
+                    .is_some_and(|html| html.contains("<table"))
+            })
+            .unwrap();
+        let headers = |scope, user, epoch: u64| {
+            let mut headers = bearer_as(secret, id, scope, Some(user), None);
+            headers.insert(
+                "x-hcd-collaboration-epoch",
+                epoch.to_string().parse().unwrap(),
+            );
+            headers
+        };
+        let make_patch = || StructurePatchBatch {
+            schema_version: "hcd-patch/4".into(),
+            document_id: id.into(),
+            patch_id: "table-row".into(),
+            base_revision: original.revision,
+            operations: vec![hcd_core::StructureOperation::TableEdit {
+                block_id: table.block_id.clone(),
+                table_index: 0,
+                action: hcd_core::TableEditAction::InsertRow,
+                index: 1,
+                precondition: hcd_core::BlockPrecondition {
+                    block_hash: table.block_hash.clone(),
+                },
+            }],
+        };
+        assert_eq!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("read", "reader", 0),
+                Json(make_patch())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let _ = collaboration_pending(
+            State(state.clone()),
+            Path(id.into()),
+            headers("write", "hcd-collaboration", 0),
+            Json(PendingCollaboration {
+                dirty: true,
+                sequence: 1,
+            }),
+        )
+        .await
+        .unwrap();
+        // Human table controls use the same draft fence as Agents.
+        assert_eq!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "human", 0),
+                Json(make_patch())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, original.revision);
+        let _ = collaboration_pending(
+            State(state.clone()),
+            Path(id.into()),
+            headers("write", "hcd-collaboration", 0),
+            Json(PendingCollaboration {
+                dirty: false,
+                sequence: 2,
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = patch(
+            State(state.clone()),
+            Path(id.into()),
+            headers("write", "human", 0),
+            Json(make_patch()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(collaboration_epoch(&state, id).await.unwrap(), 1);
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
+        assert_eq!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "human", 0),
+                Json(make_patch())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::CONFLICT
+        );
+        let current = editor_projection(&bundle, None).unwrap();
+        let current_table = current
+            .blocks
+            .iter()
+            .find(|block| block.block_id == table.block_id)
+            .unwrap();
+        assert_eq!(
+            current_table.editable_text_node_ids.len(),
+            table.editable_text_node_ids.len() + 2
+        );
+        let cells_patch = || StructurePatchBatch {
+            schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_67.into(),
+            document_id: id.into(),
+            patch_id: "guarded-cell-merge".into(),
+            base_revision: current.revision,
+            operations: vec![hcd_core::StructureOperation::TableCellsMerge {
+                block_id: current_table.block_id.clone(),
+                table_index: 0,
+                range: hcd_core::TableCellRange {
+                    row: 0,
+                    column: 0,
+                    rows: 1,
+                    columns: 2,
+                },
+                precondition: hcd_core::BlockPrecondition {
+                    block_hash: current_table.block_hash.clone(),
+                },
+            }],
+        };
+        assert_eq!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("read", "reader", 1),
+                Json(cells_patch())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let _ = collaboration_pending(
+            State(state.clone()),
+            Path(id.into()),
+            headers("write", "hcd-collaboration", 1),
+            Json(PendingCollaboration {
+                dirty: true,
+                sequence: 3,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "human", 1),
+                Json(cells_patch())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, current.revision);
+        let _ = collaboration_pending(
+            State(state.clone()),
+            Path(id.into()),
+            headers("write", "hcd-collaboration", 1),
+            Json(PendingCollaboration {
+                dirty: false,
+                sequence: 4,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("write", "human", 0),
+                Json(cells_patch())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::CONFLICT
+        );
+        let _ = patch(
+            State(state.clone()),
+            Path(id.into()),
+            headers("write", "human", 1),
+            Json(cells_patch()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(collaboration_epoch(&state, id).await.unwrap(), 2);
+        assert!(hcd_core::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[tokio::test]
+    async fn word_pages_are_authorized_revision_pinned_and_do_not_mutate_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"word-pages-test-secret-012345678901";
+        let state = test_state(secret, temp.path());
+        let id = "word-pages";
+        let (bundle, _) = export_fixture(
+            &state,
+            id,
+            "examples/hdoc/editor/e2e/fixtures/word-page-layout.docx",
+        );
+        let manifest = bundle.manifest().unwrap();
+        let chunk = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let map = bundle.read_map(chunk).unwrap();
+        let node = map
+            .entries
+            .iter()
+            .find(|node| node.source.editable)
+            .unwrap();
+        let patch = serde_json::from_value(json!({
+            "schemaVersion":"hcd-patch/1", "documentId":id, "patchId":"pages-revision", "baseRevision":0,
+            "operations":[{"op":"text.splice", "nodeId":node.node_id, "start":0, "deleteCount":0,
+                "insertText":"New revision ", "precondition":{"nodeHash":node.node_hash}}]
+        })).unwrap();
+        apply_patch(&bundle, &patch, 0).unwrap();
+        let before = bundle.manifest().unwrap();
+        for (revision, changed) in [(Some(0), false), (Some(1), true), (None, true)] {
+            let response = word_presentation(
+                State(state.clone()),
+                Path(id.into()),
+                Query(RevisionQuery { revision }),
+                bearer(secret, id, "read"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "text/html; charset=utf-8"
+            );
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let bytes = axum::body::to_bytes(response.into_body(), 32 * 1024 * 1024)
+                .await
+                .unwrap();
+            let html = std::str::from_utf8(&bytes).unwrap();
+            assert_eq!(html.contains("New revision COVER TITLE"), changed);
+            assert!(html.contains("hcd-docx-virtual-pages"));
+            assert!(html.contains("data-hcd-section=\"1\""));
+        }
+        assert_eq!(
+            serde_json::to_value(bundle.manifest().unwrap()).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        for (headers, expected) in [
+            (HeaderMap::new(), StatusCode::UNAUTHORIZED),
+            (
+                bearer(secret, "another-document", "read"),
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            assert_eq!(
+                word_presentation(
+                    State(state.clone()),
+                    Path(id.into()),
+                    Query(RevisionQuery { revision: None }),
+                    headers
+                )
+                .await
+                .err()
+                .unwrap()
+                .0,
+                expected
+            );
+        }
+        assert!(word_presentation(
+            State(state.clone()),
+            Path(id.into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            bearer(secret, id, "read")
+        )
+        .await
+        .is_err());
+        imported_bundle_from(
+            &temp.path().join("non-word.hcd"),
+            "non-word",
+            None,
+            "txt",
+            "ab".repeat(32),
+            1,
+        );
+        assert_eq!(
+            word_presentation(
+                State(state),
+                Path("non-word".into()),
+                Query(RevisionQuery { revision: None }),
+                bearer(secret, "non-word", "read")
+            )
+            .await
+            .err()
+            .unwrap()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn export_capabilities_detect_missing_and_mismatched_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"export-test-secret-01234567890123456";
+        let state = test_state(secret, temp.path());
+        let id = "export-workbook";
+        let (_, source) = export_fixture(&state, id, "assets/showcase/gradebook.xlsx");
+        let plan = export_plan(&state, secret, id, None).await;
+        assert_eq!(plan["sourceFormat"], "xlsx");
+        let workbook = |plan: &Value| {
+            plan["formats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["format"] == "xlsx")
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(workbook(&plan)["recommendedMode"], "source");
+        assert_eq!(workbook(&plan)["modes"][0]["available"], true);
+        std::fs::write(&source, b"different workbook").unwrap();
+        let changed = export_plan(&state, secret, id, None).await;
+        assert_eq!(
+            workbook(&changed)["modes"][0]["reasonCode"],
+            "source_mismatch"
+        );
+        assert_eq!(workbook(&changed)["recommendedMode"], "semantic");
+        std::fs::remove_file(source).unwrap();
+        let missing = export_plan(&state, secret, id, None).await;
+        assert_eq!(workbook(&missing)["available"], true);
+        assert_eq!(
+            workbook(&missing)["modes"][0]["reasonCode"],
+            "source_missing"
+        );
+        assert!(exports::capabilities(
+            State(state.clone()),
+            Path(id.into()),
+            Query(exports::ExportQuery {
+                revision: Some(1),
+                ..Default::default()
+            }),
+            bearer(secret, id, "read")
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            exports::capabilities(
+                State(state),
+                Path(id.into()),
+                Query(exports::ExportQuery {
+                    revision: None,
+                    ..Default::default()
+                }),
+                bearer(secret, "other-document", "read")
+            )
+            .await
+            .err()
+            .unwrap()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn export_capabilities_apply_pdf_revision_restrictions_before_ticket_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"export-test-secret-01234567890123456";
+        let state = test_state(secret, temp.path());
+        let id = "export-pdf";
+        let (bundle, _) = export_fixture(&state, id, "examples/test.pdf");
+        let manifest = bundle.manifest().unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let map = bundle.read_map(descriptor).unwrap();
+        let node = map
+            .entries
+            .iter()
+            .find(|node| node.source.editable)
+            .unwrap();
+        let patch = serde_json::from_value(json!({"schemaVersion":"hcd-patch/37","documentId":id,"patchId":"font-selection","baseRevision":0,
+            "operations":[{"op":"text.font","nodeId":node.node_id,"font":{"latin":"Arial"},"precondition":{"nodeHash":node.node_hash}}]})).unwrap();
+        apply_patch(&bundle, &patch, 0).unwrap();
+        let current = export_plan(&state, secret, id, Some(1)).await;
+        let pdf = |plan: &Value| {
+            plan["formats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["format"] == "pdf")
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(pdf(&current)["recommendedMode"], "visual");
+        assert_eq!(
+            pdf(&current)["modes"][0]["reasonCode"],
+            "source_revision_unsupported"
+        );
+        assert_eq!(pdf(&current)["modes"][1]["available"], true);
+        let historical = export_plan(&state, secret, id, Some(0)).await;
+        assert_eq!(pdf(&historical)["modes"][0]["available"], true);
+        assert_eq!(
+            historical["formats"][7]["modes"][0]["reasonCode"],
+            "history_archive_unavailable"
+        );
+        let query = serde_json::from_value(json!({"revision":1,"source":true})).unwrap();
+        assert!(exports::prepare_download(
+            State(state.clone()),
+            Path((id.into(), "pdf".into())),
+            Query(query),
+            bearer(secret, id, "read")
+        )
+        .await
+        .is_err());
+        assert!(state.downloads.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prepared_exports_are_immutable_and_failed_generation_never_issues_a_ticket() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"export-test-secret-01234567890123456";
+        let state = test_state(secret, temp.path());
+        let id = "export-text";
+        std::fs::write(temp.path().join("source.txt"), "Original export text").unwrap();
+        hcd_formats::import_document(
+            temp.path().join("source.txt"),
+            temp.path().join(format!("{id}.hcd")),
+            &hcd_formats::ImportOptions::new(id),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let query =
+            || serde_json::from_value(json!({"revision":0,"filename":"合同 #1.docx"})).unwrap();
+        let ready = exports::prepare_download(
+            State(state.clone()),
+            Path((id.into(), "html".into())),
+            Query(query()),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(ready["bytes"].as_u64().unwrap() > 0);
+        assert_eq!(ready["filename"], "合同 #1.html");
+        let ticket = ready["url"].as_str().unwrap().rsplit('/').next().unwrap();
+        let bundle = open(&state, id).unwrap();
+        project_editor(&bundle, 0).unwrap();
+        let head = bundle.manifest().unwrap();
+        std::fs::remove_file(bundle.resolve_href(&head.styles_href).unwrap()).unwrap();
+        let download = exports::download_ticket(State(state.clone()), Path(ticket.into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            download.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(download.headers()[header::CONTENT_DISPOSITION], "attachment; filename=\"document.html\"; filename*=UTF-8''%E5%90%88%E5%90%8C%20%231.html");
+        let body = axum::body::to_bytes(download.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(std::str::from_utf8(&body)
+            .unwrap()
+            .contains("Original export text"));
+        assert!(exports::prepare_download(
+            State(state.clone()),
+            Path((id.into(), "html".into())),
+            Query(query()),
+            bearer(secret, id, "read")
+        )
+        .await
+        .is_err());
+        assert_eq!(state.downloads.lock().await.len(), 1);
+        assert!(exports::prepare_download(
+            State(state.clone()),
+            Path((id.into(), "csv".into())),
+            Query(query()),
+            bearer(secret, id, "read")
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            exports::preview_download_ticket(State(state), Path(ticket.into()))
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn historical_manifest_and_styles_use_the_requested_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"snapshot-test-secret-012345678901234";
+        let state = test_state(secret, temp.path());
+        let id = "snapshot-document";
+        imported_bundle(&temp.path().join(format!("{id}.hcd")), id, None);
+        let theme = seed_theme(&state, secret, "snapshot-font").await;
+        let _ = pin_theme(
+            State(state.clone()),
+            Path(id.into()),
+            bearer(secret, id, "write"),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        for requested in [None, Some(0), Some(1)] {
+            let expected = requested.unwrap_or(1);
+            let info = manifest(
+                State(state.clone()),
+                Path(id.into()),
+                Query(RevisionQuery {
+                    revision: requested,
+                }),
+                bearer(secret, id, "read"),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(info["revision"], expected);
+            if expected == 0 {
+                assert!(info["themeRevisionId"].is_null());
+            } else {
+                assert_eq!(info["themeRevisionId"], theme);
+            }
+            let response = styles(
+                State(state.clone()),
+                Path(id.into()),
+                Query(RevisionQuery {
+                    revision: requested,
+                }),
+                bearer(secret, id, "read"),
+            )
+            .await
+            .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let css = std::str::from_utf8(&body).unwrap();
+            assert!(css.contains("article { color: #222222; }"));
+            assert_eq!(css.contains("--hcd-major-latin:"), expected == 1);
+        }
+        assert!(manifest(
+            State(state.clone()),
+            Path(id.into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .is_err());
+        assert!(styles(
+            State(state.clone()),
+            Path(id.into()),
+            Query(RevisionQuery { revision: Some(2) }),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            manifest(
+                State(state),
+                Path(id.into()),
+                Query(RevisionQuery { revision: Some(0) }),
+                bearer(secret, "another-document", "read"),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn agents_are_isolated_and_concurrent_edits_conflict_without_overwriting() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"agent-test-secret-01234567890123456789";
+        let state = test_state(secret, temp.path());
+        let source = temp.path().join("source.txt");
+        std::fs::write(&source, "Original paragraph\n").unwrap();
+        let id = "agent-document";
+        hcd_formats::import_document(
+            &source,
+            temp.path().join(format!("{id}.hcd")),
+            &hcd_formats::ImportOptions::new(id),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = open(&state, id).unwrap();
+        project_editor(&bundle, 0).unwrap();
+        let original = editor_projection(&bundle, None).unwrap();
+        let block = original
+            .blocks
+            .iter()
+            .find(|b| !b.read_only && b.region == "body")
+            .unwrap();
+        let headers = |agent| {
+            let mut headers = bearer_as(secret, id, "write", Some(agent), Some(agent));
+            headers.insert("x-hcd-collaboration-epoch", "0".parse().unwrap());
+            headers.insert("x-hcd-agent-edit", "true".parse().unwrap());
+            headers
+        };
+        let focus = || AgentFocus {
+            status: "editing".into(),
+            node_id: None,
+            block_id: Some(block.block_id.clone()),
+            chunk_sequence: None,
+            targets: Vec::new(),
+            message: Some("Working".into()),
+            expected_revision: original.revision,
+        };
+        let mut readonly = bearer_as(secret, id, "read", Some("readonly"), None);
+        readonly.insert("x-hcd-collaboration-epoch", "0".parse().unwrap());
+        assert_eq!(
+            agent_focus(
+                State(state.clone()),
+                Path(id.into()),
+                readonly,
+                Json(focus())
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        for agent in ["agent-a", "agent-b"] {
+            let _ = agent_focus(
+                State(state.clone()),
+                Path(id.into()),
+                headers(agent),
+                Json(focus()),
+            )
+            .await
+            .unwrap();
+        }
+        let listed = agent_list(
+            State(state.clone()),
+            Path(id.into()),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(listed["agents"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            bundle.manifest().unwrap().revision,
+            original.revision,
+            "activity must not edit content"
+        );
+        assert_eq!(
+            agent_list(
+                State(state.clone()),
+                Path(id.into()),
+                bearer(secret, "other-document", "read")
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let make_patch = |agent: &str| -> StructurePatchBatch {
+            serde_json::from_value(json!({
+            "schemaVersion":HCD_PATCH_SCHEMA_VERSION_4,"documentId":id,"patchId":agent,"baseRevision":original.revision,
+            "operations":[{"op":"block.replace","blockId":block.block_id,"block":{"kind":"paragraph","inlines":[{"text":agent}]},"precondition":{"blockHash":block.block_hash}}]
+        })).unwrap()
+        };
+        let mut service = bearer_as(secret, id, "write", Some("hcd-collaboration"), None);
+        service.insert("x-hcd-collaboration-epoch", "0".parse().unwrap());
+        let _ = collaboration_pending(
+            State(state.clone()),
+            Path(id.into()),
+            service.clone(),
+            Json(PendingCollaboration {
+                dirty: true,
+                sequence: 1,
+            }),
+        )
+        .await
+        .unwrap();
+        let refused = patch(
+            State(state.clone()),
+            Path(id.into()),
+            headers("agent-a"),
+            Json(make_patch("agent-a")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.0, StatusCode::CONFLICT);
+        assert_eq!(bundle.manifest().unwrap().revision, original.revision);
+        let _ = collaboration_pending(
+            State(state.clone()),
+            Path(id.into()),
+            service,
+            Json(PendingCollaboration {
+                dirty: false,
+                sequence: 2,
+            }),
+        )
+        .await
+        .unwrap();
+        let (a, b) = tokio::join!(
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("agent-a"),
+                Json(make_patch("agent-a"))
+            ),
+            patch(
+                State(state.clone()),
+                Path(id.into()),
+                headers("agent-b"),
+                Json(make_patch("agent-b"))
+            )
+        );
+        assert_ne!(a.is_ok(), b.is_ok());
+        assert_eq!(
+            a.as_ref().err().or(b.as_ref().err()).unwrap().0,
+            StatusCode::CONFLICT
+        );
+        let current = editor_projection(&bundle, None).unwrap();
+        assert_eq!(current.revision, original.revision + 1);
+        let text: String = current
+            .blocks
+            .iter()
+            .flat_map(|block| {
+                block
+                    .content
+                    .inlines
+                    .iter()
+                    .map(|inline| inline.text.as_str())
+            })
+            .collect();
+        assert!(text == "agent-a" || text == "agent-b");
+        let listed = agent_list(
+            State(state.clone()),
+            Path(id.into()),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .unwrap()
+        .0;
+        let statuses: Vec<_> = listed["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["status"].as_str().unwrap())
+            .collect();
+        assert!(statuses.contains(&"applied") && statuses.contains(&"conflict"));
+        for activity in state.agents.lock().await.values_mut() {
+            activity.updated_at_epoch_ms = 0;
+        }
+        assert!(
+            agent_list(State(state), Path(id.into()), bearer(secret, id, "read"))
+                .await
+                .unwrap()
+                .0["agents"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn operation_traces_keep_all_targets_and_preserve_commits_after_idle_or_cancel() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(b"operation-tests", temp.path());
+        let actor = Claims {
+            doc: "trace-doc".into(),
+            scope: "write".into(),
+            sub: Some("editor-a".into()),
+            name: Some("Editor A".into()),
+            aud: "hcd-core".into(),
+            iat: 0,
+            exp: usize::MAX,
+            worker_generation: None,
+            integration_session: None,
+        };
+        agent_result(
+            &state,
+            "trace-doc",
+            &actor,
+            &HeaderMap::new(),
+            "applied",
+            3,
+            Some(json!([{"op":"text.splice","nodeId":"human-node"}])),
+        )
+        .await
+        .unwrap();
+        assert!(
+            agent_operations::list(&state, "trace-doc", 0, 3)
+                .await
+                .is_empty(),
+            "human edits must not become agent traces"
+        );
+        let operations: Vec<_> = (0..150).map(|i| json!({"op":"xlsx.formula.create","sheetId":"sheet-1","row":i+1,"column":11,"formula":"=2*2"})).collect();
+        agent_operations::record(
+            &state,
+            "trace-doc",
+            &actor,
+            "pending",
+            3,
+            2,
+            agent_operations::from_operations(&operations),
+        )
+        .await;
+        let listed =
+            serde_json::to_value(agent_operations::list(&state, "trace-doc", 2, 3).await).unwrap();
+        assert_eq!(listed[0]["totalTargets"], 150);
+        assert_eq!(listed[0]["targets"].as_array().unwrap().len(), 128);
+        assert_eq!(listed[0]["targets"][0]["row"], 1);
+        assert_eq!(listed[0]["targets"][0]["column"], 11);
+        assert!(
+            listed[0]["targets"][0]["nodeId"].is_null(),
+            "new cells must not invent node IDs"
+        );
+        assert!(agent_operations::list(&state, "other-doc", 2, 3)
+            .await
+            .is_empty());
+        agent_operations::result(
+            &state,
+            "trace-doc",
+            &actor,
+            "applied",
+            4,
+            3,
+            Some(&json!(operations)),
+        )
+        .await;
+        let committed =
+            serde_json::to_value(agent_operations::list(&state, "trace-doc", 3, 4).await).unwrap();
+        agent_operations::stop(&state, "trace-doc", "editor-a", "cancelled").await;
+        let after =
+            serde_json::to_value(agent_operations::list(&state, "trace-doc", 3, 4).await).unwrap();
+        assert_eq!(
+            committed, after,
+            "stopping cannot relabel a successful commit"
+        );
+        agent_operations::record(
+            &state,
+            "trace-doc",
+            &actor,
+            "pending",
+            4,
+            3,
+            agent_operations::from_operations(&operations),
+        )
+        .await;
+        agent_operations::stop(&state, "trace-doc", "editor-a", "cancelled").await;
+        let cancelled =
+            serde_json::to_value(agent_operations::list(&state, "trace-doc", 3, 4).await).unwrap();
+        assert_eq!(cancelled[0]["status"], "cancelled");
+        agent_operations::record(
+            &state,
+            "trace-doc",
+            &actor,
+            "pending",
+            4,
+            3,
+            agent_operations::from_operations(&operations),
+        )
+        .await;
+        let stale =
+            serde_json::to_value(agent_operations::list(&state, "trace-doc", 3, 5).await).unwrap();
+        assert_eq!(
+            stale[0]["status"], "conflict",
+            "even grid revision changes invalidate pending plans"
+        );
+    }
+
+    pub(super) fn test_state(secret: &[u8], root: &std::path::Path) -> ServerState {
+        ServerState {
+            root: root.to_path_buf(),
+            catalog: DiskCatalog::open(root.join("catalog")).unwrap(),
+            secret: Arc::new(secret.to_vec()),
+            remote: None,
+            default_theme: None,
+            collaboration_lock: Arc::new(Mutex::new(())),
+            downloads: Arc::new(Mutex::new(HashMap::new())),
+            export_jobs: Arc::new(tokio::sync::Semaphore::new(2)),
+            agents: Arc::new(Mutex::new(HashMap::new())),
+            agent_operations: Arc::new(Mutex::new(HashMap::new())),
+            agent_runs: Default::default(),
+            agent_workflows: Default::default(),
+            worker_generation: Arc::new(uuid::Uuid::new_v4().to_string()),
+            worker_fences: Default::default(),
+            image_jobs: Default::default(),
+            image_edits: Default::default(),
+            image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            mcp_sessions: Default::default(),
+            canvas_rooms: Default::default(),
+            transfer_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            transfer_cancellations: Default::default(),
+            integration: None,
+            backup: None,
+        }
+    }
+
+    fn bearer(secret: &[u8], doc: &str, scope: &str) -> HeaderMap {
+        bearer_as(secret, doc, scope, None, None)
+    }
+
+    /// The same token with the identity a real one carries (`--user-id`,
+    /// `--display-name`), which is what makes the audit actor worth reading.
+    pub(super) fn bearer_as(
+        secret: &[u8],
+        doc: &str,
+        scope: &str,
+        sub: Option<&str>,
+        name: Option<&str>,
+    ) -> HeaderMap {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as usize;
+        let jwt = encode(
+            &Header::new(Algorithm::HS256),
+            &Claims {
+                doc: doc.to_string(),
+                scope: scope.to_string(),
+                sub: sub.map(str::to_string),
+                name: name.map(str::to_string),
+                aud: "hcd-core".to_string(),
+                iat: now,
+                exp: now + 600,
+                worker_generation: None,
+                integration_session: None,
+            },
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {jwt}").parse().unwrap(),
+        );
+        headers
+    }
+
+    fn face(sha256: &str) -> UploadedFace {
+        UploadedFace {
+            subfamily: "Regular".to_string(),
+            weight: 400,
+            style: FontStyle::Normal,
+            stretch: FontStretch::Normal,
+            scripts: vec![FontScript::Latin, FontScript::Hans],
+            format: FontFileFormat::Ttf,
+            sha256: sha256.to_string(),
+            byte_length: TTF.len() as u64,
+        }
+    }
+
+    fn license() -> FontLicense {
+        FontLicense {
+            name: "OFL-1.1".to_string(),
+            web_preview: true,
+            ooxml_embed: true,
+            pdf_embed: false,
+            redistribution: false,
+            expires_at_epoch_ms: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_routes_require_an_admin_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let error = catalog_fonts(State(state.clone()), HeaderMap::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNAUTHORIZED);
+        for (doc, scope) in [
+            ("doc-a", "read"),
+            ("doc-a", "write"),
+            ("*", "upload"),
+            ("*", "write"),
+        ] {
+            let headers = bearer(secret, doc, scope);
+            let error = catalog_fonts(State(state.clone()), headers.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(error.0, StatusCode::FORBIDDEN, "{doc}/{scope} leaked");
+            let error = catalog_put_theme(
+                State(state.clone()),
+                headers.clone(),
+                Json(NewThemeBody {
+                    name: "x".to_string(),
+                    major: ThemeFontSlots::default(),
+                    minor: ThemeFontSlots::default(),
+                    fallback_families: vec![],
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.0, StatusCode::FORBIDDEN, "{doc}/{scope} wrote");
+        }
+        assert!(catalog_fonts(State(state), bearer(secret, "*", "admin"))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn admin_uploads_font_then_saves_and_lists_a_theme() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+
+        let error = catalog_put_blob(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            Query(BlobQuery {
+                format: "woff2".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("magic"));
+
+        let error = catalog_put_blob(
+            State(state.clone()),
+            Path("Demo-Serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        assert_eq!(sha256.len(), 64);
+
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap();
+        let font_revision_id = revision.0.font_revision_id.clone();
+        assert_eq!(font_revision_id.len(), 64);
+        assert_eq!(revision.0.faces[0].family, "Demo Serif");
+
+        let theme = catalog_put_theme(
+            State(state.clone()),
+            admin.clone(),
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "demo-serif".to_string(),
+                        font_revision_id: font_revision_id.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots {
+                    latin: None,
+                    east_asia: None,
+                    bidi: None,
+                },
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+        let theme_revision_id = theme.0.theme_revision_id.clone();
+
+        let fonts = catalog_fonts(State(state.clone()), admin.clone())
+            .await
+            .unwrap();
+        assert_eq!(fonts.0.len(), 1);
+        assert_eq!(fonts.0[0].font_id, "demo-serif");
+        assert_eq!(fonts.0[0].family, "Demo Serif");
+
+        let one = catalog_font(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(one.0[0].font_revision_id, font_revision_id);
+        assert!(!one.0[0].license.pdf_embed);
+
+        let themes = catalog_themes(State(state), admin).await.unwrap();
+        assert_eq!(themes.0.len(), 1);
+        assert_eq!(themes.0[0].theme_revision_id, theme_revision_id);
+    }
+
+    #[tokio::test]
+    async fn catalog_delete_refuses_referenced_fonts_and_removes_loose_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let demo_rev = catalog_put_font_revision(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0
+        .font_revision_id;
+
+        // A theme pins the demo-serif revision, so it is not removable.
+        let _ = catalog_put_theme(
+            State(state.clone()),
+            admin.clone(),
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "demo-serif".to_string(),
+                        font_revision_id: demo_rev.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots {
+                    latin: None,
+                    east_asia: None,
+                    bidi: None,
+                },
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+
+        let error = catalog_delete_font_revision(
+            State(state.clone()),
+            Path(("demo-serif".to_string(), demo_rev.clone())),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        let error = catalog_delete_font(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(catalog_font(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+        )
+        .await
+        .unwrap()
+        .0
+        .iter()
+        .any(|revision| revision.font_revision_id == demo_rev));
+
+        // A loose font that shares the same blob can be deleted.
+        let _ = catalog_put_blob(
+            State(state.clone()),
+            Path("loose-font".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let loose_rev = catalog_put_font_revision(
+            State(state.clone()),
+            Path("loose-font".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Loose Font".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0
+        .font_revision_id;
+
+        let report = catalog_delete_font_revision(
+            State(state.clone()),
+            Path(("loose-font".to_string(), loose_rev.clone())),
+            admin.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.0.removed_revisions, vec![loose_rev]);
+        // The blob is still cited by demo-serif, so GC keeps it.
+        assert!(report.0.removed_blobs.is_empty());
+        let fonts = catalog_fonts(State(state.clone()), admin.clone())
+            .await
+            .unwrap();
+        assert_eq!(fonts.0.len(), 1);
+        assert_eq!(fonts.0[0].font_id, "demo-serif");
+
+        // Malformed revision id is rejected before lookup.
+        let error = catalog_delete_font_revision(
+            State(state.clone()),
+            Path(("demo-serif".to_string(), "nope".to_string())),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        // A well-formed but unknown revision id is a 404.
+        let error = catalog_delete_font_revision(
+            State(state.clone()),
+            Path(("demo-serif".to_string(), "cd".repeat(32))),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+
+        // A non-admin token cannot delete.
+        let reader = bearer(secret, "doc", "read");
+        let error = catalog_delete_font(State(state), Path("demo-serif".to_string()), reader)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn catalog_retire_lists_and_lifts_theme_retirement() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0
+        .font_revision_id;
+        let theme_id = catalog_put_theme(
+            State(state.clone()),
+            admin.clone(),
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "demo-serif".to_string(),
+                        font_revision_id: revision,
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots {
+                    latin: None,
+                    east_asia: None,
+                    bidi: None,
+                },
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap()
+        .0
+        .theme_revision_id;
+
+        assert!(catalog_retired_themes(State(state.clone()), admin.clone())
+            .await
+            .unwrap()
+            .0
+            .is_empty());
+
+        let retired =
+            catalog_retire_theme(State(state.clone()), Path(theme_id.clone()), admin.clone())
+                .await
+                .unwrap();
+        assert_eq!(retired.0["retired"], serde_json::json!(true));
+        assert_eq!(
+            catalog_retired_themes(State(state.clone()), admin.clone())
+                .await
+                .unwrap()
+                .0,
+            vec![theme_id.clone()]
+        );
+
+        // Re-retiring is idempotent; un-retiring clears it.
+        let _ = catalog_retire_theme(State(state.clone()), Path(theme_id.clone()), admin.clone())
+            .await
+            .unwrap();
+        let cleared =
+            catalog_unretire_theme(State(state.clone()), Path(theme_id.clone()), admin.clone())
+                .await
+                .unwrap();
+        assert_eq!(cleared.0["retired"], serde_json::json!(false));
+        assert!(catalog_retired_themes(State(state.clone()), admin.clone())
+            .await
+            .unwrap()
+            .0
+            .is_empty());
+        // Un-retiring a live theme is a harmless no-op.
+        let _ = catalog_unretire_theme(State(state), Path(theme_id), admin)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn catalog_retire_validates_id_and_requires_admin() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+
+        let error = catalog_retire_theme(
+            State(state.clone()),
+            Path("nope".to_string()),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+
+        let error =
+            catalog_retire_theme(State(state.clone()), Path("ab".repeat(32)), admin.clone())
+                .await
+                .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+
+        let reader = bearer(secret, "doc", "read");
+        let error = catalog_retire_theme(State(state), Path("ab".repeat(32)), reader)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn catalog_write_rejects_missing_blobs_and_unknown_fonts() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+
+        let error = catalog_put_font_revision(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&"ab".repeat(32))],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+
+        let error = catalog_put_theme(
+            State(state.clone()),
+            admin.clone(),
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "demo-serif".to_string(),
+                        font_revision_id: "cd".repeat(32),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots {
+                    latin: None,
+                    east_asia: None,
+                    bidi: None,
+                },
+                fallback_families: vec![],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+
+        let error = catalog_font(
+            State(state.clone()),
+            Path("missing-font".to_string()),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+
+        let error = catalog_font(State(state), Path("Bad Id".to_string()), admin)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn theme_read_routes_accept_document_and_admin_tokens_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let unknown = || Path("ab".repeat(32));
+        let error = theme_revision(
+            State(state.clone()),
+            unknown(),
+            bearer(secret, "*", "upload"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        let error = theme_revision(
+            State(state.clone()),
+            unknown(),
+            bearer(secret, "*", "admin"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+        let error = theme_revision(State(state), unknown(), bearer(secret, "doc-a", "read"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn admin_console_is_served_same_origin() {
+        let response = catalog_admin().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("/v1/catalog/fonts"));
+        assert!(html.contains("/v1/catalog/themes"));
+        assert!(html.contains("--scope admin"));
+        // The shipped page is the built React console, so these prove the
+        // checked-in bundle — not a stale hand-written page — is embedded: the
+        // admin-only document list it calls, and the sidebar labels that keep
+        // catalogue management and document content in separate views.
+        assert!(html.contains("<div id=\"root\">"));
+        assert!(html.contains("/v1/documents"));
+        assert!(html.contains("字体目录"));
+        assert!(html.contains("上传登记"));
+        // The operation log view is part of the same shipped bundle: it calls the
+        // admin-only audit route and labels the sidebar group it lives under.
+        assert!(html.contains("/v1/catalog/audit"));
+        assert!(html.contains("操作记录"));
+        assert!(html.contains("留痕"));
+        // The window picker and the export are the reason the route grew `from`
+        // and `to`, so the shipped bundle has to carry both halves.
+        assert!(html.contains("导出 CSV"));
+        assert!(html.contains("hcd-audit-"));
+        assert!(html.contains("区间里还有更早的记录没列出"));
+        // The export font check is the third question the console answers without
+        // running an export: the route it calls, the dialog title, and the verdict
+        // an operator has to be able to tell apart.
+        assert!(html.contains("/font-plan"));
+        assert!(html.contains("字体落地体检"));
+        assert!(html.contains("只登记名字"));
+        // A license that is about to run out is the one thing the check must
+        // raise before any export loses the font: the server's own window read
+        // off the response, the count in 概览, and the day count on the font row.
+        assert!(html.contains("licenseWarnWindowDays"));
+        assert!(html.contains("授权到期提醒"));
+        assert!(html.contains("天内到期"));
+    }
+
+    #[tokio::test]
+    async fn pin_theme_route_records_a_content_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+
+        // Seed a theme through the same admin write surface the console uses.
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap();
+        let theme = catalog_put_theme(
+            State(state.clone()),
+            admin,
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "demo-serif".to_string(),
+                        font_revision_id: revision.0.font_revision_id.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots::default(),
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+        let theme_revision_id = theme.0.theme_revision_id.clone();
+
+        // Create a document bundle the server can open by id.
+        let id = "doc-a";
+        let writer = hcd_core::BundleWriter::create(temp.path().join(format!("{id}.hcd"))).unwrap();
+        writer.write_styles("article { color: #123456; }").unwrap();
+        writer
+            .finish(hcd_core::HcdManifest {
+                schema_version: String::new(),
+                storage_codec: hcd_core::StorageCodec::None,
+                document_id: id.to_string(),
+                profile: "semantic-flow".to_string(),
+                revision: 0,
+                source: hcd_core::SourceDescriptor {
+                    format: "docx".to_string(),
+                    sha256: "ab".repeat(32),
+                    size_bytes: 1,
+                },
+                root_hash: String::new(),
+                annotation_root_hash: String::new(),
+                annotation_href: None,
+                index_prefix: String::new(),
+                index_root_href: None,
+                index_page_count: 0,
+                chunk_count: 0,
+                styles_href: String::new(),
+                theme_revision_id: None,
+                capabilities: hcd_core::HcdCapabilities::default(),
+                fidelity: None,
+                state: "IMPORTING".to_string(),
+                warnings: Vec::new(),
+            })
+            .unwrap();
+
+        // A body has to say what it means: an absent field is refused rather than
+        // read as an unpin, so a typo cannot strip a document's theme.
+        assert!(serde_json::from_str::<PinThemeBody>("{}").is_err());
+        assert!(
+            serde_json::from_str::<PinThemeBody>("{\"themeRevisionId\":null}")
+                .unwrap()
+                .theme_revision_id
+                .is_none()
+        );
+
+        // A read token cannot pin.
+        let error = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            bearer(secret, id, "read"),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme_revision_id.clone()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+
+        // A write token pins the theme and advances the head revision.
+        let resolution = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            bearer(secret, id, "write"),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme_revision_id.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolution.0.revision, 1);
+        assert_eq!(resolution.0.theme_revision_id, theme_revision_id);
+
+        let bundle = open(&state, id).unwrap();
+        let manifest = bundle.manifest().unwrap();
+        assert_eq!(manifest.revision, 1);
+        assert!(manifest.styles_href.starts_with("styles/rev-"));
+        let served = bundle.read_styles_part(&manifest.styles_href).unwrap();
+        assert!(served.contains("article { color: #123456; }"));
+        assert!(served.contains("--hcd-major-latin:'Demo Serif',serif"));
+
+        // Re-pinning the same theme is idempotent and does not add a revision.
+        let again = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            bearer(secret, id, "write"),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme_revision_id.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.0.revision, 1);
+
+        // The console's operator token may retarget a document's theme, because a
+        // pin commits managed stylesheet lines and no node content.
+        let retarget = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            bearer(secret, "*", "admin"),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme_revision_id.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(retarget.0.revision, 1, "the same theme is still a no-op");
+
+        // A read token cannot unpin either, and the admin token can.
+        let error = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            bearer(secret, id, "read"),
+            Json(PinThemeBody {
+                theme_revision_id: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        let cleared = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            bearer(secret, "*", "admin"),
+            Json(PinThemeBody {
+                theme_revision_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cleared.0.revision, 2);
+        assert!(
+            cleared.0.theme_revision_id.is_empty(),
+            "an unpin reports no theme"
+        );
+        assert!(cleared.0.theme.css.is_empty());
+        let styles = bundle
+            .read_styles_part(&bundle.manifest().unwrap().styles_href)
+            .unwrap();
+        assert_eq!(styles.trim(), "article { color: #123456; }");
+        assert!(!styles.contains("hcd-theme-begin"));
+
+        // Content routes still demand a token written for this document: the admin
+        // token that retargets the theme cannot splice text.
+        let error = node_patch(
+            State(state),
+            Path(id.to_string()),
+            bearer(secret, "*", "admin"),
+            Json(hcd_core::PatchBatch {
+                schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: id.to_string(),
+                patch_id: "admin-must-not-edit".to_string(),
+                base_revision: 2,
+                actor: Default::default(),
+                metadata: Default::default(),
+                operations: vec![hcd_core::PatchOperation::TextSplice {
+                    node_id: "n_00000000000000000000000000000001".to_string(),
+                    start: 0,
+                    delete_count: 0,
+                    insert_text: "x".to_string(),
+                    precondition: hcd_core::NodePrecondition {
+                        node_hash: "0".repeat(64),
+                    },
+                }],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+    }
+
+    /// Seed a font revision and a theme through the same admin write surface the console uses.
+    async fn seed_theme(state: &ServerState, secret: &[u8], font_id: &str) -> String {
+        let admin = bearer(secret, "*", "admin");
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path(font_id.to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path(font_id.to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap();
+        let theme = catalog_put_theme(
+            State(state.clone()),
+            admin,
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: font_id.to_string(),
+                        font_revision_id: revision.0.font_revision_id.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots::default(),
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+        theme.0.theme_revision_id
+    }
+
+    /// Write a bundle the way a finished import leaves it: revision zero, its own pin or none.
+    fn imported_bundle(path: &std::path::Path, id: &str, theme_revision_id: Option<String>) {
+        imported_bundle_from(path, id, theme_revision_id, "docx", "ab".repeat(32), 1);
+    }
+
+    /// The same, with the source the import recorded.
+    ///
+    /// The font forecast reads `{root}/sources/{id}.{format}` and checks it
+    /// against this descriptor, so a test that wants a `ready` answer has to write
+    /// the file and the manifest as a pair.
+    fn imported_bundle_from(
+        path: &std::path::Path,
+        id: &str,
+        theme_revision_id: Option<String>,
+        format: &str,
+        sha256: String,
+        size_bytes: u64,
+    ) {
+        let writer = hcd_core::BundleWriter::create(path).unwrap();
+        writer.write_styles("article { color: #222222; }").unwrap();
+        writer
+            .finish(hcd_core::HcdManifest {
+                schema_version: String::new(),
+                storage_codec: hcd_core::StorageCodec::None,
+                document_id: id.to_string(),
+                profile: "semantic-flow".to_string(),
+                revision: 0,
+                source: hcd_core::SourceDescriptor {
+                    format: format.to_string(),
+                    sha256,
+                    size_bytes,
+                },
+                root_hash: String::new(),
+                annotation_root_hash: String::new(),
+                annotation_href: None,
+                index_prefix: String::new(),
+                index_root_href: None,
+                index_page_count: 0,
+                chunk_count: 0,
+                styles_href: String::new(),
+                theme_revision_id,
+                capabilities: hcd_core::HcdCapabilities::default(),
+                fidelity: None,
+                state: "IMPORTING".to_string(),
+                warnings: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    /// A one-run PDF, written the way another toolchain would: its own font, its
+    /// own operators, ASCII text in a WinAnsi TrueType face.
+    fn write_source_pdf(path: &std::path::Path, text: &str) {
+        use lopdf::{dictionary, Dictionary, Document, Object, Stream};
+        let mut document = Document::with_version("1.5");
+        let font = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "CourierLike",
+            "Encoding" => "WinAnsiEncoding",
+            "FirstChar" => 32i64,
+            "LastChar" => 126i64,
+            "Widths" => Object::Array((32..=126u32).map(|_| Object::Integer(600)).collect()),
+        });
+        let fonts_id = document.add_object(dictionary! { "F1" => Object::Reference(font) });
+        let resources_id = document.add_object(dictionary! {
+            "Font" => Object::Reference(fonts_id)
+        });
+        let content = format!("BT\n/F1 12 Tf\n1 0 0 1 72 720 Tm\n({text}) Tj\nET\n");
+        let content_id =
+            document.add_object(Stream::new(Dictionary::new(), content.as_bytes().to_vec()));
+        let pages_id = document.new_object_id();
+        let page_id = document.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => Object::Reference(pages_id),
+            "MediaBox" => Object::Array(vec![0.into(), 0.into(), 612.into(), 792.into()]),
+            "Resources" => Object::Reference(resources_id),
+            "Contents" => Object::Array(vec![Object::Reference(content_id)]),
+        });
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+                "Count" => 1,
+            }),
+        );
+        let catalog = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => Object::Reference(pages_id),
+        });
+        document.trailer.set("Root", Object::Reference(catalog));
+        document.compress();
+        document.save(path).unwrap();
+    }
+
+    /// A stored source plus the bundle whose manifest points at it, as a pair.
+    /// The file's bytes come back, so a test that swaps the source can put the
+    /// real one — and the pin it has since added on top of it — back in place.
+    fn pdf_document(root: &std::path::Path, id: &str, text: &str) -> Vec<u8> {
+        let sources = root.join("sources");
+        std::fs::create_dir_all(&sources).unwrap();
+        let source = sources.join(format!("{id}.pdf"));
+        write_source_pdf(&source, text);
+        let sha256 = hash_file(&source).unwrap();
+        let size = std::fs::metadata(&source).unwrap().len();
+        imported_bundle_from(
+            &root.join(format!("{id}.hcd")),
+            id,
+            None,
+            "pdf",
+            sha256,
+            size,
+        );
+        std::fs::read(source).unwrap()
+    }
+
+    /// Upload a real TrueType face whose license allows PDF embedding, and pin it
+    /// as the body font.
+    ///
+    /// The forecast embeds faces into a copy of the source before judging a run,
+    /// so a made-up blob cannot stand in here the way it does for the face list:
+    /// `bundled_noto_emoji` is a face the 8 MiB gate lets through, and
+    /// `bundled_noto_sans_sc` is one it does not, which is the pair worth having.
+    async fn seed_pdf_font(
+        state: &ServerState,
+        secret: &[u8],
+        font_id: &str,
+        family: &str,
+        bytes: &[u8],
+    ) -> String {
+        let admin = bearer(secret, "*", "admin");
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path(font_id.to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::copy_from_slice(bytes),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path(font_id.to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: family.to_string(),
+                faces: vec![UploadedFace {
+                    subfamily: "Regular".to_string(),
+                    weight: 400,
+                    style: FontStyle::Normal,
+                    stretch: FontStretch::Normal,
+                    scripts: vec![FontScript::Latin, FontScript::Hans],
+                    format: FontFileFormat::Ttf,
+                    sha256,
+                    byte_length: bytes.len() as u64,
+                }],
+                license: FontLicense {
+                    name: "OFL-1.1".to_string(),
+                    web_preview: true,
+                    ooxml_embed: true,
+                    pdf_embed: true,
+                    redistribution: true,
+                    expires_at_epoch_ms: None,
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        let theme = catalog_put_theme(
+            State(state.clone()),
+            admin,
+            Json(NewThemeBody {
+                name: "Brand body".to_string(),
+                major: ThemeFontSlots::default(),
+                minor: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: font_id.to_string(),
+                        font_revision_id: revision.0.font_revision_id.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                fallback_families: vec!["sans-serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+        theme.0.theme_revision_id
+    }
+
+    async fn plan(state: &ServerState, secret: &[u8], id: &str, kind: &str) -> Value {
+        document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: kind.to_string(),
+                revision: None,
+            }),
+            bearer(secret, "*", "admin"),
+        )
+        .await
+        .unwrap()
+        .0
+    }
+
+    /// The whole point of the forecast is that an operator sees the cost of a pin
+    /// before making it, and that a server which cannot answer says which of the
+    /// reasons it has instead of reporting an uneventful zero.
+    #[tokio::test]
+    async fn font_plan_route_forecasts_the_pdf_text_a_pin_would_touch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, root);
+        let admin = bearer(secret, "*", "admin");
+        // A face small enough to embed, and one that cannot draw the page's
+        // Latin — so the pass runs, counts the run, and says why it stays.
+        let theme = seed_pdf_font(
+            &state,
+            secret,
+            "emoji-body",
+            "Emoji Body",
+            pdf_handler::font_embedder::bundled_noto_emoji(),
+        )
+        .await;
+
+        // Nothing pinned yet: the export would leave every run on its own font,
+        // and that is the answer, not an empty list.
+        let original = pdf_document(root, "doc-f", "Quarterly report");
+        let before = plan(&state, secret, "doc-f", "pdf").await;
+        assert_eq!(before["textForecast"]["state"], "noTheme", "{before}");
+
+        // A format with no PDF text of its own does not get an answer at all.
+        assert!(before["textForecast"].is_object());
+        let word = plan(&state, secret, "doc-f", "docx").await;
+        assert!(word["textForecast"].is_null(), "{word}");
+
+        // Pin it. The same request now counts the runs.
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path("doc-f".to_string()),
+            admin.clone(),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1, "the pin is a new revision");
+        let after = plan(&state, secret, "doc-f", "pdf").await;
+        let forecast = &after["textForecast"];
+        assert_eq!(forecast["state"], "ready", "{after}");
+        assert_eq!(forecast["sourceMatches"], true, "{forecast}");
+        assert!(forecast["sourceBytes"].as_u64().unwrap() > 0, "{forecast}");
+        assert_eq!(forecast["runsSeen"].as_u64().unwrap(), 1, "{forecast}");
+        assert_eq!(forecast["lines"].as_array().unwrap().len(), 1, "{forecast}");
+        let stayed = &forecast["lines"][0];
+        assert_eq!(stayed["bucket"], "uncovered", "{stayed}");
+        assert_eq!(stayed["count"].as_u64().unwrap(), 1);
+        assert_eq!(stayed["warning"], true);
+        assert!(
+            stayed["sentence"]
+                .as_str()
+                .unwrap()
+                .contains("can draw every character of it"),
+            "{stayed}"
+        );
+        // The face list and the run count are the same answer seen twice.
+        assert_eq!(after["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(after["entries"][0]["embeds"], true, "{after}");
+        assert_eq!(after["entries"][0]["family"], "Emoji Body");
+        // Reading a forecast must not put a byte into the document's source.
+        assert_eq!(
+            std::fs::read(root.join("sources/doc-f.pdf")).unwrap(),
+            original
+        );
+
+        // An old revision predates the pin, and the forecast follows the revision.
+        let r0 = document_font_plan(
+            State(state.clone()),
+            Path("doc-f".to_string()),
+            Query(FontPlanQuery {
+                kind: "pdf".to_string(),
+                revision: Some(0),
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(r0["textForecast"]["state"], "noTheme", "{r0}");
+
+        // The file on disk is no longer the one the manifest recorded. The export
+        // would still use it, so the count stays and says what it counted.
+        write_source_pdf(&root.join("sources/doc-f.pdf"), "A different file entirely");
+        let swapped = plan(&state, secret, "doc-f", "pdf").await;
+        let swapped = &swapped["textForecast"];
+        assert_eq!(swapped["state"], "ready", "{swapped}");
+        assert_eq!(swapped["sourceMatches"], false, "{swapped}");
+        assert!(
+            swapped["message"]
+                .as_str()
+                .unwrap()
+                .contains("does not match"),
+            "{swapped}"
+        );
+        assert_eq!(swapped["runsSeen"].as_u64().unwrap(), 1);
+        std::fs::write(root.join("sources/doc-f.pdf"), &original).unwrap();
+
+        // A source the server does not hold is the command line's case, and it is
+        // the one answer that must never come back as a quiet zero.
+        std::fs::remove_file(root.join("sources/doc-f.pdf")).unwrap();
+        let missing = plan(&state, secret, "doc-f", "pdf").await;
+        let absent = &missing["textForecast"];
+        assert_eq!(absent["state"], "noSource", "{missing}");
+        assert!(
+            absent["message"].as_str().unwrap().contains("command line"),
+            "{absent}"
+        );
+        // Without the file the run cost is unknown, so nothing pretends to know it.
+        assert!(absent.get("runsRetargeted").is_none(), "{absent}");
+
+        // A document imported from something that is not a PDF has no runs to move.
+        imported_bundle(&root.join("doc-w.hcd"), "doc-w", None);
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path("doc-w".to_string()),
+            admin.clone(),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1, "the pin is a new revision");
+        let word_pdf = plan(&state, secret, "doc-w", "pdf").await;
+        assert_eq!(
+            word_pdf["textForecast"]["state"], "otherFormat",
+            "{word_pdf}"
+        );
+        assert!(
+            word_pdf["textForecast"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("docx"),
+            "{word_pdf}"
+        );
+
+        // Too big to read for a number nobody needs yet. A sparse file keeps the
+        // test off the disk.
+        pdf_document(root, "doc-t", "Quarterly report");
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path("doc-t".to_string()),
+            admin,
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1, "the pin is a new revision");
+        let big = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(root.join("sources/doc-t.pdf"))
+            .unwrap();
+        big.set_len(MAX_FORECAST_SOURCE_BYTES + 1).unwrap();
+        let oversized = plan(&state, secret, "doc-t", "pdf").await;
+        assert_eq!(
+            oversized["textForecast"]["state"], "tooLarge",
+            "{oversized}"
+        );
+        assert!(
+            oversized["textForecast"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("64 MiB"),
+            "{oversized}"
+        );
+    }
+
+    /// A face the PDF gate will not carry has no runs to take, and the forecast
+    /// says that instead of counting a page against a font that never goes in.
+    #[tokio::test]
+    async fn font_plan_route_forecasts_nothing_to_move_when_no_face_will_embed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, root);
+        // 11 MiB, over the 8 MiB the PDF export will carry.
+        let theme = seed_pdf_font(
+            &state,
+            secret,
+            "big-body",
+            "Brand Body",
+            pdf_handler::font_embedder::bundled_noto_sans_sc(),
+        )
+        .await;
+        let original = pdf_document(root, "doc-g", "Quarterly report");
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path("doc-g".to_string()),
+            bearer(secret, "*", "admin"),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1, "the pin is a new revision");
+
+        let answer = plan(&state, secret, "doc-g", "pdf").await;
+        assert_eq!(answer["entries"][0]["embeds"], false, "{answer}");
+        assert!(
+            answer["entries"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("8 MiB"),
+            "{answer}"
+        );
+        let forecast = &answer["textForecast"];
+        assert_eq!(forecast["state"], "ready", "{answer}");
+        assert_eq!(forecast["runsRetargeted"], 0, "{forecast}");
+        assert!(forecast["faces"].as_array().unwrap().is_empty());
+        assert_eq!(forecast["lines"].as_array().unwrap().len(), 1, "{forecast}");
+        assert_eq!(forecast["lines"][0]["bucket"], "noFace", "{forecast}");
+        assert!(
+            forecast["lines"][0]["sentence"]
+                .as_str()
+                .unwrap()
+                .contains("would be embedded in this PDF"),
+            "{}",
+            forecast["lines"][0]
+        );
+        assert_eq!(
+            std::fs::read(root.join("sources/doc-g.pdf")).unwrap(),
+            original
+        );
+    }
+
+    /// A source that is present but is not a readable PDF gets the embedding
+    /// failure the pass really hit, never a claim that runs moved.
+    #[tokio::test]
+    async fn font_plan_route_says_when_the_stored_source_cannot_be_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, root);
+        let theme = seed_pdf_font(
+            &state,
+            secret,
+            "emoji-bad",
+            "Emoji Body",
+            pdf_handler::font_embedder::bundled_noto_emoji(),
+        )
+        .await;
+
+        std::fs::create_dir_all(root.join("sources")).unwrap();
+        std::fs::write(root.join("sources/doc-x.pdf"), b"not a pdf at all").unwrap();
+        let sha256 = hash_file(root.join("sources/doc-x.pdf")).unwrap();
+        imported_bundle_from(
+            &root.join("doc-x.hcd"),
+            "doc-x",
+            Some(theme),
+            "pdf",
+            sha256,
+            15,
+        );
+        let answer = plan(&state, secret, "doc-x", "pdf").await;
+        let forecast = &answer["textForecast"];
+        assert_eq!(forecast["state"], "ready", "{answer}");
+        assert_eq!(forecast["runsRetargeted"], 0, "{forecast}");
+        assert_eq!(forecast["lines"][0]["bucket"], "noFace", "{forecast}");
+        assert!(
+            forecast["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|line| line["bucket"] == "notEmbedded"),
+            "{forecast}"
+        );
+    }
+
+    #[test]
+    fn configured_default_theme_requires_a_theme_revision_digest() {
+        assert_eq!(configured_default_theme(None).unwrap(), None);
+        let id = "a".repeat(64);
+        assert_eq!(
+            configured_default_theme(Some(id.clone())).unwrap(),
+            Some(id.clone())
+        );
+        for rejected in ["", "abc", &"A".repeat(64), &"g".repeat(64), &"a".repeat(63)] {
+            assert!(
+                configured_default_theme(Some(rejected.to_string())).is_err(),
+                "accepted {rejected}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn default_theme_pins_a_freshly_imported_document() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let mut state = test_state(secret, temp.path());
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        state.default_theme = Some(theme.clone());
+        let destination = temp.path().join("doc-new.hcd");
+        imported_bundle(&destination, "doc-new", None);
+
+        assert_eq!(
+            pin_default_theme(
+                &state.catalog,
+                state.default_theme.as_deref(),
+                &destination,
+                "upload:test"
+            ),
+            None
+        );
+
+        let bundle = Bundle::open(&destination).unwrap();
+        let manifest = bundle.manifest().unwrap();
+        assert_eq!(manifest.revision, 1);
+        assert_eq!(manifest.theme_revision_id.as_deref(), Some(theme.as_str()));
+        assert!(manifest.styles_href.starts_with("styles/rev-"));
+        let styles = bundle.read_styles_part(&manifest.styles_href).unwrap();
+        assert!(styles.contains("article { color: #222222; }"));
+        assert!(styles.contains("--hcd-major-latin:'Demo Serif',serif"));
+    }
+
+    #[tokio::test]
+    async fn without_a_configured_default_theme_imports_stay_unpinned() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        let destination = temp.path().join("doc-none.hcd");
+        imported_bundle(&destination, "doc-none", None);
+
+        assert_eq!(
+            pin_default_theme(
+                &state.catalog,
+                state.default_theme.as_deref(),
+                &destination,
+                "upload:test"
+            ),
+            None
+        );
+
+        let manifest = Bundle::open(&destination).unwrap().manifest().unwrap();
+        assert_eq!(manifest.revision, 0);
+        assert_eq!(manifest.theme_revision_id, None);
+        // The catalog does hold a usable theme; only the missing config kept the document plain.
+        let themes = state.catalog.list_themes().unwrap();
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0].theme_revision_id, theme);
+    }
+
+    #[tokio::test]
+    async fn a_reimported_archive_keeps_its_own_theme_pin() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let mut state = test_state(secret, temp.path());
+        let default = seed_theme(&state, secret, "demo-serif").await;
+        state.default_theme = Some(default.clone());
+        let own = "cd".repeat(32);
+        let destination = temp.path().join("doc-brand.hcd");
+        imported_bundle(&destination, "doc-brand", Some(own.clone()));
+
+        assert_eq!(
+            pin_default_theme(
+                &state.catalog,
+                state.default_theme.as_deref(),
+                &destination,
+                "upload:test"
+            ),
+            None
+        );
+
+        let manifest = Bundle::open(&destination).unwrap().manifest().unwrap();
+        assert_eq!(manifest.revision, 0);
+        assert_eq!(manifest.theme_revision_id.as_deref(), Some(own.as_str()));
+        assert_ne!(default, own);
+    }
+
+    #[tokio::test]
+    async fn a_stale_or_retired_default_theme_warns_instead_of_failing_the_import() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+
+        let unknown = "f".repeat(64);
+        let stale = temp.path().join("doc-stale.hcd");
+        imported_bundle(&stale, "doc-stale", None);
+        let warning =
+            pin_default_theme(&state.catalog, Some(&unknown), &stale, "upload:test").unwrap();
+        assert!(warning.contains("was not pinned"), "{warning}");
+        let manifest = Bundle::open(&stale).unwrap().manifest().unwrap();
+        assert_eq!(manifest.revision, 0);
+        assert_eq!(manifest.theme_revision_id, None);
+
+        state.catalog.retire_theme(&theme).unwrap();
+        let retired = temp.path().join("doc-retired.hcd");
+        imported_bundle(&retired, "doc-retired", None);
+        let warning =
+            pin_default_theme(&state.catalog, Some(&theme), &retired, "upload:test").unwrap();
+        assert!(warning.contains("retired"), "{warning}");
+        assert_eq!(
+            Bundle::open(&retired)
+                .unwrap()
+                .manifest()
+                .unwrap()
+                .theme_revision_id,
+            None
+        );
+
+        let warning = pin_default_theme(
+            &state.catalog,
+            Some(&theme),
+            &temp.path().join("gone.hcd"),
+            "upload:test",
+        )
+        .unwrap();
+        assert!(warning.contains("was not pinned"), "{warning}");
+    }
+
+    #[tokio::test]
+    async fn importing_a_document_that_already_exists_does_not_repin_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let mut state = test_state(secret, temp.path());
+        let default = seed_theme(&state, secret, "demo-serif").await;
+        state.default_theme = Some(default.clone());
+
+        let body: &[u8] = b"brand new text";
+        let hash = hcd_core::hash_bytes(body);
+        let id = format!("doc-{}", &hash[..32]);
+        let own = "cd".repeat(32);
+        let destination = state.root.join(format!("{id}.hcd"));
+        imported_bundle(&destination, &id, Some(own.clone()));
+
+        let response = import_document(
+            State(state.clone()),
+            Query(ImportQuery {
+                filename: "note.txt".to_string(),
+            }),
+            bearer(secret, "*", "upload"),
+            Body::from(body.to_vec()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0["state"], "completed");
+        assert!(response.0.get("warnings").is_none(), "{}", response.0);
+
+        let manifest = Bundle::open(&destination).unwrap().manifest().unwrap();
+        assert_eq!(manifest.revision, 0);
+        assert_eq!(manifest.theme_revision_id.as_deref(), Some(own.as_str()));
+    }
+
+    #[tokio::test]
+    async fn catalog_documents_lists_the_root_with_its_head_pins() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+
+        imported_bundle(
+            &temp.path().join("doc-own.hcd"),
+            "doc-own",
+            Some(theme.clone()),
+        );
+        imported_bundle(&temp.path().join("doc-plain.hcd"), "doc-plain", None);
+
+        let listed = catalog_documents(State(state.clone()), admin.clone())
+            .await
+            .unwrap()
+            .0;
+        let ids: Vec<&str> = listed
+            .iter()
+            .map(|document| document.document_id.as_str())
+            .collect();
+        // The catalog directory shares this root and is not a document.
+        assert_eq!(ids, vec!["doc-own", "doc-plain"]);
+        assert_eq!(listed[0].theme_revision_id.as_deref(), Some(theme.as_str()));
+        assert_eq!(listed[1].theme_revision_id, None);
+
+        let body = serde_json::to_value(&listed).unwrap();
+        assert_eq!(body[0]["documentId"], "doc-own");
+        assert_eq!(body[0]["profile"], "semantic-flow");
+        assert_eq!(body[0]["format"], "docx");
+        assert_eq!(body[0]["revision"], 0);
+        // `BundleWriter::finish` normalizes the state it wrote, so the console
+        // sees a finished bundle, not the `IMPORTING` stub the helper passed in.
+        assert_eq!(body[0]["state"], "COMPLETE");
+        assert_eq!(body[0]["themeRevisionId"], theme.clone());
+        assert!(
+            body[1].get("themeRevisionId").is_none(),
+            "an unpinned document omits the key instead of sending null"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_documents_needs_admin_and_refuses_a_broken_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        imported_bundle(&temp.path().join("doc-own.hcd"), "doc-own", Some(theme));
+
+        // A document token — even one scoped to the very document listed here —
+        // is not a catalog administrator.
+        let reader = bearer(secret, "doc-own", "read");
+        assert_eq!(
+            catalog_documents(State(state.clone()), reader)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // A half-written bundle is named, not dropped from the list.
+        std::fs::write(
+            temp.path().join("doc-own.hcd").join("manifest.json"),
+            b"{ this is not json",
+        )
+        .unwrap();
+        let error = catalog_documents(State(state.clone()), admin)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            error.1.contains("doc-own"),
+            "the failing document is named: {}",
+            error.1
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_theme_documents_name_the_pinning_documents() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+
+        imported_bundle(
+            &temp.path().join("doc-own.hcd"),
+            "doc-own",
+            Some(theme.clone()),
+        );
+        imported_bundle(&temp.path().join("doc-plain.hcd"), "doc-plain", None);
+
+        let found =
+            catalog_theme_documents(State(state.clone()), Path(theme.clone()), admin.clone())
+                .await
+                .unwrap()
+                .0;
+        assert_eq!(found.len(), 1, "only the pinned document is reachable");
+        assert_eq!(found[0].document_id, "doc-own");
+        assert!(found[0].head_pinned);
+        // An import lands on revision 0 already carrying its pin.
+        assert_eq!(found[0].pinned_revisions, vec![0]);
+        let body = serde_json::to_value(&found).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!([{
+                "documentId": "doc-own",
+                "headPinned": true,
+                "pinnedRevisions": [0],
+            }])
+        );
+
+        // The catalog lives in the same root as the documents and is not one.
+        assert!(temp.path().join("catalog").is_dir());
+        // A theme nothing pins has no documents to name.
+        assert!(catalog_theme_documents(
+            State(state.clone()),
+            Path("ef".repeat(32)),
+            admin.clone()
+        )
+        .await
+        .unwrap()
+        .0
+        .is_empty());
+
+        let error = catalog_theme_documents(State(state), Path("nope".to_string()), admin)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn catalog_delete_theme_refuses_then_removes_an_unpinned_theme() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        imported_bundle(
+            &temp.path().join("doc-own.hcd"),
+            "doc-own",
+            Some(theme.clone()),
+        );
+
+        let error = catalog_delete_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(error.1.contains("doc-own"), "{error:?}");
+        assert_eq!(state.catalog.list_themes().unwrap().len(), 1);
+
+        // Retirement stops new pins but frees nothing, so it does not unlock deletion.
+        let _ = catalog_retire_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            catalog_delete_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        std::fs::remove_dir_all(temp.path().join("doc-own.hcd")).unwrap();
+        let deleted =
+            catalog_delete_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+                .await
+                .unwrap();
+        assert_eq!(deleted.0["deleted"], serde_json::json!(true));
+        assert!(state.catalog.list_themes().unwrap().is_empty());
+        assert!(state.catalog.list_retired_theme_ids().unwrap().is_empty());
+        assert!(!state
+            .catalog
+            .root()
+            .join("themes")
+            .join(format!("{theme}.json"))
+            .exists());
+        // A theme is only slots: the font it cited stays for the next theme to reuse.
+        assert_eq!(
+            state.catalog.list_font_ids().unwrap(),
+            vec!["demo-serif".to_string()]
+        );
+
+        let error = catalog_delete_theme(State(state), Path(theme), admin)
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn catalog_theme_reachability_and_delete_require_admin() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let unknown = "ab".repeat(32);
+
+        // A non-admin token cannot read the reachability view or delete.
+        let reader = bearer(secret, "*", "read");
+        assert_eq!(
+            catalog_theme_documents(State(state.clone()), Path(unknown.clone()), reader.clone())
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            catalog_delete_theme(State(state.clone()), Path(unknown.clone()), reader)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // An unknown theme revision id is refused outright: no scan, no delete.
+        assert_eq!(
+            catalog_delete_theme(
+                State(state.clone()),
+                Path("nope".to_string()),
+                admin.clone()
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            catalog_delete_theme(State(state), Path(unknown), admin)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_route_is_admin_only_and_answers_newest_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+
+        // The log names documents and operators, so no document token may read it,
+        // whatever its scope.
+        assert_eq!(
+            catalog_audit(
+                State(state.clone()),
+                Query(AuditQuery {
+                    limit: None,
+                    from: None,
+                    to: None,
+                }),
+                HeaderMap::new(),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        for (doc, scope) in [
+            ("doc-a", "read"),
+            ("doc-a", "write"),
+            ("*", "read"),
+            ("*", "upload"),
+            ("*", "write"),
+        ] {
+            let error = catalog_audit(
+                State(state.clone()),
+                Query(AuditQuery {
+                    limit: None,
+                    from: None,
+                    to: None,
+                }),
+                bearer(secret, doc, scope),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.0, StatusCode::FORBIDDEN, "{doc}/{scope} read the log");
+        }
+
+        // A catalog nobody has touched answers an empty log, not an error.
+        let admin = bearer(secret, "*", "admin");
+        let empty = catalog_audit(
+            State(state.clone()),
+            Query(AuditQuery {
+                limit: None,
+                from: None,
+                to: None,
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(empty.0["entries"], json!([]));
+        assert_eq!(empty.0["unreadable"], json!(0));
+        assert_eq!(
+            empty.0["limit"],
+            json!(100),
+            "the console asks without a limit and gets a page"
+        );
+        assert_eq!(
+            catalog_audit(
+                State(state.clone()),
+                Query(AuditQuery {
+                    limit: Some(0),
+                    from: None,
+                    to: None,
+                }),
+                admin.clone()
+            )
+            .await
+            .unwrap()
+            .0["limit"],
+            json!(1),
+            "a zero limit still answers something instead of nothing"
+        );
+        assert_eq!(
+            catalog_audit(
+                State(state.clone()),
+                Query(AuditQuery {
+                    limit: Some(9_999),
+                    from: None,
+                    to: None,
+                }),
+                admin.clone()
+            )
+            .await
+            .unwrap()
+            .0["limit"],
+            json!(MAX_AUDIT_LIMIT),
+            "the read stays bounded"
+        );
+
+        // Seeding through the same admin write surface the console uses leaves one
+        // line per step, newest first.
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        let page = catalog_audit(
+            State(state),
+            Query(AuditQuery {
+                limit: None,
+                from: None,
+                to: None,
+            }),
+            bearer(secret, "*", "admin"),
+        )
+        .await
+        .unwrap();
+        let entries = page.0["entries"].as_array().unwrap();
+        let actions: Vec<&str> = entries
+            .iter()
+            .map(|entry| entry["action"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            actions,
+            vec![
+                audit_action::THEME_PUT,
+                audit_action::FONT_REVISION_PUT,
+                audit_action::FONT_BYTES_PUT,
+            ]
+        );
+        assert_eq!(entries[0]["target"], json!(theme));
+        assert!(entries[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Brand default"));
+        assert_eq!(
+            entries[0]["actor"],
+            json!("admin:*"),
+            "a token with no identity says which kind of credential acted"
+        );
+        let times: Vec<u64> = entries
+            .iter()
+            .map(|entry| entry["at"].as_u64().unwrap())
+            .collect();
+        assert!(
+            times.windows(2).all(|pair| pair[0] >= pair[1]),
+            "{times:?} is not newest first"
+        );
+    }
+
+    /// The window is what lets the console answer "上周谁动过" without someone
+    /// paging through the log by hand, so a bound that cannot be honoured has to
+    /// fail loudly: an empty result for `from=2026-02-30` would read as a
+    /// statement about the past.
+    #[tokio::test]
+    async fn audit_route_reads_a_utc_day_window_and_refuses_bounds_that_are_not_days() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let read = |query: AuditQuery| {
+            let state = state.clone();
+            let admin = admin.clone();
+            async move { catalog_audit(State(state), Query(query), admin).await }
+        };
+
+        // The writer always stamps the current day, so an older day has to come
+        // off disk: two lines in January 2020, newest first as appended.
+        let older = state.catalog.root().join("audit").join("2020-01-01.jsonl");
+        std::fs::create_dir_all(older.parent().unwrap()).unwrap();
+        std::fs::write(
+            &older,
+            [
+                json!({
+                    // Appended oldest first, as the writer does: 2020-01-01 UTC.
+                    "at": 1_577_836_800_000u64,
+                    "action": audit_action::THEME_PUT,
+                    "target": "old-theme",
+                    "actor": "admin:*",
+                    "detail": "一个老主题",
+                }),
+                json!({
+                    "at": 1_577_836_860_000u64,
+                    "action": audit_action::FONT_BYTES_PUT,
+                    "target": "old-serif",
+                    "actor": "admin:*",
+                }),
+            ]
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<String>()
+            .as_bytes(),
+        )
+        .unwrap();
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+
+        // No window reads across the files, newest day first.
+        let all = read(AuditQuery {
+            limit: None,
+            from: None,
+            to: None,
+        })
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(
+            all["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["action"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                audit_action::THEME_PUT,
+                audit_action::FONT_REVISION_PUT,
+                audit_action::FONT_BYTES_PUT,
+                audit_action::FONT_BYTES_PUT,
+                audit_action::THEME_PUT,
+            ],
+            "the days are not stitched together newest-first"
+        );
+        assert_eq!(all["entries"][0]["target"], json!(theme));
+        assert_eq!(all["entries"][4]["target"], json!("old-theme"));
+        assert_eq!(all["from"], Value::Null, "an open bound stays open");
+        assert_eq!(all["to"], Value::Null);
+        assert_eq!(all["truncated"], json!(false), "five lines fit one page");
+
+        // Both ends are inclusive, and the answer names the window it applied.
+        let past = read(AuditQuery {
+            limit: None,
+            from: Some("2020-01-01".to_string()),
+            to: Some("2020-01-01".to_string()),
+        })
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(past["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(past["from"], json!("2020-01-01"));
+        assert_eq!(past["to"], json!("2020-01-01"));
+
+        // A window with nothing in it is an honest empty, not an error.
+        let quiet = read(AuditQuery {
+            limit: None,
+            from: Some("2015-01-01".to_string()),
+            to: Some("2016-01-01".to_string()),
+        })
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(quiet["entries"], json!([]));
+        assert_eq!(quiet["truncated"], json!(false));
+
+        // `from` alone means "since", so the older day drops out.
+        let since = read(AuditQuery {
+            limit: None,
+            from: Some("2024-01-01".to_string()),
+            to: None,
+        })
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(since["entries"].as_array().unwrap().len(), 3);
+        assert_eq!(since["from"], json!("2024-01-01"));
+        assert_eq!(since["to"], Value::Null);
+
+        // A limit that spends itself inside a window says so, because the rows
+        // not shown are real rows the caller asked for.
+        let tight = read(AuditQuery {
+            limit: Some(1),
+            from: Some("2020-01-01".to_string()),
+            to: None,
+        })
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(tight["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(tight["truncated"], json!(true));
+
+        // Half-filled query strings are the browser leaving a bound open, not a
+        // request about a day that does not exist.
+        for open in ["", "   "] {
+            let answer = read(AuditQuery {
+                limit: None,
+                from: Some(open.to_string()),
+                to: None,
+            })
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(answer["from"], Value::Null, "{open:?} closed the window");
+            assert_eq!(answer["entries"].as_array().unwrap().len(), 5);
+        }
+
+        for rejected in [
+            "2026-02-30",
+            "2023-02-29",
+            "2026-13-01",
+            "2026-2-1",
+            "next-tuesday",
+        ] {
+            let error = read(AuditQuery {
+                limit: None,
+                from: Some(rejected.to_string()),
+                to: None,
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST, "{rejected} accepted");
+            let message = error.1.to_string();
+            assert!(
+                message.contains("from") && message.contains(rejected),
+                "{message}"
+            );
+
+            let error = read(AuditQuery {
+                limit: None,
+                from: None,
+                to: Some(rejected.to_string()),
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.0,
+                StatusCode::BAD_REQUEST,
+                "{rejected} accepted as `to`"
+            );
+            assert!(error.1.to_string().contains("to"), "{}", error.1);
+        }
+
+        let inverted = read(AuditQuery {
+            limit: None,
+            from: Some("2024-06-01".to_string()),
+            to: Some("2024-05-01".to_string()),
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(inverted.0, StatusCode::BAD_REQUEST);
+        assert!(
+            inverted.1.to_string().contains("2024-06-01"),
+            "{}",
+            inverted.1
+        );
+
+        // A wrong window is still admin-only: the bounds are not read before the
+        // caller is identified.
+        let unauthorized = catalog_audit(
+            State(state.clone()),
+            Query(AuditQuery {
+                limit: None,
+                from: Some("nonsense".to_string()),
+                to: None,
+            }),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unauthorized.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn every_finished_catalog_change_appends_a_line_and_a_refusal_none() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer_as(secret, "*", "admin", Some("op-1"), Some("林运营"));
+
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path("demo-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Demo Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: license(),
+            }),
+        )
+        .await
+        .unwrap();
+        let theme = catalog_put_theme(
+            State(state.clone()),
+            admin.clone(),
+            Json(NewThemeBody {
+                name: "Brand default".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "demo-serif".to_string(),
+                        font_revision_id: revision.0.font_revision_id.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots::default(),
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap()
+        .0
+        .theme_revision_id;
+
+        // Retire it, retire it a second time, then bring it back.
+        for _ in 0..2 {
+            let _ = catalog_retire_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+                .await
+                .unwrap();
+        }
+        let _ = catalog_unretire_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+            .await
+            .unwrap();
+
+        // A document pins it; pinning the same theme again changes nothing.
+        let body = || {
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme.clone()),
+            })
+        };
+        imported_bundle(&temp.path().join("doc-a.hcd"), "doc-a", None);
+        let _ = pin_theme(
+            State(state.clone()),
+            Path("doc-a".to_string()),
+            admin.clone(),
+            body(),
+        )
+        .await
+        .unwrap();
+        let _ = pin_theme(
+            State(state.clone()),
+            Path("doc-a".to_string()),
+            admin.clone(),
+            body(),
+        )
+        .await
+        .unwrap();
+
+        // Refused requests are not recorded: nothing was changed.
+        let counted = state
+            .catalog
+            .audit_entries(MAX_AUDIT_LIMIT)
+            .unwrap()
+            .entries
+            .len();
+        assert_eq!(
+            pin_theme(
+                State(state.clone()),
+                Path("doc-a".to_string()),
+                bearer(secret, "doc-a", "read"),
+                body(),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            catalog_delete_theme(State(state.clone()), Path("cd".repeat(32)), admin.clone())
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            state
+                .catalog
+                .audit_entries(MAX_AUDIT_LIMIT)
+                .unwrap()
+                .entries
+                .len(),
+            counted,
+            "a refusal left a line behind"
+        );
+
+        // The document's own writer unpins it, which frees the theme and then the
+        // font for deletion.
+        let writer = bearer_as(secret, "doc-a", "write", Some("editor-7"), Some("陈瑞"));
+        let _ = pin_theme(
+            State(state.clone()),
+            Path("doc-a".to_string()),
+            writer,
+            Json(PinThemeBody {
+                theme_revision_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        // The document's history still cites the theme it pinned once, so the theme
+        // stays reachable from here until the bundle itself goes.
+        std::fs::remove_dir_all(temp.path().join("doc-a.hcd")).unwrap();
+        let _ = catalog_delete_theme(State(state.clone()), Path(theme.clone()), admin.clone())
+            .await
+            .unwrap();
+        let _ = catalog_delete_font(State(state.clone()), Path("demo-serif".to_string()), admin)
+            .await
+            .unwrap();
+
+        let page = state.catalog.audit_entries(MAX_AUDIT_LIMIT).unwrap();
+        let actions: Vec<&str> = page
+            .entries
+            .iter()
+            .map(|entry| entry.action.as_str())
+            .collect();
+        assert_eq!(
+            actions,
+            vec![
+                audit_action::FONT_DELETE,
+                audit_action::THEME_DELETE,
+                audit_action::DOCUMENT_THEME_UNPIN,
+                audit_action::DOCUMENT_THEME_PIN,
+                audit_action::THEME_UNRETIRE,
+                audit_action::THEME_RETIRE,
+                audit_action::THEME_RETIRE,
+                audit_action::THEME_PUT,
+                audit_action::FONT_REVISION_PUT,
+                audit_action::FONT_BYTES_PUT,
+            ],
+            "one line per finished change, newest first, and no line for the no-op re-pin"
+        );
+        assert_eq!(page.unreadable, 0);
+        assert_eq!(page.entries[0].actor, "林运营 (op-1)");
+        assert_eq!(
+            page.entries[2].actor, "陈瑞 (editor-7)",
+            "the document's own writer is named, not the operator"
+        );
+        assert_eq!(page.entries[3].target, "doc-a");
+        assert!(
+            page.entries[3].detail.contains("修订 r0 → r1"),
+            "{}",
+            page.entries[3].detail
+        );
+        assert!(
+            page.entries[3].detail.contains("Brand default"),
+            "{}",
+            page.entries[3].detail
+        );
+        assert!(
+            page.entries[2].detail.contains("修订 r1 → r2"),
+            "{}",
+            page.entries[2].detail
+        );
+        // The repeat retire says out loud that it changed nothing, so two lines are
+        // not read as two state flips.
+        assert!(
+            page.entries[5].detail.contains("本次没有改变"),
+            "{}",
+            page.entries[5].detail
+        );
+        assert!(
+            !page.entries[6].detail.contains("本次没有改变"),
+            "{}",
+            page.entries[6].detail
+        );
+        assert!(page.entries[9].detail.contains(&sha256));
+        assert_eq!(page.entries[9].target, "demo-serif");
+    }
+
+    #[tokio::test]
+    async fn an_import_auto_pin_is_recorded_against_the_uploader() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let mut state = test_state(secret, temp.path());
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        state.default_theme = Some(theme.clone());
+
+        let destination = temp.path().join("doc-new.hcd");
+        imported_bundle(&destination, "doc-new", None);
+        assert_eq!(
+            pin_default_theme(
+                &state.catalog,
+                state.default_theme.as_deref(),
+                &destination,
+                "upload:op-9"
+            ),
+            None
+        );
+
+        let page = state.catalog.audit_entries(MAX_AUDIT_LIMIT).unwrap();
+        let pin = &page.entries[0];
+        assert_eq!(pin.action, audit_action::DOCUMENT_THEME_PIN);
+        assert_eq!(pin.target, "doc-new");
+        assert_eq!(
+            pin.actor, "upload:op-9",
+            "the upload that caused the pin is named, not the service"
+        );
+        assert!(pin.detail.contains("自动钉上"), "{}", pin.detail);
+        assert!(pin.detail.contains(&theme), "{}", pin.detail);
+
+        // A document that arrived carrying its own pin is not touched, and the log
+        // does not claim it was.
+        let counted = page.entries.len();
+        let archive = temp.path().join("doc-own.hcd");
+        imported_bundle(&archive, "doc-own", Some("cd".repeat(32)));
+        assert_eq!(
+            pin_default_theme(
+                &state.catalog,
+                state.default_theme.as_deref(),
+                &archive,
+                "upload:op-9"
+            ),
+            None
+        );
+        assert_eq!(
+            state
+                .catalog
+                .audit_entries(MAX_AUDIT_LIMIT)
+                .unwrap()
+                .entries
+                .len(),
+            counted,
+            "an untouched document was logged"
+        );
+    }
+
+    #[test]
+    fn font_faces_only_keeps_face_lines_and_drops_the_rest() {
+        let css = "@font-face{font-family:'A';src:url(data:font/ttf;base64,AAA)}\n\
+                   :root{--hcd-major-latin:'A',serif}\n\
+                   body[data-hcd-profile=\"semantic-flow\"]{font-family:var(--hcd-major-latin)}\n";
+        assert_eq!(
+            font_faces_only(css),
+            "@font-face{font-family:'A';src:url(data:font/ttf;base64,AAA)}\n"
+        );
+        // A theme with no web face stays empty: the caller asked for font bytes
+        // alone, so nothing else may slip through.
+        assert_eq!(font_faces_only(":root{--hcd-major-latin:'A',serif}\n"), "");
+    }
+
+    #[tokio::test]
+    async fn theme_faces_only_query_serves_font_bytes_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        let id = "doc-a";
+        // A pin on the manifest whose stylesheet has no theme region — the shape a
+        // surface that does not render `/styles` (the semantic editor) needs served
+        // in full, and the shape `faces=only` is for everywhere else.
+        imported_bundle(
+            &temp.path().join(format!("{id}.hcd")),
+            id,
+            Some(theme.clone()),
+        );
+
+        let full = document_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(ThemeQuery {
+                revision: None,
+                faces: None,
+            }),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(full.0.theme_revision_id, theme);
+        let full = full.0.theme.css;
+        assert!(full.contains("@font-face{"), "{full}");
+        assert!(full.contains("--hcd-major-latin:"), "{full}");
+
+        let faces = document_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(ThemeQuery {
+                revision: None,
+                faces: Some("only".to_string()),
+            }),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .unwrap()
+        .0
+        .theme
+        .css;
+        assert!(faces.contains("@font-face{"), "{faces}");
+        assert!(!faces.contains("--hcd-major-latin:"), "{faces}");
+
+        // Any other value is refused instead of quietly serving the full block.
+        assert_eq!(
+            document_theme(
+                State(state),
+                Path(id.to_string()),
+                Query(ThemeQuery {
+                    revision: None,
+                    faces: Some("all".to_string()),
+                }),
+                bearer(secret, id, "read"),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn font_plan_route_answers_what_each_export_would_carry() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        // The seeded license allows OOXML and refuses PDF, which is the split an
+        // operator otherwise has to guess at.
+        let theme = seed_theme(&state, secret, "plan-serif").await;
+        let id = "doc-a";
+        imported_bundle(&temp.path().join(format!("{id}.hcd")), id, None);
+        let admin = bearer(secret, "*", "admin");
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            admin.clone(),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1);
+
+        let plan = document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "docx".to_string(),
+                revision: None,
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(plan["documentId"], id);
+        assert_eq!(plan["revision"], 1);
+        assert_eq!(plan["themeRevisionId"], theme);
+        assert_eq!(plan["kind"], "docx");
+        let entries = plan["entries"].as_array().unwrap().clone();
+        assert_eq!(entries.len(), 1, "{plan}");
+        let word = &entries[0];
+        assert_eq!(word["slots"], serde_json::json!(["major-latin"]));
+        assert_eq!(word["family"], "Demo Serif");
+        assert_eq!(word["format"], "ttf");
+        assert_eq!(word["byteLength"], TTF.len() as u64);
+        assert_eq!(word["embeds"], true);
+        // Nothing to explain, so no reason field at all rather than an empty one.
+        assert!(word.get("reason").is_none(), "{word}");
+
+        let pdf = document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "pdf".to_string(),
+                revision: None,
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(pdf["entries"][0]["embeds"], false);
+        assert!(
+            pdf["entries"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("pdfEmbed is false"),
+            "{pdf}"
+        );
+
+        let workbook = document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "xlsx".to_string(),
+                revision: None,
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(workbook["entries"][0]["embeds"], false);
+        assert!(
+            workbook["entries"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("does not embed font bytes"),
+            "{workbook}"
+        );
+
+        // Revision 0 predates the pin. Whoever holds a file exported from it has
+        // to be told the document was not carrying a managed theme then, instead
+        // of being shown the head's answer.
+        let before = document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "docx".to_string(),
+                revision: Some(0),
+            }),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(before["revision"], 0);
+        assert!(before["themeRevisionId"].is_null(), "{before}");
+        assert!(before["entries"].as_array().unwrap().is_empty(), "{before}");
+
+        // A document that was never pinned answers the same way, and with 200:
+        // carrying no theme is a fact about the export, not a missing record.
+        imported_bundle(&temp.path().join("doc-b.hcd"), "doc-b", None);
+        let unpinned = document_font_plan(
+            State(state.clone()),
+            Path("doc-b".to_string()),
+            Query(FontPlanQuery {
+                kind: "docx".to_string(),
+                revision: None,
+            }),
+            bearer(secret, "doc-b", "read"),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(unpinned["themeRevisionId"].is_null());
+        assert!(unpinned["entries"].as_array().unwrap().is_empty());
+
+        // A format with no embedding rules of its own is refused by name.
+        let error = document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "odt".to_string(),
+                revision: None,
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("docx, pptx, pdf or xlsx"), "{}", error.1);
+
+        // Tokens: the document's own reader, or the operator token. Nothing else.
+        assert!(document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "pptx".to_string(),
+                revision: None,
+            }),
+            bearer(secret, id, "read"),
+        )
+        .await
+        .is_ok());
+        assert_eq!(
+            document_font_plan(
+                State(state.clone()),
+                Path(id.to_string()),
+                Query(FontPlanQuery {
+                    kind: "docx".to_string(),
+                    revision: None,
+                }),
+                bearer(secret, "doc-b", "read"),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            document_font_plan(
+                State(state),
+                Path(id.to_string()),
+                Query(FontPlanQuery {
+                    kind: "docx".to_string(),
+                    revision: None,
+                }),
+                HeaderMap::new(),
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// The point of the renewal note is to reach the operator before the document
+    /// loses its font, so an expiring license comes back as the exporter's own
+    /// sentence and the date it names — not as a flag the page would have to
+    /// interpret, and not as a window the page would have to guess.
+    #[tokio::test]
+    async fn font_plan_route_names_a_license_that_is_about_to_expire() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let admin = bearer(secret, "*", "admin");
+        let uploaded = catalog_put_blob(
+            State(state.clone()),
+            Path("due-serif".to_string()),
+            Query(BlobQuery {
+                format: "ttf".to_string(),
+            }),
+            admin.clone(),
+            Bytes::from_static(TTF),
+        )
+        .await
+        .unwrap();
+        let sha256 = uploaded.0["sha256"].as_str().unwrap().to_string();
+        let expires = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 3 * 86_400_000;
+        let mut due = license();
+        due.expires_at_epoch_ms = Some(expires);
+        let revision = catalog_put_font_revision(
+            State(state.clone()),
+            Path("due-serif".to_string()),
+            admin.clone(),
+            Json(NewFontRevisionBody {
+                family: "Due Serif".to_string(),
+                faces: vec![face(&sha256)],
+                license: due,
+            }),
+        )
+        .await
+        .unwrap();
+        let theme = catalog_put_theme(
+            State(state.clone()),
+            admin.clone(),
+            Json(NewThemeBody {
+                name: "Due brand".to_string(),
+                major: ThemeFontSlots {
+                    latin: Some(FontRef {
+                        font_id: "due-serif".to_string(),
+                        font_revision_id: revision.0.font_revision_id.clone(),
+                    }),
+                    east_asia: None,
+                    bidi: None,
+                },
+                minor: ThemeFontSlots::default(),
+                fallback_families: vec!["serif".to_string()],
+            }),
+        )
+        .await
+        .unwrap();
+        let id = "doc-a";
+        imported_bundle(&temp.path().join(format!("{id}.hcd")), id, None);
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            admin.clone(),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme.0.theme_revision_id.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1);
+
+        let plan = document_font_plan(
+            State(state.clone()),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "docx".to_string(),
+                revision: None,
+            }),
+            admin.clone(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(plan["licenseWarnWindowDays"], LICENSE_WARN_WINDOW_DAYS);
+        let entry = &plan["entries"][0];
+        assert_eq!(entry["embeds"], true, "{plan}");
+        assert_eq!(entry["expiresAtEpochMs"], expires, "{entry}");
+        assert!(entry.get("reason").is_none(), "{entry}");
+        let warning = entry["warning"].as_str().unwrap();
+        assert!(warning.contains("Due Serif"), "{warning}");
+        assert!(warning.contains("in 3 days"), "{warning}");
+        assert!(warning.contains("can no longer be embedded"), "{warning}");
+
+        // This license still allows OOXML and refuses PDF, so the PDF answer is
+        // one sentence, not two: a face that stays out of the file says why, and
+        // is not also told to renew. The date itself is still reported, because it
+        // is a fact about the face whatever the export does with its bytes.
+        let pdf = document_font_plan(
+            State(state),
+            Path(id.to_string()),
+            Query(FontPlanQuery {
+                kind: "pdf".to_string(),
+                revision: None,
+            }),
+            admin,
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(pdf["entries"][0]["embeds"], false);
+        assert!(pdf["entries"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("pdfEmbed is false"));
+        assert!(pdf["entries"][0].get("warning").is_none(), "{pdf}");
+        assert_eq!(pdf["entries"][0]["expiresAtEpochMs"], expires);
+    }
+
+    #[tokio::test]
+    async fn a_pinned_document_gets_theme_bytes_not_a_second_copy_of_its_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"unit-test-catalog-secret-0123456789";
+        let state = test_state(secret, temp.path());
+        let theme = seed_theme(&state, secret, "demo-serif").await;
+        let id = "doc-a";
+        imported_bundle(&temp.path().join(format!("{id}.hcd")), id, None);
+
+        // The pin the console and the CLI both go through: a content revision whose
+        // stylesheet is the one copy of the theme's declarations.
+        let pinned = pin_theme(
+            State(state.clone()),
+            Path(id.to_string()),
+            bearer(secret, id, "write"),
+            Json(PinThemeBody {
+                theme_revision_id: Some(theme),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.0.revision, 1);
+
+        let bundle = open(&state, id).unwrap();
+        let manifest = bundle.manifest().unwrap();
+        let styles = bundle.read_styles_part(&manifest.styles_href).unwrap();
+        assert!(styles.contains("/* hcd-theme-begin */"), "{styles}");
+        assert_eq!(styles.matches("--hcd-major-latin:").count(), 1, "{styles}");
+
+        // What the HTML presentation adds on top of that stylesheet: the bytes, and
+        // nothing that would make two stylesheets claim one document.
+        let transport = hcd_core::theme_presentation_css(&state.catalog, &bundle, None)
+            .unwrap()
+            .unwrap();
+        assert!(transport.contains("@font-face{"), "{transport}");
+        assert!(transport.contains("Demo Serif"), "{transport}");
+        assert!(!transport.contains("--hcd-major-latin:"), "{transport}");
+        assert!(!transport.contains("body[data-hcd-profile"), "{transport}");
+    }
+    #[tokio::test]
+    async fn authenticated_tools_initialize_semantic_editing_and_guard_document_and_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"agent-tool-test-secret-01234567890123456789";
+        let state = test_state(secret, temp.path());
+        let id = "agent-tool-doc";
+        let source = temp.path().join("source.txt");
+        std::fs::write(&source, "Original text\n").unwrap();
+        hcd_formats::import_document(
+            &source,
+            temp.path().join(format!("{id}.hcd")),
+            &hcd_formats::ImportOptions::new(id),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let headers = bearer_as(secret, id, "write", Some("agent-a"), Some("Agent A"));
+        let read = |resource| json!({"document_id":id,"resource":resource});
+        let initial = agent_tools::call(
+            state.clone(),
+            id.into(),
+            headers.clone(),
+            "hcd_read",
+            read("manifest"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(initial["capabilities"]["structurePatch"], false);
+        let projected = agent_tools::call(
+            state.clone(),
+            id.into(),
+            headers.clone(),
+            "hcd_project",
+            json!({"document_id":id,"expected_revision":0,"collaboration_epoch":0}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(projected["revision"], 1);
+        let projection = agent_tools::call(
+            state.clone(),
+            id.into(),
+            headers.clone(),
+            "hcd_read",
+            read("editor"),
+        )
+        .await
+        .unwrap();
+        let block = &projection["blocks"][0];
+        let args = json!({"document_id":id,"mode":"structure","expected_revision":1,"collaboration_epoch":0,
+            "patch":{"schemaVersion":"hcd-patch/4","documentId":id,"patchId":"agent-tool-patch","baseRevision":1,
+                "operations":[{"op":"block.replace","blockId":block["blockId"],"block":{"kind":"paragraph","inlines":[{"text":"Verified edit"}]},"precondition":{"blockHash":block["blockHash"]}}]}});
+        let denied = agent_tools::call(
+            state.clone(),
+            id.into(),
+            bearer_as(secret, id, "read", Some("reader"), None),
+            "hcd_patch",
+            args.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            agent_tools::call(
+                state.clone(),
+                id.into(),
+                headers.clone(),
+                "hcd_read",
+                json!({"document_id":"other-document","resource":"manifest"})
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let saved = agent_tools::call(
+            state.clone(),
+            id.into(),
+            headers.clone(),
+            "hcd_patch",
+            args.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved["revision"], 2);
+        assert_eq!(
+            agent_tools::call(state.clone(), id.into(), headers.clone(), "hcd_patch", args)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+        let projection = agent_tools::call(
+            state.clone(),
+            id.into(),
+            headers,
+            "hcd_read",
+            read("editor"),
+        )
+        .await
+        .unwrap();
+        assert!(projection.to_string().contains("Verified edit"));
+        assert_eq!(std::fs::read_to_string(source).unwrap(), "Original text\n");
+        let record = open(&state, id).unwrap().revision(2).unwrap();
+        assert_eq!(record.author_id.as_deref(), Some("agent-a"));
+    }
+
+    #[tokio::test]
+    async fn mcp_http_sessions_negotiate_and_require_current_document_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"mcp-http-test-secret-01234567890123456789";
+        let state = test_state(secret, temp.path());
+        let id = "mcp-http-doc";
+        let source = temp.path().join("source.txt");
+        std::fs::write(&source, "MCP baseline\n").unwrap();
+        hcd_formats::import_document(
+            &source,
+            temp.path().join(format!("{id}.hcd")),
+            &hcd_formats::ImportOptions::new(id),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let mut headers = bearer_as(secret, id, "write", Some("agent-a"), None);
+        let response = mcp_http::post(State(state.clone()),Path(id.into()),headers.clone(),Json(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"inline-test","version":"1"}}}))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let key = response.headers().get("mcp-session-id").unwrap().clone();
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["result"]["protocolVersion"], "2025-06-18");
+        headers.insert("mcp-session-id", key.clone());
+        headers.insert("mcp-protocol-version", "2025-06-18".parse().unwrap());
+        let response = mcp_http::post(
+            State(state.clone()),
+            Path(id.into()),
+            headers.clone(),
+            Json(json!({"jsonrpc":"2.0","method":"notifications/initialized"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let response = mcp_http::post(
+            State(state.clone()),
+            Path(id.into()),
+            headers.clone(),
+            Json(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})),
+        )
+        .await
+        .unwrap();
+        let body = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("hcd_activity"));
+        assert!(body.contains("hcd_project"));
+        assert!(!body.contains("token_env"));
+        assert!(!body.contains("\"name\":\"raw\""));
+        let mut stolen = bearer_as(secret, id, "write", Some("agent-b"), None);
+        stolen.insert("mcp-session-id", key);
+        stolen.insert("mcp-protocol-version", "2025-06-18".parse().unwrap());
+        let result = mcp_http::post(
+            State(state.clone()),
+            Path(id.into()),
+            stolen,
+            Json(json!({"jsonrpc":"2.0","id":3,"method":"ping"})),
+        )
+        .await;
+        assert_eq!(result.err().unwrap().0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            mcp_http::get(State(state.clone()), Path(id.into()), headers.clone())
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        assert_eq!(
+            mcp_http::delete(State(state.clone()), Path(id.into()), headers.clone())
+                .await
+                .unwrap(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            mcp_http::get(State(state), Path(id.into()), headers)
+                .await
+                .err()
+                .unwrap()
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn model_tasks_validate_access_and_input_before_calling_a_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = b"model-run-test-secret-01234567890123456789";
+        let state = test_state(secret, temp.path());
+        let id = "model-test-doc";
+        let source = temp.path().join("source.txt");
+        std::fs::write(&source, "Do not change\n").unwrap();
+        hcd_formats::import_document(
+            &source,
+            temp.path().join(format!("{id}.hcd")),
+            &hcd_formats::ImportOptions::new(id),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let request = || Json(serde_json::from_value(json!({"task":"   "})).unwrap());
+        assert_eq!(
+            agent_runs::start(
+                State(state.clone()),
+                Path(id.into()),
+                bearer_as(secret, id, "read", Some("reader"), None),
+                request()
+            )
+            .await
+            .err()
+            .unwrap()
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            agent_runs::start(
+                State(state.clone()),
+                Path(id.into()),
+                bearer_as(secret, id, "write", Some("writer"), None),
+                request()
+            )
+            .await
+            .err()
+            .unwrap()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert!(state.agent_runs.lock().await.is_empty());
+        assert_eq!(open(&state, id).unwrap().manifest().unwrap().revision, 0);
+    }
 }

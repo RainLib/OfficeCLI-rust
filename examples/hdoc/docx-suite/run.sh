@@ -98,10 +98,10 @@ docx_suite_emit_result() {
     --arg caseKey "$DOCX_SUITE_CASE_KEY" \
     --arg artifactDir "${DOCX_SUITE_CASE_DIR#"$DOCX_SUITE_OUTPUT_ROOT"/}" \
     --rawfile failures "$DOCX_SUITE_FAILURES_FILE" \
-    --slurpfile manifest "$DOCX_SUITE_MANIFEST" \
-    --slurpfile noopFidelity "$DOCX_SUITE_NOOP_FIDELITY" \
-    --slurpfile patchedFidelity "$DOCX_SUITE_PATCHED_FIDELITY" \
-    --slurpfile sourceValidation "$DOCX_SUITE_SOURCE_VALIDATION" \
+    --slurpfile manifest <(if [[ -s "$DOCX_SUITE_MANIFEST" ]]; then cat "$DOCX_SUITE_MANIFEST"; else printf 'null\n'; fi) \
+    --slurpfile noopFidelity <(if [[ -s "$DOCX_SUITE_NOOP_FIDELITY" ]]; then cat "$DOCX_SUITE_NOOP_FIDELITY"; else printf 'null\n'; fi) \
+    --slurpfile patchedFidelity <(if [[ -s "$DOCX_SUITE_PATCHED_FIDELITY" ]]; then cat "$DOCX_SUITE_PATCHED_FIDELITY"; else printf 'null\n'; fi) \
+    --slurpfile sourceValidation <(if [[ -s "$DOCX_SUITE_SOURCE_VALIDATION" ]]; then cat "$DOCX_SUITE_SOURCE_VALIDATION"; else printf 'null\n'; fi) \
     '{
       status: $status,
       source: $source,
@@ -355,21 +355,26 @@ docx_suite_run_case() {
 }
 
 cd "$DOCX_SUITE_REPO_ROOT"
+DOCX_SUITE_EXPECTED_COUNT=0
 while IFS= read -r DOCX_SUITE_SOURCE_REL; do
   [[ -z "$DOCX_SUITE_SOURCE_REL" ]] && continue
   if [[ ! -f "$DOCX_SUITE_REPO_ROOT/$DOCX_SUITE_SOURCE_REL" ]]; then
     printf '%s\n' "$DOCX_SUITE_SOURCE_REL" >> "$DOCX_SUITE_MISSING"
     continue
   fi
+  DOCX_SUITE_EXPECTED_COUNT=$((DOCX_SUITE_EXPECTED_COUNT + 1))
   echo "Testing HCD pipeline: $DOCX_SUITE_SOURCE_REL"
   docx_suite_run_case "$DOCX_SUITE_SOURCE_REL"
 done < <(git ls-files 'examples/**/*.docx' | sort)
 
 jq -s \
   --rawfile missing "$DOCX_SUITE_MISSING" \
+  --argjson expected "$DOCX_SUITE_EXPECTED_COUNT" \
   '{
     schemaVersion: "officecli-hdoc-docx-suite/1",
     total: length,
+    expected: $expected,
+    missingResults: ($expected - length),
     passed: (map(select(.status == "passed")) | length),
     failed: (map(select(.status == "failed")) | length),
     trackedMissing: ($missing | split("\n") | map(select(length > 0))),
@@ -396,6 +401,6 @@ find "$DOCX_SUITE_OUTPUT_ROOT" -type f -print | sort \
 DOCX_SUITE_FAILED_COUNT="$(jq -r '.failed' "$DOCX_SUITE_OUTPUT_ROOT/summary.json")"
 echo "HCD DOCX suite artifacts: $DOCX_SUITE_OUTPUT_ROOT"
 echo "Summary: $(jq -c '{total, passed, failed, trackedMissing}' "$DOCX_SUITE_OUTPUT_ROOT/summary.json")"
-if [[ "$DOCX_SUITE_FAILED_COUNT" -ne 0 ]]; then
+if [[ "$DOCX_SUITE_FAILED_COUNT" -ne 0 ]] || ! jq -e '(.total == .expected) and (.trackedMissing | length == 0)' "$DOCX_SUITE_OUTPUT_ROOT/summary.json" >/dev/null; then
   exit 1
 fi

@@ -1,0 +1,21 @@
+{
+  "status": "passed",
+  "output": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-table-cells-h7kd9pa5",
+  "schema": "hcd-patch/67",
+  "nativeText": "ROW 00Value 00ROW 01Value 01",
+  "unchangedParts": [
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "word/_rels/document.xml.rels",
+    "word/styles.xml",
+    "word/settings.xml",
+    "word/footer1.xml",
+    "word/header1.xml",
+    "word/header-first.xml",
+    "word/header-even.xml"
+  ],
+  "staleHashRejected": true,
+  "splitAddedEditableCells": 3,
+  "guardedRestore": true,
+  "sourceUnchanged": true
+}

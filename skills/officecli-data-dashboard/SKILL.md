@@ -11,10 +11,10 @@ A dashboard is not "a spreadsheet with charts". It is a composition: **one Dashb
 
 If `officecli` is missing:
 
-- **macOS / Linux**: `curl -fsSL https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.sh | bash`
-- **Windows (PowerShell)**: `irm https://raw.githubusercontent.com/RainLib/OfficeCli-rust/main/install.ps1 | iex`
+- **macOS / Linux**: `curl -fsSL https://raw.githubusercontent.com/RainLib/Foldly/main/install.sh | bash`
+- **Windows (PowerShell)**: `irm https://raw.githubusercontent.com/RainLib/Foldly/main/install.ps1 | iex`
 
-Verify with `officecli --version` (open a new terminal if PATH hasn't picked up). If install fails, download a binary from https://github.com/RainLib/OfficeCli-rust/releases.
+Verify with `officecli --version` (open a new terminal if PATH hasn't picked up). If install fails, download a binary from https://github.com/RainLib/Foldly/releases.
 
 ## ⚠️ Help-First Rule
 

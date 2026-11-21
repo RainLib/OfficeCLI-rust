@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-7.68 -7.68 79.36 79.36" width="79.36" height="79.36" role="img" aria-label="春樱花瓣"><title>春樱花瓣</title><style>.canvas-sticker-motion { transform-box: fill-box; transform-origin: center; }
+[data-motion=float] .canvas-sticker-motion{animation:sticker-float 4.8s ease-in-out infinite}[data-motion=wiggle] .canvas-sticker-motion{animation:sticker-wiggle 6s ease-in-out infinite}[data-motion=twinkle] .canvas-sticker-motion{animation:sticker-twinkle 4s ease-in-out infinite}
+@keyframes sticker-float{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-3px) rotate(2deg)}}
+@keyframes sticker-wiggle{0%,65%,100%{transform:rotate(0)}72%{transform:rotate(-6deg)}80%{transform:rotate(5deg)}88%{transform:rotate(-3deg)}}
+@keyframes sticker-twinkle{0%,100%{transform:scale(.98);opacity:.88}50%{transform:scale(1.05);opacity:1}}
+[data-motion=drift] :is([data-sticker-layer=petal-near], [data-sticker-layer=petal-far]) {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: petal-drift 5.6s ease-in-out infinite;
+}
+[data-motion=drift] [data-sticker-layer=petal-far] {
+  animation: petal-turn 7s ease-in-out infinite;
+}
+@keyframes petal-drift {
+  0%, 100% { transform: translate(-1px,-1px) rotate(-9deg); }
+  41% { transform: translate(2.8px,1.6px) rotate(13deg); }
+  70% { transform: translate(1px,3.6px) rotate(4deg); }
+}
+@keyframes petal-turn {
+  0%, 100% { transform: translate(0,0) rotate(5deg); }
+  54% { transform: translate(-2.2px,3.2px) rotate(-17deg); }
+}
+[data-motion=flutter] :is([data-sticker-layer=wing-left], [data-sticker-layer=wing-right]) {
+  transform-box: view-box;
+  transform-origin: 50% 53%;
+  animation: sticker-wing 4.8s ease-in-out infinite;
+}
+[data-motion=flutter] [data-sticker-layer=wing-left] { --wing-tilt: 3deg; }
+[data-motion=flutter] [data-sticker-layer=wing-right] { --wing-tilt: -3deg; }
+@keyframes sticker-wing {
+  0%, 36%, 70%, 100% { transform: scaleX(1); }
+  48% { transform: scaleX(.64) rotate(var(--wing-tilt)); }
+  59% { transform: scaleX(.90); }
+  64% { transform: scaleX(.83); }
+}
+[data-motion=flight] [data-sticker-layer=plane] {
+  transform-box: fill-box;
+  transform-origin: 68% 36%;
+  animation: sticker-glide 5.4s ease-in-out infinite;
+}
+[data-motion=flight] [data-sticker-layer=trail] { animation: sticker-trail 5.4s ease-in-out infinite; }
+@keyframes sticker-glide {
+  0%, 100% { transform: translate(-1px,1px) rotate(-2deg); }
+  48% { transform: translate(2.5px,-1.8px) rotate(2deg); }
+  78% { transform: translate(.6px,-.6px) rotate(0deg); }
+}
+@keyframes sticker-trail {
+  0%, 100% { stroke-dashoffset: 0; opacity: .82; }
+  48% { stroke-dashoffset: -4; opacity: 1; }
+}
+[data-motion] :is(.canvas-sticker-motion, [data-sticker-layer]) { animation-delay: var(--sticker-phase, 0s); }
+@media (prefers-reduced-motion: reduce), print {
+  .canvas-sticker-motion, [data-sticker-layer] { animation: none !important; }
+}
+[data-paused=true] :is(.canvas-sticker-motion, [data-sticker-layer]) { animation: none !important; }
+</style><svg width="64" height="64" viewBox="0 0 64 64" overflow="visible" data-motion="drift"><g class="canvas-sticker-motion"><g><polyline points="8,54 10.5,52.1 12.8,49.9 14.9,47.3 16.9,44.5 18.8,41.5 20.7,38.4 22.7,35.2 24.8,32.1 27,29 28.5,26.6 30.2,24.5 32.1,22.5 34.5,20.5 37.4,18.4 41,16" fill="transparent" stroke="#FFF9ED" stroke-width="4.8" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><polyline points="8,54 10.5,52.1 12.8,49.9 14.9,47.3 16.9,44.5 18.8,41.5 20.7,38.4 22.7,35.2 24.8,32.1 27,29 28.5,26.6 30.2,24.5 32.1,22.5 34.5,20.5 37.4,18.4 41,16" fill="transparent" stroke="#725243" stroke-width="1.9" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><polyline points="16,45 13.2,44.7 10.8,43.9 8.8,42.5 7.1,40.6 5.9,38.1 5,35 8.4,35 11.4,35.6 14,37 16.2,39.2 18,42 16,45" fill="#729685" stroke="#FFF9ED" stroke-width="1.5" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><polyline points="18,43 19.5,40.3 21.2,38.2 23.2,36.8 25.6,35.9 28.1,35.6 31,36 29.5,38.8 27.7,41.1 25.5,43 23,44.4 20.2,45.4 17,46 18,43" fill="#A9B793" stroke="#FFF9ED" stroke-width="1.5" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><polyline points="8,37 11.1,38.6 13.8,40.6 16,43" fill="transparent" stroke="#456D62" stroke-width="1" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><polyline points="33,32 30.9,35.1 28.3,37.2 25.7,38 23.1,37.7 21,36 20,34.2 21,31 17.2,31.5 14.2,30.8 12.3,29.2 11.5,26.8 12,24 15,23 13,21 14.2,19.1 16.5,18.1 19.3,17.9 22.3,18.6 25,20 23.7,16.4 23.3,13.2 23.9,10.5 25.5,8.7 28,8 31,11 33,7 35.2,7.100000000000001 36.9,8.3 38,10.399999999999999 38.4,13 38.1,16 37,19 39.6,17.1 42.4,16.1 45.1,15.899999999999999 47.4,16.6 49,18 47,21 50,22 48.7,24.7 46.4,26.8 43.4,28.2 40.2,28.6 37,28 40,30 41.9,32.3 42.6,34.7 42.3,37 41,39 38,38 37,41 34.9,40.4 33.5,38.8 32.9,35.9 33,32" fill="#F2A5A4" stroke="#FFFCF4" stroke-width="3.2" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><polyline points="30,24 28.4,20.8 27.8,17.8 28,15" fill="transparent" stroke="#D57C80" stroke-width="1.35" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><polyline points="27,25 23.8,23.4 20.8,22.8 18,23" fill="transparent" stroke="#D57C80" stroke-width="1.3" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><polyline points="29,29 26,31.5 23,33" fill="transparent" stroke="#D57C80" stroke-width="1.3" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><polyline points="34,25 37.2,22.7 40.2,21 43,20" fill="transparent" stroke="#D57C80" stroke-width="1.3" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><polyline points="34,29 36.5,32 38,35" fill="transparent" stroke="#D57C80" stroke-width="1.3" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><ellipse cx="31.049999999999955" cy="27.299999999999997" rx="4.25" ry="4" fill="#DF9A67" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><ellipse cx="31.05000000000009" cy="26.85" rx="2.65" ry="2.35" fill="#F9D68A" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><ellipse cx="29" cy="24" rx="1" ry="1" fill="#825645" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><ellipse cx="35" cy="26.5" rx="1" ry="1" fill="#825645" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><ellipse cx="30.9" cy="30.9" rx="0.9" ry="0.9" fill="#825645" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round"/></g><g data-sticker-layer="petal-near"><polyline points="44,44 45.2,40.9 47,38.8 49.2,37.4 52,37 53,39 56,38 56,40.3 55,42.3 53.2,44.1 50.6,45.7 47,47 44.2,46.2 44,44" fill="#EFA3A3" stroke="#FFFCF4" stroke-width="1.7" opacity="1" stroke-linejoin="round" stroke-linecap="round"/><polyline points="47,44 49.8,42.2 52,41" fill="transparent" stroke="#CA777D" stroke-width="0.95" opacity="1" stroke-linejoin="round" stroke-linecap="round"/></g><g data-sticker-layer="petal-far"><polyline points="49,18 48.9,15.2 49.8,12.8 51.4,10.7 54,9 56,10 58,9 58.4,11.4 57.5,13.8 55.4,15.9 52,18 49,18" fill="#F5BDAB" stroke="#FFFCF4" stroke-width="1.6" opacity="1" stroke-linejoin="round" stroke-linecap="round"/></g></g></svg></svg>

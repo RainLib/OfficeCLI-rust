@@ -1,0 +1,67 @@
+.hcd-surface dialog.hcd-dialog.pptx-animation-dialog {
+  width: min(660px, calc(100vw - 28px));
+  max-width: calc(100vw - 28px);
+  max-height: calc(100dvh - 32px);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+}
+.pptx-animation-dialog::backdrop { background: #18202060; }
+.pptx-animation-dialog header,
+.pptx-animation-row-title,
+.pptx-animation-add,
+.pptx-animation-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pptx-animation-dialog header { justify-content: space-between; padding-bottom: 12px; }
+.hcd-surface .pptx-animation-dialog h2 { margin: 0; }
+.pptx-animation-add { align-items: flex-end; }
+.pptx-animation-add label { flex: 1; min-width: 0; }
+.pptx-animation-add button { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.pptx-animation-dialog label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+.pptx-animation-dialog :is(input, select) {
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--stage);
+  color: var(--ink);
+}
+.pptx-animation-steps {
+  list-style: none;
+  display: grid;
+  gap: 8px;
+  max-height: calc(100dvh - 285px);
+  min-height: 64px;
+  overflow: auto;
+  padding: 0;
+}
+.pptx-animation-steps li { min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+.pptx-animation-row-title strong { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pptx-animation-number {
+  display: grid;
+  place-items: center;
+  flex: 0 0 24px;
+  min-height: 24px;
+  border-radius: 7px;
+  background: var(--stage);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.pptx-animation-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) repeat(2, minmax(0, .75fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.hcd-surface .pptx-animation-dialog .pptx-animation-empty { padding: 18px 2px; color: var(--muted); }
+.hcd-surface .pptx-animation-dialog [role="alert"] { color: var(--danger, #ac3636); }
+.pptx-animation-dialog footer { display: flex; justify-content: flex-end; gap: 8px; }
+@media (max-width: 540px) {
+  .pptx-animation-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

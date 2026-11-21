@@ -1,0 +1,64 @@
+{
+  "passed": 25,
+  "failed": 1,
+  "duration": "3.1m",
+  "failure": "live retry then undo: ArrowRight left selection at A1; expected B1 value 2, received original A1 text",
+  "rootCauseConfirmed": false,
+  "next": "hold input/history guards until local acknowledgement reconciliation finishes; isolate and instrument keyboard focus",
+  "isolatedLiveRecheck": {
+    "passed": 0,
+    "failed": 1
+  },
+  "diagnosticLiveRun": {
+    "passed": 1,
+    "failed": 0,
+    "duration": "10.5s"
+  },
+  "deterministicSelectionRegression": {
+    "beforeFix": {
+      "passed": 0,
+      "failed": 1
+    },
+    "trigger": "hold remote index response; select C1; release response; selection reverts to A1",
+    "cause": "refreshFromServer unconditionally restores the pre-request selection",
+    "evidence": "selection-before-fix/"
+  },
+  "combinationAfterSelectionFix": {
+    "passed": 38,
+    "failed": 1,
+    "duration": "3.6m",
+    "failure": "live undo navigation still remained at A1; deterministic in-flight selection regression passed",
+    "next": "assert native editor keyboard focus before the key; retain unresolved focus timing evidence"
+  },
+  "focusWaitRecheck": {
+    "passed": 5,
+    "failed": 1,
+    "duration": "1.1m",
+    "focusAssertionPassedBeforeFailure": true
+  },
+  "nativeStateDiagnostics": {
+    "normal": {
+      "passed": 3,
+      "failed": 0,
+      "duration": "32.3s"
+    },
+    "cpu4x": {
+      "passed": 3,
+      "failed": 0,
+      "duration": "33.7s"
+    },
+    "normalRepeated": {
+      "passed": 8,
+      "failed": 0,
+      "duration": "1.4m"
+    },
+    "qualification": "Instrumentation can change timing. These are diagnostic runs, not proof that sub-frame keyboard timing is fixed."
+  },
+  "finalCombination": {
+    "passed": 37,
+    "failed": 2,
+    "duration": "4.0m",
+    "total": 39,
+    "allPassed": false
+  }
+}

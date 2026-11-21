@@ -1,0 +1,160 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="270" viewBox="0 0 720 270" role="img" aria-labelledby="sheet-title">
+  <title id="sheet-title">白板手账的三款动态贴纸与三种笔触</title>
+  <desc>春樱花瓣轻轻飘动，折纸蝶收放双翼，纸飞机缓缓滑行。下方依次是水彩笔、蘸水笔和粉蜡笔的真实标题笔迹。</desc>
+  <style>.canvas-sticker-motion { transform-box: fill-box; transform-origin: center; }
+[data-motion=float] .canvas-sticker-motion{animation:sticker-float 4.8s ease-in-out infinite}[data-motion=wiggle] .canvas-sticker-motion{animation:sticker-wiggle 6s ease-in-out infinite}[data-motion=twinkle] .canvas-sticker-motion{animation:sticker-twinkle 4s ease-in-out infinite}
+@keyframes sticker-float{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-3px) rotate(2deg)}}
+@keyframes sticker-wiggle{0%,65%,100%{transform:rotate(0)}72%{transform:rotate(-6deg)}80%{transform:rotate(5deg)}88%{transform:rotate(-3deg)}}
+@keyframes sticker-twinkle{0%,100%{transform:scale(.98);opacity:.88}50%{transform:scale(1.05);opacity:1}}
+[data-motion=drift] :is([data-sticker-layer=petal-near], [data-sticker-layer=petal-far]) {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: petal-drift 5.6s ease-in-out infinite;
+}
+[data-motion=drift] [data-sticker-layer=petal-far] {
+  animation: petal-turn 7s ease-in-out infinite;
+}
+@keyframes petal-drift {
+  0%, 100% { transform: translate(-1px,-1px) rotate(-9deg); }
+  41% { transform: translate(2.8px,1.6px) rotate(13deg); }
+  70% { transform: translate(1px,3.6px) rotate(4deg); }
+}
+@keyframes petal-turn {
+  0%, 100% { transform: translate(0,0) rotate(5deg); }
+  54% { transform: translate(-2.2px,3.2px) rotate(-17deg); }
+}
+[data-motion=flutter] :is([data-sticker-layer=wing-left], [data-sticker-layer=wing-right]) {
+  transform-box: view-box;
+  transform-origin: 50% 53%;
+  animation: sticker-wing 4.8s ease-in-out infinite;
+}
+[data-motion=flutter] [data-sticker-layer=wing-left] { --wing-tilt: 3deg; }
+[data-motion=flutter] [data-sticker-layer=wing-right] { --wing-tilt: -3deg; }
+@keyframes sticker-wing {
+  0%, 36%, 70%, 100% { transform: scaleX(1); }
+  48% { transform: scaleX(.64) rotate(var(--wing-tilt)); }
+  59% { transform: scaleX(.90); }
+  64% { transform: scaleX(.83); }
+}
+[data-motion=flight] [data-sticker-layer=plane] {
+  transform-box: fill-box;
+  transform-origin: 68% 36%;
+  animation: sticker-glide 5.4s ease-in-out infinite;
+}
+[data-motion=flight] [data-sticker-layer=trail] { animation: sticker-trail 5.4s ease-in-out infinite; }
+@keyframes sticker-glide {
+  0%, 100% { transform: translate(-1px,1px) rotate(-2deg); }
+  48% { transform: translate(2.5px,-1.8px) rotate(2deg); }
+  78% { transform: translate(.6px,-.6px) rotate(0deg); }
+}
+@keyframes sticker-trail {
+  0%, 100% { stroke-dashoffset: 0; opacity: .82; }
+  48% { stroke-dashoffset: -4; opacity: 1; }
+}
+[data-motion] :is(.canvas-sticker-motion, [data-sticker-layer]) { animation-delay: var(--sticker-phase, 0s); }
+@media (prefers-reduced-motion: reduce), print {
+  .canvas-sticker-motion, [data-sticker-layer] { animation: none !important; }
+}
+[data-paused=true] :is(.canvas-sticker-motion, [data-sticker-layer]) { animation: none !important; }
+
+text{font-family:"PingFang SC","Noto Sans CJK SC",system-ui,sans-serif;text-anchor:middle;fill:#443F37}</style>
+  <rect x="0.5" y="0.5" width="719" height="269" rx="20" fill="#FCF8EF" stroke="#D7CDBA" />
+  <path d="M 24 166 H 696" fill="none" stroke="#DED5C6" stroke-width="1" />
+  <path d="M 240 24 V 146 M 240 187 V 247" fill="none" stroke="#E4DBCC" stroke-width="1" />
+  <path d="M 480 24 V 146 M 480 187 V 247" fill="none" stroke="#E4DBCC" stroke-width="1" />
+  <svg width="96" height="96" viewBox="0 0 64 64" overflow="visible" data-motion="drift" x="72" y="14">
+    <g class="canvas-sticker-motion">
+      <g>
+        <polyline points="8,54 10.5,52.1 12.8,49.9 14.9,47.3 16.9,44.5 18.8,41.5 20.7,38.4 22.7,35.2 24.8,32.1 27,29 28.5,26.6 30.2,24.5 32.1,22.5 34.5,20.5 37.4,18.4 41,16" fill="transparent" stroke="#FFF9ED" stroke-width="4.8" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="8,54 10.5,52.1 12.8,49.9 14.9,47.3 16.9,44.5 18.8,41.5 20.7,38.4 22.7,35.2 24.8,32.1 27,29 28.5,26.6 30.2,24.5 32.1,22.5 34.5,20.5 37.4,18.4 41,16" fill="transparent" stroke="#725243" stroke-width="1.9" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="16,45 13.2,44.7 10.8,43.9 8.8,42.5 7.1,40.6 5.9,38.1 5,35 8.4,35 11.4,35.6 14,37 16.2,39.2 18,42 16,45" fill="#729685" stroke="#FFF9ED" stroke-width="1.5" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="18,43 19.5,40.3 21.2,38.2 23.2,36.8 25.6,35.9 28.1,35.6 31,36 29.5,38.8 27.7,41.1 25.5,43 23,44.4 20.2,45.4 17,46 18,43" fill="#A9B793" stroke="#FFF9ED" stroke-width="1.5" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="8,37 11.1,38.6 13.8,40.6 16,43" fill="transparent" stroke="#456D62" stroke-width="1" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="33,32 30.9,35.1 28.3,37.2 25.7,38 23.1,37.7 21,36 20,34.2 21,31 17.2,31.5 14.2,30.8 12.3,29.2 11.5,26.8 12,24 15,23 13,21 14.2,19.1 16.5,18.1 19.3,17.9 22.3,18.6 25,20 23.7,16.4 23.3,13.2 23.9,10.5 25.5,8.7 28,8 31,11 33,7 35.2,7.100000000000001 36.9,8.3 38,10.399999999999999 38.4,13 38.1,16 37,19 39.6,17.1 42.4,16.1 45.1,15.899999999999999 47.4,16.6 49,18 47,21 50,22 48.7,24.7 46.4,26.8 43.4,28.2 40.2,28.6 37,28 40,30 41.9,32.3 42.6,34.7 42.3,37 41,39 38,38 37,41 34.9,40.4 33.5,38.8 32.9,35.9 33,32" fill="#F2A5A4" stroke="#FFFCF4" stroke-width="3.2" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="30,24 28.4,20.8 27.8,17.8 28,15" fill="transparent" stroke="#D57C80" stroke-width="1.35" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="27,25 23.8,23.4 20.8,22.8 18,23" fill="transparent" stroke="#D57C80" stroke-width="1.3" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="29,29 26,31.5 23,33" fill="transparent" stroke="#D57C80" stroke-width="1.3" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="34,25 37.2,22.7 40.2,21 43,20" fill="transparent" stroke="#D57C80" stroke-width="1.3" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="34,29 36.5,32 38,35" fill="transparent" stroke="#D57C80" stroke-width="1.3" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <ellipse cx="31.049999999999955" cy="27.299999999999997" rx="4.25" ry="4" fill="#DF9A67" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <ellipse cx="31.05000000000009" cy="26.85" rx="2.65" ry="2.35" fill="#F9D68A" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <ellipse cx="29" cy="24" rx="1" ry="1" fill="#825645" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <ellipse cx="35" cy="26.5" rx="1" ry="1" fill="#825645" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <ellipse cx="30.9" cy="30.9" rx="0.9" ry="0.9" fill="#825645" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+      </g>
+      <g data-sticker-layer="petal-near">
+        <polyline points="44,44 45.2,40.9 47,38.8 49.2,37.4 52,37 53,39 56,38 56,40.3 55,42.3 53.2,44.1 50.6,45.7 47,47 44.2,46.2 44,44" fill="#EFA3A3" stroke="#FFFCF4" stroke-width="1.7" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="47,44 49.8,42.2 52,41" fill="transparent" stroke="#CA777D" stroke-width="0.95" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+      </g>
+      <g data-sticker-layer="petal-far">
+        <polyline points="49,18 48.9,15.2 49.8,12.8 51.4,10.7 54,9 56,10 58,9 58.4,11.4 57.5,13.8 55.4,15.9 52,18 49,18" fill="#F5BDAB" stroke="#FFFCF4" stroke-width="1.6" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+      </g>
+    </g>
+  </svg>
+  <text x="120" y="139" font-size="15" font-weight="570">春樱花瓣</text>
+  <polyline points="49,200 50.42,196 57.52,194 70.3,195 84.5,193 97.28,194 112.9,192 127.1,193 144.14,191 159.76,192 173.96,191 185.32,192 189.58,194 186.74,198 191,200 186.74,203 169.7,202 154.08,204 137.04,203 118.58,205 100.12,204 81.66,206 63.2,205 53.26,206 50.42,203 49,200" fill="#D48260" stroke="none" stroke-width="0" opacity="0.26" stroke-linecap="round" stroke-linejoin="round" />
+  <polyline points="51.84,200 63.2,199 75.98,200 93.02,198 110.06,199 121.42,197 141.3,198 159.76,195 178.22,196 188.16,194 186.74,198 178.22,200 159.76,200 137.04,202 117.16,201 91.6,203 73.14,202 58.94,204 51.84,203 51.84,200" fill="#D48260" stroke="none" stroke-width="0" opacity="0.23" stroke-linecap="round" stroke-linejoin="round" />
+  <polyline points="50.42,198 56.1,195 68.88,195 80.24,194 94.44,195 111.48,193 122.84,194 115.74,196 91.6,198 71.72,198 57.52,200 50.42,199 50.42,198" fill="#F3CE76" stroke="none" stroke-width="0" opacity="0.25" stroke-linecap="round" stroke-linejoin="round" />
+  <text x="120" y="236" font-size="14" font-weight="470">水彩笔</text>
+  <svg width="96" height="96" viewBox="0 0 64 64" overflow="visible" data-motion="flutter" x="312" y="14">
+    <g class="canvas-sticker-motion">
+      <g data-sticker-layer="wing-left">
+        <polyline points="32,33 29.9,29.5 27.8,26.1 25.6,22.9 23.4,20 21.1,17.4 18.8,15.100000000000001 16.3,13.100000000000001 13.7,11.600000000000001 10.899999999999999,10.600000000000001 8,10 5.899999999999999,10.5 4.5,12 3.8999999999999986,14.5 4,18 4.600000000000001,21.3 5.699999999999999,24.3 7.100000000000001,27.1 9,29.6 11.2,31.8 13.8,33.6 16.8,35 20,36 17,37 15,38.7 13.899999999999999,41 13.7,43.6 14.399999999999999,46.4 16,49 18.4,50.9 20.8,51.7 23.2,51.5 25.6,50.3 28,48 29.8,45.4 31.2,42.5 32.3,39.4 33,36 32,33" fill="#74AAAE" stroke="#FFFCF4" stroke-width="3.1" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="8,14 11,14.9 13.8,16.2 16.6,17.8 19.2,19.8 21.8,22 24.3,24.7 26.7,27.7 29,31 25.5,29.4 22.1,28 18.9,26.6 15.9,25.2 13,24 8,14" fill="#B5D2C4" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="12,26 15.1,26.9 18.1,28.1 20.9,29.5 23.5,31.1 26,33 21.9,32.7 18.5,31.9 15.7,30.5 13.5,28.5 12,26" fill="#4B818B" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="17,44 19.2,41.3 21.8,39.2 24.7,37.8 28,37 26.8,40.7 25,43.8 22.8,46.2 20,48 17,44" fill="#D48260" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <ellipse cx="10.9" cy="18.4" rx="1.4" ry="1.4" fill="#FFF8E9" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <ellipse cx="15" cy="22" rx="1" ry="1" fill="#FFF8E9" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+      </g>
+      <g data-sticker-layer="wing-right">
+        <polyline points="32,34 33.6,30.4 35.2,27 37.1,23.7 39,20.5 41.1,17.6 43.4,15 45.8,12.7 48.4,10.7 51.1,9.100000000000001 54,8 56.6,7.600000000000001 58.5,8.5 59.6,10.600000000000001 60,14 59.4,17.9 58.5,21.4 57.2,24.4 55.6,27.1 53.7,29.5 51.4,31.6 48.9,33.4 46,35 49.2,35.4 51.6,36.5 53.2,38.2 54.1,40.5 54,43.1 53,46 51.6,48.4 50,49.8 48,50.4 45.6,50.2 43,49 40.3,47.2 37.9,45.2 35.7,42.8 33.7,40 32,37 32,34" fill="#8D86B6" stroke="#FFFCF4" stroke-width="3.1" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="56,12 53.3,13.4 50.6,15.1 47.9,17.2 45.2,19.5 42.6,22.2 40.1,25.1 37.5,28.4 35,32 38.8,30 42.3,28.1 45.5,26.2 48.3,24.4 50.8,22.7 53,21 56,12" fill="#D5C2D6" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="54,24 52.2,26.2 50,28.2 47.5,30 44.7,31.6 41.5,32.9 38,34 40.1,32.1 42.4,30.2 45,28.5 47.8,26.9 50.8,25.4 54,24" fill="#746E9F" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="49,44 46.9,41.4 44.7,39.4 42.3,37.8 39.7,36.6 37,36 38.7,39.6 40.7,42.6 42.9,44.8 45.3,46.2 48,47 49,44" fill="#ECAE96" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <ellipse cx="54.3" cy="17.3" rx="1.3" ry="1.3" fill="#FFF8E9" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <ellipse cx="49.95" cy="21.95" rx="0.95" ry="0.95" fill="#FFF8E9" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+      </g>
+      <g>
+        <polyline points="31,32 31.8,35.1 32.2,38.2 32.3,41.6 32,45" fill="transparent" stroke="#5A4843" stroke-width="3.1" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="31,30 29.9,26.4 28.5,23.5 26.9,21.4 25,20" fill="transparent" stroke="#5A4843" stroke-width="1.45" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="32,30 33.1,26.8 34.5,24 36.1,21.8 38,20" fill="transparent" stroke="#5A4843" stroke-width="1.45" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <ellipse cx="25" cy="19.69999999999999" rx="1" ry="1" fill="#94715E" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <ellipse cx="38.299999999999955" cy="19.69999999999999" rx="1" ry="1" fill="#94715E" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <ellipse cx="31.5" cy="30.75" rx="2.5" ry="2.75" fill="#5A4843" stroke="transparent" stroke-width="0" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+      </g>
+    </g>
+  </svg>
+  <text x="360" y="139" font-size="15" font-weight="570">折纸蝶</text>
+  <polyline points="289,202 293.26,200 301.78,198 314.56,196 331.6,195 354.32,195 379.88,196 395.5,196 409.7,195 422.48,193 431,191 428.16,193 419.64,196 408.28,198 394.08,200 375.62,200 354.32,199 334.44,198 320.24,198 306.04,199 294.68,201 289,202" fill="#484439" stroke="none" stroke-width="0" opacity="0.9" stroke-linecap="round" stroke-linejoin="round" />
+  <polyline points="386.98,203 396.92,203 408.28,202 419.64,200 426.74,198" fill="none" stroke="#D48260" stroke-width="1.3" opacity="0.85" stroke-linecap="round" stroke-linejoin="round" />
+  <text x="360" y="236" font-size="14" font-weight="470">蘸水笔</text>
+  <svg width="96" height="96" viewBox="0 0 64 64" overflow="visible" data-motion="flight" x="552" y="14">
+    <g class="canvas-sticker-motion">
+      <g data-sticker-layer="trail">
+        <polyline points="4,52 6.9,53.1 10,53.9 13.3,54.2 16.5,54.1 19.5,53.5 22.1,52.4 24.1,50.8 25.5,48.7 26,46 25.4,43.5 23.9,42 21.9,41.4 19.8,41.7 18,42.9 17,45 17.1,46.5 18.1,47.5 19.7,48.1 22,48.2 24.6,47.7 27.6,46.6 30.7,44.8 33.9,42.3 37,39" fill="transparent" stroke="#8D8274" stroke-width="1.5" opacity="1" stroke-dasharray="3.9000000000000004 4.199999999999999" stroke-linejoin="round" stroke-linecap="round" />
+      </g>
+      <g data-sticker-layer="plane">
+        <polyline points="13,24 56,8 58,8 58,10 45,43 43.8,44 42,43 31,36 25,42 24,31 13,26 12,25 13,24" fill="#F4CFAC" stroke="#FFFCF4" stroke-width="3.8" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="13,24 56,8 24,31 13,26 12,25 13,24" fill="#FDF0D5" stroke="#876956" stroke-width="1.25" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="24,31 56,8 29,34 25,42 24,31" fill="#B78075" stroke="#876956" stroke-width="1.25" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="25,42 29,34 33,37 25,42" fill="#D99C84" stroke="#876956" stroke-width="1.05" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="29,34 56,8 58,8 58,10 45,43 43.8,44 42,43 29,34" fill="#F2BE9B" stroke="#876956" stroke-width="1.25" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="36,32 51,17" fill="transparent" stroke="#FFE7BD" stroke-width="1.5" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+      </g>
+      <g>
+        <polyline points="8,17 12,19" fill="transparent" stroke="#D48260" stroke-width="1.7" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+        <polyline points="15,12 17,16" fill="transparent" stroke="#D48260" stroke-width="1.6" opacity="1" stroke-linejoin="round" stroke-linecap="round" />
+      </g>
+    </g>
+  </svg>
+  <text x="600" y="139" font-size="15" font-weight="570">纸飞机</text>
+  <polyline points="530.42,201 536.1,200 544.62,200.5 554.56,198.5 565.92,199 577.28,197.6 588.64,198.3 602.84,197 617.04,197.3 629.82,196 646.86,196.5 658.22,194.8 669.58,195" fill="none" stroke="#789A7C" stroke-width="5.2" opacity="0.51" stroke-linecap="round" stroke-linejoin="round" />
+  <polyline points="529,203 543.2,202 555.98,200 570.18,200.6 585.8,199.4 598.58,199.6 617.04,198 632.66,199 649.7,197.5 666.74,197" fill="none" stroke="#789A7C" stroke-width="2.2" opacity="0.84" stroke-linecap="round" stroke-linejoin="round" />
+  <polyline points="534.68,196 546.04,196.5 557.4,195 565.92,195.4" fill="none" stroke="#789A7C" stroke-width="1.1" opacity="0.66" stroke-linecap="round" stroke-linejoin="round" />
+  <polyline points="580.12,194.6 591.48,195.1 602.84,194 615.62,194.5" fill="none" stroke="#789A7C" stroke-width="1.2" opacity="0.62" stroke-linecap="round" stroke-linejoin="round" />
+  <polyline points="622.72,194.6 631.24,193.5 641.18,193.9 652.54,192.9 661.06,193" fill="none" stroke="#789A7C" stroke-width="1.4" opacity="0.65" stroke-linecap="round" stroke-linejoin="round" />
+  <polyline points="538.94,200 547.46,199.8 553.14,199" fill="none" stroke="#FCF8EF" stroke-width="1.2" opacity="0.86" stroke-linecap="round" stroke-linejoin="round" />
+  <polyline points="571.6,198.8 578.7,198.1 588.64,198.4" fill="none" stroke="#FCF8EF" stroke-width="0.9" opacity="0.8" stroke-linecap="round" stroke-linejoin="round" />
+  <polyline points="631.24,196.3 639.76,196.6 645.44,196.2" fill="none" stroke="#FCF8EF" stroke-width="1.1" opacity="0.82" stroke-linecap="round" stroke-linejoin="round" />
+  <text x="600" y="236" font-size="14" font-weight="470">粉蜡笔</text>
+</svg>

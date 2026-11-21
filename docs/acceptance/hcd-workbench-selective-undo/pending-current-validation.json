@@ -1,0 +1,9 @@
+{
+  "status": "passed",
+  "root": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-workbench-undo-YtVtXS",
+  "checks": [
+    "An undo racing a distinct user’s unsaved input was rejected; after checkpoint, retry preserved the input.",
+    "Both clients, reload, the server projection and a source-backed DOCX agree."
+  ],
+  "engineProtocolFingerprint": "b09a50c9aede5d778995be061dbd4b0a9c49d8d573d5a1e395114f58de71d016"
+}

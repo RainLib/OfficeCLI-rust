@@ -1,0 +1,29 @@
+{
+  "client": "Codex via selection MCP",
+  "group": "发布评审.excalidraw",
+  "baseline": "我们计划春季发布，首批面向三个试点团队。",
+  "grantedRevision": 0,
+  "revisionWithHumanEdits": 2,
+  "receiptRevision": 3,
+  "readbackRevision": 3,
+  "operation": {
+    "id": "spec-release-body",
+    "block": 1,
+    "start": 4,
+    "end": 6,
+    "expected": "春季",
+    "insert": "秋季"
+  },
+  "readback": "评审结论：我们计划（试点）秋季发布，首批面向三个试点团队。",
+  "reloaded": "发布范围评审结论：我们计划（试点）秋季发布，首批面向三个试点团队。评审前的准备设计组确认首轮试点的入口和退回路径。研发组保留一周观察期，再扩大开放范围。试点结束时，每个团队提交一条可复现的反馈。交付记录统一使用 release-note 记录上线日期与版本。",
+  "marks": {
+    "bold": [
+      "三个试点团队"
+    ],
+    "headings": [
+      "发布范围",
+      "评审前的准备",
+      "交付记录"
+    ]
+  }
+}

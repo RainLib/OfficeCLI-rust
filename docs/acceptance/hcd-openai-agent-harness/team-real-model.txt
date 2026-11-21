@@ -1,0 +1,12 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test e2e/agent-harness.spec.ts -g full PPT rebuild uses --output=/tmp/officecli-team-live-repair
+
+
+Running 1 test using 1 worker
+
+(node:53819) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/agent-harness.spec.ts:224:1 › full PPT rebuild uses the configured team, replaces every old page and exports native content (18.9s)
+
+  1 passed (27.4s)

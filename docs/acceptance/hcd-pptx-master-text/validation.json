@@ -1,0 +1,7 @@
+{
+  "checks": [
+    "A native PPTX inherits placeholder geometry by idx, master styles and theme Latin/CJK fonts. Text edits and pointer moves survive native export/reopen without changing shared layout, master or theme XML.",
+    "Inherited placeholders retain their positions and typography through a native master-background edit and a three-effect animation track; reload, presentation forward/back and native export/reopen preserve the track.",
+    "Edited title and body master text styles through the real dialog. Reload and native export/reopen retain shared font, size, color and explicit false values, while layout, paragraph and direct run overrides remain unchanged and title XML stays inherited."
+  ]
+}

@@ -1,0 +1,13 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test agent-harness.spec.ts --grep Word mixed inline edits preserve|Pen chat drawer preserves draft --output=/tmp/officecli-floating-agent-results
+
+
+Running 2 tests using 1 worker
+
+(node:46159) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/agent-harness.spec.ts:576:1 › Word mixed inline edits preserve cover styles, preview nodes and native source export (5.9s)
+  ✓  2 e2e/agent-harness.spec.ts:1617:1 › Pen chat drawer preserves draft, reading position and expanded tools through collapse and focus mode (2.6s)
+
+  2 passed (22.6s)

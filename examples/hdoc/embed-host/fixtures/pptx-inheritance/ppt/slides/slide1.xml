@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+    <p:sp>
+      <p:nvSpPr><p:cNvPr id="2" name="Inherited title"/><p:cNvSpPr/><p:nvPr><p:ph/></p:nvPr></p:nvSpPr>
+      <p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Master-led layout</a:t></a:r></a:p></p:txBody>
+    </p:sp>
+    <p:sp>
+      <p:nvSpPr><p:cNvPr id="3" name="Inherited body"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="7"/></p:nvPr></p:nvSpPr>
+      <p:spPr/>
+      <p:txBody><a:bodyPr/><a:lstStyle><a:lvl2pPr><a:defRPr sz="1700"/></a:lvl2pPr></a:lstStyle>
+        <a:p><a:r><a:rPr/><a:t>Layout body uses 20 pt</a:t></a:r></a:p>
+        <a:p><a:pPr lvl="1"><a:defRPr b="0" i="0"/></a:pPr><a:r><a:t>Local level uses 17 pt</a:t></a:r></a:p>
+        <a:p><a:pPr algn="r"><a:defRPr sz="1400"/></a:pPr><a:r><a:rPr sz="1200" b="0"><a:solidFill><a:srgbClr val="633b1e"/></a:solidFill><a:latin typeface="Times New Roman"/></a:rPr><a:t>Run override stays 12 pt</a:t></a:r></a:p>
+        <a:p><a:r><a:rPr lang="zh-CN"/><a:t>主题字体与正文继承</a:t></a:r></a:p>
+      </p:txBody>
+    </p:sp>
+    <p:sp>
+      <p:nvSpPr><p:cNvPr id="4" name="Explicit zero position"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="8"/></p:nvPr></p:nvSpPr>
+      <p:spPr><a:xfrm><a:off x="0" y="5486400"/></a:xfrm></p:spPr>
+      <p:txBody><a:bodyPr lIns="0"/><a:lstStyle/><a:p><a:r><a:rPr sz="1200" b="0"/><a:t>Explicit x=0 keeps the inherited extent</a:t></a:r></a:p></p:txBody>
+    </p:sp>
+  </p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:sld>

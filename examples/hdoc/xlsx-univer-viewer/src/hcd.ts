@@ -1,5 +1,72 @@
 export type GridChunkKind = 'cells' | 'picture' | 'chart';
 
+export type WorksheetChartConfig = {
+  kind: 'column' | 'bar' | 'line' | 'pie';
+  title: string;
+  range: { startRow: number; endRow: number; startColumn: number; endColumn: number };
+  anchorRow: number;
+  anchorColumn: number;
+};
+
+export type WorksheetConditionOperator =
+  | 'greaterThan' | 'greaterThanOrEqual' | 'lessThan' | 'lessThanOrEqual'
+  | 'equal' | 'notEqual' | 'between' | 'notBetween';
+
+export type WorksheetConditionConfig = {
+  range: WorksheetChartConfig['range'];
+  operator: WorksheetConditionOperator;
+  values: string[];
+  fill?: string;
+  color?: string;
+  stopIfTrue?: boolean;
+};
+
+export type WorksheetCondition = {
+  id: string;
+  config: WorksheetConditionConfig;
+  sourcePriority?: number;
+  removed?: boolean;
+};
+
+export type PivotAggregate = 'sum' | 'count' | 'average' | 'min' | 'max';
+export type PivotMeasure = { field: number; aggregate: PivotAggregate };
+export type WorksheetPivotConfig = {
+  name: string;
+  sourceSheetId: string;
+  sourceRange: WorksheetChartConfig['range'];
+  anchorRow: number;
+  anchorColumn: number;
+  rows: number[];
+  columns: number[];
+  values: PivotMeasure[];
+};
+export type PivotCell = { type: 'blank' }
+  | { type: 'text' | 'number' | 'error'; value: string }
+  | { type: 'boolean'; value: boolean };
+export type PivotReport = { headerRows: number; labelColumns: number; cells: PivotCell[][] };
+export type WorksheetPivot = {
+  id: string;
+  config: WorksheetPivotConfig;
+  snapshot?: { sourceRevision: number; sourceConfig: WorksheetPivotConfig; report: PivotReport };
+  origin?: { part: string; range: WorksheetChartConfig['range'] };
+  removed?: boolean;
+};
+
+const NO_PIVOTS: readonly WorksheetPivot[] = [];
+
+export function pivotRange(pivot: WorksheetPivot): WorksheetChartConfig['range'] | undefined {
+  if (pivot.removed) return undefined;
+  const report = pivot.snapshot?.report;
+  if (!report) return pivot.origin?.range;
+  return { startRow: pivot.config.anchorRow, endRow: pivot.config.anchorRow + report.cells.length - 1,
+    startColumn: pivot.config.anchorColumn, endColumn: pivot.config.anchorColumn + report.cells[0].length - 1 };
+}
+
+export function pivotContains(range: WorksheetChartConfig['range'] | undefined, row: number, column: number): boolean {
+  return !!range && row + 1 >= range.startRow && row + 1 <= range.endRow
+    && column + 1 >= range.startColumn && column + 1 <= range.endColumn;
+}
+
 export interface GridChunkAddress {
   sheetId: string;
   sheetName: string;
@@ -12,6 +79,9 @@ export interface GridChunkAddress {
   columnEnd?: number;
   defaultColumnWidthEmu?: number;
   defaultRowHeightEmu?: number;
+  charts?: { id: string; config: WorksheetChartConfig; imported?: boolean; removed?: boolean }[];
+  conditions?: WorksheetCondition[];
+  pivots?: WorksheetPivot[];
 }
 
 export interface ChunkDescriptor {
@@ -31,6 +101,7 @@ export interface HcdManifest {
   storageCodec?: 'none' | 'gzip';
   documentId: string;
   profile: string;
+  source?: { format: string };
   revision: number;
   rootHash: string;
   indexPrefix: string;
@@ -68,6 +139,18 @@ export interface LoadedChunk {
   descriptor: ChunkDescriptor;
   html: string;
   map: ChunkSourceMap;
+}
+
+export interface GridCalculationResult {
+  status: 'calculated' | 'unavailable';
+  value: string | null;
+  valueType?: 'number' | 'string' | 'boolean' | 'blank' | 'error' | 'array';
+  error: string | null;
+}
+
+export interface GridCalculatedCell {
+  formula?: string;
+  calculation: GridCalculationResult;
 }
 
 function normalizeBaseUrl(value: string): URL {
@@ -145,10 +228,20 @@ export class HcdBundleClient {
   readonly baseUrl: URL;
   manifest!: HcdManifest;
   descriptors: ChunkDescriptor[] = [];
+
+  worksheetPivots(sheetId: string): readonly WorksheetPivot[] {
+    return this.descriptors.find(({ grid }) => grid?.kind === 'cells' && grid.sheetId === sheetId)?.grid?.pivots ?? NO_PIVOTS;
+  }
   private indexNodes = new Map<string, IndexTreeNode>();
 
   constructor(baseUrl: string) {
     this.baseUrl = normalizeBaseUrl(baseUrl);
+  }
+
+  /** Static bundles retain compatibility caches. Service clients can supply
+   * revision-scoped results without changing immutable source chunks. */
+  async readCalculations(_sheetId: string): Promise<ReadonlyMap<string, GridCalculatedCell> | null> {
+    return null;
   }
 
   resolve(href: string): URL {

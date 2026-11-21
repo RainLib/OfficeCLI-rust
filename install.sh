@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-REPO="RainLib/OfficeCli-rust"
+REPO="RainLib/Foldly"
 BINARY_NAME="officecli"
 GITHUB_RAW_BASE="https://raw.githubusercontent.com/$REPO/main"
 

@@ -1,0 +1,34 @@
+{
+  "sourceSha256": "4e7fbc870321cec5419d5292b82f962e8ab6ac8f4e25d56463563a6e9bf6a743",
+  "nativeSha256": "79d3300a19335700c6a89ca6b410e0cf46817074ec009750aa9d94356ae2cc40",
+  "masterStyles": {
+    "title": {
+      "properties": {
+        "sz": "3600",
+        "b": "0"
+      },
+      "color": "B34E32",
+      "fonts": {
+        "latin": "Verdana",
+        "ea": "Noto Serif SC"
+      }
+    },
+    "body": {
+      "properties": {
+        "sz": "2200",
+        "b": "0"
+      },
+      "color": "334455",
+      "fonts": {
+        "latin": "+mn-lt",
+        "ea": "+mn-ea",
+        "cs": "+mn-cs"
+      }
+    }
+  },
+  "preservedParts": {
+    "ppt/slideLayouts/slideLayout1.xml": "6cb440d47d1ed2f8b47d9c01bc8db4c0ef0d1e7826a15246df12b209b03ad335",
+    "ppt/theme/theme1.xml": "c9d6f060b13276b738e40435f4a26ed6edd18c77489e4648511810c9306be603"
+  },
+  "titleHasDirectRunProperties": false
+}

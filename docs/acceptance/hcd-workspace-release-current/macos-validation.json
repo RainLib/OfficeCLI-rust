@@ -1,0 +1,73 @@
+{
+  "status": "passed",
+  "platform": "darwin/arm64",
+  "package": "0.1.31-reviewed-workspace-20261121-61ca533db4d80d82",
+  "runtimeNode": "v26.13.0",
+  "engine": {
+    "version": "0.1.31",
+    "protocolFingerprint": "9dd62f7cf9f39d9ac1f31f538be07c2c9e4fc0ad23e40889da2df3d16a98fdac"
+  },
+  "networkProbe": "EPERM",
+  "checks": [
+    "Independent installation used its own Node, native engine, local static assets and a fresh data directory. External socket access was denied.",
+    "A cold browser opened native Word, Excel, PPT, an Excalidraw board, PDF and PNG with no public asset requests. Two Word tabs synchronized via the bundled sidecar.",
+    "The installed offline workbench edited and reopened native pivots, conditional rules, OCR PDF text, image layers, PPTX master text styles and merged/split Word table cells using only its bundled assets.",
+    "A sealed candidate mutated its own migrated database and its sidecar exited. The controller restarted the previous release with the original dataset and the collaboration checkpoint intact.",
+    "A second release performed an actual schema upgrade on its new copy. A verified snapshot exists and both the original session and collaborative text remained usable.",
+    "Rollback switched the release and compatible data together. The newer dataset retained its writes, could be reactivated, and remained pinned after a controller restart."
+  ],
+  "nativeCases": [
+    {
+      "name": "pivots",
+      "checks": [
+        "Created a cross-sheet pivot by dragging dimension fields, validated live formula-derived output, rejected an occupied destination and verified that result cells are read-only.",
+        "Recovered the workbook view on reload. A source edit updated a dependent formula and refreshed the report from 240 to 480.",
+        "Downloaded the original-format XLSX, reopened it in the workbench and changed the native PivotTable aggregation."
+      ]
+    },
+    {
+      "name": "conditions",
+      "checks": [
+        "Existing conditional rule appears in the editor and draws in the native grid canvas.",
+        "Edited imported rule, created a range rule, verified both fill colors, and reopened the rule editor after a page refresh.",
+        "Downloaded XLSX, opened it as a new tab, removed its native rule and restored it using revision undo; redo and a second undo immediately update the grid colors."
+      ]
+    },
+    {
+      "name": "ocr",
+      "checks": [
+        "PDF zoom changed the decoded raster from 816 to 1632 pixels at DPR 1.",
+        "A blocked-external-network browser recognized both scan-only pages using the bundled Chinese and English models.",
+        "The mixed page preserved its real header and the rotated crop retained upright Chinese and English line boxes.",
+        "OCR text was selected with the pointer, copied to the clipboard, corrected inline, saved, reloaded and searched.",
+        "The source-backed PDF was downloaded, uploaded as a fresh file, and searched by its native invisible OCR layer."
+      ]
+    },
+    {
+      "name": "layers",
+      "checks": [
+        "Workbench imported layers, moved and resized on-canvas, renamed, set opacity, drag-sorted and toggled visibility with saved revisions.",
+        "A concurrent stale layer mutation was rejected with HTTP 409.",
+        "Reload restored the layer selection and properties; a color adjustment saved as a reversible result layer.",
+        "Restoring a prior revision restored its layer order, metadata and raster together.",
+        "Downloaded the current composition in its original PNG format and reopened it as a new raster document; also downloaded the layer archive."
+      ]
+    },
+    {
+      "name": "pptx",
+      "checks": [
+        "A native PPTX inherits placeholder geometry by idx, master styles and theme Latin/CJK fonts. Text edits and pointer moves survive native export/reopen without changing shared layout, master or theme XML.",
+        "Inherited placeholders retain their positions and typography through a native master-background edit and a three-effect animation track; reload, presentation forward/back and native export/reopen preserve the track.",
+        "Edited title and body master text styles through the real dialog. Reload and native export/reopen retain shared font, size, color and explicit false values, while layout, paragraph and direct run overrides remain unchanged and title XML stays inherited."
+      ]
+    },
+    {
+      "name": "word",
+      "checks": [
+        "Word table menus merge horizontally and vertically, split back into editable cells, retain original paragraph order and marks, and accept real inline input without a modal.",
+        "Shift-click selects a complete 2×2 rectangle. Two real pages synchronize its merge, and guarded undo/redo leaves the other page’s later body edit intact.",
+        "The actual downloaded DOCX reopens in a new workbench file. Independent OOXML checks confirm native merges, split-cell input, bold/italic and every unrelated ZIP part; source content and the concurrent body edit survive."
+      ]
+    }
+  ]
+}

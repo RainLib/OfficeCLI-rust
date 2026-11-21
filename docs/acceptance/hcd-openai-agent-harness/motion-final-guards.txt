@@ -1,0 +1,18 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test --grep Rank formulas double|two real MCP agents show|complex Word tables retain|Word agents locate|operation queue and borderless.*xlsx|continuous path --output=/tmp/officecli-agent-motion-guards
+
+
+Running 7 tests using 1 worker
+
+(node:61911) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/agent-harness.spec.ts:508:1 › Rank formulas double, total recalculates, and automatic canvas cursors survive model latency (36.3s)
+  ✓  2 e2e/agent-harness.spec.ts:588:38 › Agent pointers follow a continuous path and preserve the pptx canvas (4.4s)
+  ✓  3 e2e/agent-harness.spec.ts:588:38 › Agent pointers follow a continuous path and preserve the xlsx canvas (5.0s)
+  ✓  4 e2e/agent-harness.spec.ts:657:43 › Agent operation queue and borderless animated areas on xlsx (7.5s)
+  ✓  5 e2e/workspace.spec.ts:213:1 › two real MCP agents show moving cursors, conflict safely and commit successive edits (4.5s)
+  ✓  6 e2e/workspace.spec.ts:256:1 › complex Word tables retain canonical read-only layout in the semantic editor (1.3s)
+  ✓  7 e2e/workspace.spec.ts:493:1 › Word agents locate visible paginated content across sections and keep moving cursors (6.0s)
+
+  7 passed (1.2m)

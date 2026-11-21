@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:officecli:hcd-patch:35",
+  "title": "HTML Canonical Document XLSX worksheet addition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentId", "patchId", "baseRevision", "operations"],
+  "properties": {
+    "schemaVersion": { "const": "hcd-patch/35" },
+    "documentId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "patchId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "baseRevision": { "type": "integer", "minimum": 0, "maximum": 100000 },
+    "actor": { "type": "object", "maxProperties": 64, "additionalProperties": { "type": "string" } },
+    "metadata": { "type": "object", "maxProperties": 128, "additionalProperties": { "type": "string" } },
+    "operations": {
+      "type": "array", "minItems": 1, "maxItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["op", "name"],
+        "properties": {
+          "op": { "const": "xlsx.sheet.add" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 31 }
+        }
+      }
+    }
+  }
+}

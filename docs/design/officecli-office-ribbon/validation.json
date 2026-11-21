@@ -1,0 +1,223 @@
+{
+  "status": "passed",
+  "scope": "design-and-capability-gated-implementation",
+  "artboardCount": 23,
+  "previewCount": 24,
+  "pdfPages": 23,
+  "originalDocumentOfficeFramesRemoved": true,
+  "previews": [
+    {
+      "title": "Office 功能区规范",
+      "nodeId": "Nh27P",
+      "preview": "previews/00-foundations.png",
+      "width": 1185,
+      "height": 760,
+      "migrationPixelMatch": true
+    },
+    {
+      "title": "文档 · 单行默认与全局 AI",
+      "nodeId": "eiLxe",
+      "preview": "previews/01-word-compact.png",
+      "width": 1440,
+      "height": 920,
+      "migrationPixelMatch": true
+    },
+    {
+      "title": "文档 · 展开分组功能区",
+      "nodeId": "GbCeB",
+      "preview": "previews/02-word-expanded.png",
+      "width": 1440,
+      "height": 920,
+      "migrationPixelMatch": true
+    },
+    {
+      "title": "表格 · 字体对齐与数字",
+      "nodeId": "llNvk",
+      "preview": "previews/03-sheet.png",
+      "width": 1440,
+      "height": 880,
+      "migrationPixelMatch": true
+    },
+    {
+      "title": "演示 · 文字格式与对象排列",
+      "nodeId": "hBfTW",
+      "preview": "previews/04-slides.png",
+      "width": 1440,
+      "height": 880,
+      "migrationPixelMatch": true
+    },
+    {
+      "title": "窄屏 · 813px 与更多命令",
+      "nodeId": "V2ydDG",
+      "preview": "previews/05-narrow.png",
+      "width": 813,
+      "height": 1033,
+      "migrationPixelMatch": true
+    },
+    {
+      "title": "交互状态与实施规范",
+      "nodeId": "dAkdv",
+      "preview": "previews/06-interaction-states.png",
+      "width": 1185,
+      "height": 1033,
+      "migrationPixelMatch": true
+    },
+    {
+      "title": "功能区细节",
+      "nodeId": "adJw1",
+      "preview": "previews/ribbon-detail.png",
+      "width": 2210,
+      "height": 298,
+      "migrationPixelMatch": true
+    },
+    {
+      "title": "插入 · 内容与表格选择",
+      "nodeId": "RL1I3",
+      "preview": "previews/07-word-insert.png",
+      "width": 1440,
+      "height": 920,
+      "renderVerified": true,
+      "layoutIssueCount": 0
+    },
+    {
+      "title": "布局 · 页边距与应用范围",
+      "nodeId": "Nogq5",
+      "preview": "previews/08-word-layout.png",
+      "width": 1440,
+      "height": 920,
+      "renderVerified": true,
+      "layoutIssueCount": 0
+    },
+    {
+      "title": "引用 · 目录与跨文件来源",
+      "nodeId": "ubFwQ",
+      "preview": "previews/09-word-references.png",
+      "width": 1440,
+      "height": 920,
+      "renderVerified": true,
+      "layoutIssueCount": 0
+    },
+    {
+      "title": "审阅 · 页边批注与 AI 修订",
+      "nodeId": "lvcGj",
+      "preview": "previews/10-word-review.png",
+      "width": 1440,
+      "height": 920,
+      "renderVerified": true,
+      "layoutIssueCount": 0
+    },
+    {
+      "title": "视图 · 导航与清晰缩放",
+      "nodeId": "hka0P",
+      "preview": "previews/11-word-view.png",
+      "width": 1440,
+      "height": 920,
+      "renderVerified": true,
+      "layoutIssueCount": 0
+    },
+    {
+      "title": "五个标签 · 单行与来源筛选",
+      "nodeId": "TQ6Ex",
+      "preview": "previews/12-tab-compact.png",
+      "width": 1440,
+      "height": 1220,
+      "renderVerified": true,
+      "layoutIssueCount": 0
+    },
+    {
+      "title": "五个标签 · 完整功能区总览",
+      "nodeId": "c3D5yx",
+      "preview": "previews/13-tab-overview.png",
+      "width": 1488,
+      "height": 980,
+      "renderVerified": true,
+      "layoutIssueCount": 0
+    },
+    {
+      "nodeId": "LRHk6",
+      "preview": "previews/14-excel-insert-layout.png",
+      "width": 1488,
+      "height": 633,
+      "renderVerified": true,
+      "layoutVerification": "native export visual review; Pen visitor bounds disagree with flex layout"
+    },
+    {
+      "nodeId": "Zy1TJ",
+      "preview": "previews/15-excel-formulas-data.png",
+      "width": 1488,
+      "height": 633,
+      "renderVerified": true,
+      "layoutVerification": "native export visual review; Pen visitor bounds disagree with flex layout"
+    },
+    {
+      "nodeId": "Bm0VN",
+      "preview": "previews/16-excel-sheet-review-view.png",
+      "width": 1488,
+      "height": 767,
+      "renderVerified": true,
+      "layoutVerification": "native export visual review; Pen visitor bounds disagree with flex layout"
+    },
+    {
+      "nodeId": "TqFND",
+      "preview": "previews/17-ppt-insert-design.png",
+      "width": 1488,
+      "height": 633,
+      "renderVerified": true,
+      "layoutVerification": "native export visual review; Pen visitor bounds disagree with flex layout"
+    },
+    {
+      "nodeId": "G4BHFN",
+      "preview": "previews/18-ppt-transitions-animations-show.png",
+      "width": 1488,
+      "height": 767,
+      "renderVerified": true,
+      "layoutVerification": "native export visual review; Pen visitor bounds disagree with flex layout"
+    },
+    {
+      "nodeId": "R1kiW",
+      "preview": "previews/19-ppt-review-view.png",
+      "width": 1488,
+      "height": 602,
+      "renderVerified": true,
+      "layoutVerification": "native export visual review; Pen visitor bounds disagree with flex layout"
+    },
+    {
+      "nodeId": "ox8fc",
+      "preview": "previews/20-pdf-text.png",
+      "width": 1488,
+      "height": 798,
+      "renderVerified": true,
+      "layoutVerification": "native export visual review; Pen visitor bounds disagree with flex layout"
+    },
+    {
+      "nodeId": "kTXzD",
+      "preview": "previews/21-image-canvas.png",
+      "width": 1488,
+      "height": 633,
+      "renderVerified": true,
+      "layoutVerification": "native export visual review; Pen visitor bounds disagree with flex layout"
+    },
+    {
+      "nodeId": "qyAhr",
+      "preview": "previews/22-format-coverage.png",
+      "width": 1488,
+      "height": 780,
+      "renderVerified": true,
+      "layoutVerification": "native export visual review; Pen visitor bounds disagree with flex layout"
+    }
+  ],
+  "baselinePenSavedAndReopened": true,
+  "nativePenSaved": true,
+  "activeDocumentUriVerified": true,
+  "applicationCodeChanged": true,
+  "baselineSourceNodeCount": 1334,
+  "localLinkCount": 30,
+  "brokenLocalLinks": 0,
+  "wordDesignSourceNodeCount": 3398,
+  "wordTabLayoutIssues": 0,
+  "layoutScope": "14 baseline artboards and 9 additional native exports; the 7 Word tab boards have zero visitor layout issues; added family boards were visually reviewed because Pen flex visitor bounds differ from exported rendering.",
+  "applicationVerification": "implementation/verification.json",
+  "workbenchCheckCount": 42,
+  "wordTabAddedSourceNodeCount": 2064,
+  "wordDesignMinTextContrast": 4.791346680753572
+}

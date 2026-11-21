@@ -352,7 +352,7 @@ fn handle_html_convert(
             output_path.display()
         )));
     }
-    let summary = super::html_convert::convert_html(input_path, &output_path, &output_ext)?;
+    let summary = office_engine::convert_html(input_path, &output_path, &output_ext)?;
     match format {
         handler_common::OutputFormat::Text => Ok(format!(
             "Converted '{}' -> '{}' [{}, fidelity={}, blocks={}, images={}/{}, warnings={}]",
@@ -1158,7 +1158,9 @@ fn validate_conversion(
     engine: ConvertEngine,
 ) -> Result<(), HandlerError> {
     if matches!(input_ext, "html" | "htm") {
-        return if matches!(output_ext, "docx" | "xlsx" | "pptx" | "pdf") {
+        return if office_engine::registry::format_for_extension(output_ext)
+            .is_some_and(|format| format.can_open() && format.can_convert_html())
+        {
             Ok(())
         } else {
             Err(HandlerError::UnsupportedMode(format!(

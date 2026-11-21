@@ -1,0 +1,19 @@
+{
+  "totalFrames": 35,
+  "missingFonts": 0,
+  "svgStates": 6,
+  "svgFiles": 18,
+  "nativeBytes": 1637232,
+  "sourceV2Unchanged": true,
+  "totalPrototypeLinks": 719,
+  "allNavigationDestinationsExist": true,
+  "sharedGlobalAIInstances": 29,
+  "nativeSHA256": "7385ee7748cf80d5dd55191a9ca04fad908ef4396b65a4dc14c0379850545141",
+  "nativeScope": "Editable static symbol states and timing boards; SVG animations run in the browser.",
+  "svgXmlParsed": 18,
+  "inlineScriptSyntaxChecked": true,
+  "localDocumentationLinksChecked": true,
+  "triangleBrowserVisualCheck": "idle only; all six static poses reviewed in FigCraft",
+  "productionIntegration": false,
+  "tldrawMigrationImplemented": false
+}

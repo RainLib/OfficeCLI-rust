@@ -1,0 +1,178 @@
+{
+  "date": "2026-11-15",
+  "rustCliUnitTests": {
+    "passed": 136,
+    "failed": 0
+  },
+  "inlineCssTests": {
+    "passed": 5,
+    "failed": 0
+  },
+  "browserAndRevisionTests": {
+    "passed": 55,
+    "failed": 0,
+    "modelResponses": "scripted; actual API, auth, tools, HCD patches, sidecar, MCP SDK and browser"
+  },
+  "fixedTextSelectionStress": {
+    "passed": 4,
+    "fullReplacementCyclesPerCase": 8
+  },
+  "realOpenAI": {
+    "model": "gpt-5.4-mini",
+    "api": "Responses",
+    "sevenFormats": {
+      "passed": 7,
+      "failed": 0,
+      "formats": [
+        "txt",
+        "md",
+        "html",
+        "docx",
+        "xlsx",
+        "pptx",
+        "pdf"
+      ],
+      "checks": [
+        "write",
+        "readback",
+        "author identity",
+        "source-format export"
+      ],
+      "evidence": "live-model-before-menu-focus-fix.txt"
+    },
+    "twoModelAgents": {
+      "passed": 1,
+      "failed": 0,
+      "evidence": "live-model-before-menu-focus-fix.txt"
+    },
+    "menuAndTaskUI": {
+      "passed": 1,
+      "failed": 0,
+      "reasoningEffort": "low",
+      "evidence": "live-menu-after-focus-fix.txt"
+    },
+    "reasoningEffort": "low (GPT-5 default)",
+    "combinedRunBeforeMenuFocusFix": {
+      "passed": 8,
+      "failed": 1,
+      "failure": "Slash command focus lost an immediate typed character before model invocation; fixed and verified by four scripted UI runs and one real-model UI run.",
+      "resolved": true
+    },
+    "finalVerifiedCases": {
+      "passed": 9,
+      "remainingFailures": 0,
+      "method": "7 format cases + 1 concurrent Agent case, then 1 UI case after focus fix; separate runs"
+    },
+    "rankFormulaAndOperations": {
+      "passed": 1,
+      "failed": 0,
+      "fixture": "Public gradebook.xlsx",
+      "model": "gpt-5.4-mini",
+      "formulaRange": "K4:K18",
+      "operation": "=(original expression)*2",
+      "originalSum": 120,
+      "verifiedSum": 240,
+      "totalCell": "K20",
+      "totalFormula": "=SUM(K4:K18)",
+      "unrelatedCellsPreserved": true,
+      "nativeFormulasPreservedInExport": true,
+      "localSelectionPreservedOnLocate": true,
+      "evidence": "live-rank-agent-verification.txt",
+      "screenshots": [
+        "live-rank-agent-workspace.png",
+        "live-rank-agent-mobile.png"
+      ],
+      "export": "live-rank-doubled.xlsx",
+      "frozenRowsClipOperationLight": true
+    }
+  },
+  "clippy": "passed",
+  "fmt": "passed",
+  "frontendProductionBuild": "passed (TypeScript, app and React embed after final borderless area and frozen-pane geometry fixes)",
+  "mcp": {
+    "transport": "Streamable HTTP JSON responses and stdio",
+    "jsonRpcVersion": "2.0",
+    "httpProtocols": [
+      "2025-11-25",
+      "2025-06-18",
+      "2025-03-26"
+    ],
+    "sessionIsolation": true,
+    "optionalSSE": false,
+    "optionalTasksSamplingElicitation": false
+  },
+  "privateDocumentsUsedByModel": false,
+  "credentialsInArtifacts": false,
+  "offlineDraftProtection": "in-memory comparison and JSON download; no durable offline storage",
+  "fullOfficeObjectParity": false,
+  "agentTestsAfterReasoningConfigurationChange": {
+    "passed": 16,
+    "failed": 0
+  },
+  "menuFocusAfterFullSuite": {
+    "passed": 4,
+    "failed": 0,
+    "evidence": "menu-focus-stress.txt"
+  },
+  "operationFeedback": {
+    "design": "../../design/officecli-workspace-v2.pen",
+    "boards": [
+      "lmDrg",
+      "a57uW"
+    ],
+    "style": "Pen-style smooth pointers, floating labels and borderless soft light",
+    "realPlans": "hcd_activity status=planning with authenticated targets",
+    "submittedBatches": "Every real patch target is captured, including created spreadsheet cells",
+    "animation": "Applied changes are explicitly labeled as replay; animations do not write or delay commits",
+    "coveredFormats": [
+      "md",
+      "docx",
+      "xlsx"
+    ],
+    "checks": [
+      "Pending plan leaves revision unchanged",
+      "Multiple targets are visible together",
+      "Current target moves with animated light",
+      "No agent selection border or outline",
+      "Pointer feedback ignores mouse events",
+      "Idle preserves the committed trace",
+      "Zoom changes the document, not the page",
+      "Reduced motion keeps completed states without replay",
+      "Cancelled pending plans clear canvas regions",
+      "Human writes are excluded from agent traces"
+    ],
+    "targetsDisplayedPerBatch": 128,
+    "recentTraceRetentionSeconds": 60,
+    "browserEvidence": "agent-operations-browser.txt",
+    "finalGeometryChecks": {
+      "passed": 4,
+      "failed": 0,
+      "evidence": "agent-operations-final-geometry.txt",
+      "includes": [
+        "Freeze-band clipping",
+        "Preserve active cell on locate",
+        "Zoomed area geometry",
+        "Reduced motion",
+        "Queue and replay on DOCX, MD and XLSX"
+      ]
+    }
+  },
+  "currentDemoBrowser": {
+    "url": "http://127.0.0.1:50976/?locale=zh-CN",
+    "penBrowserNodes": [
+      "W2lt7n",
+      "upnCD"
+    ],
+    "publicFixturesOnly": true
+  },
+  "demoBrowser": "demo-browser.json",
+  "rankFinalLocatorVerification": {
+    "scripted": {
+      "passed": 1,
+      "failed": 0,
+      "evidence": "rank-agent-final-check.txt"
+    },
+    "note": "Locate the committed queue target; a live Agent may legitimately move its later reading focus to another cell."
+  },
+  "productionBuildEvidence": "agent-operations-production-build.txt"
+}

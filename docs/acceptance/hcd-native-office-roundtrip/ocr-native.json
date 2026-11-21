@@ -1,0 +1,45 @@
+{
+  "evidence": "browser OCR measurements replayed through the native CLI",
+  "independentPdfReader": "pypdf and Poppler",
+  "pixelComparator": "Poppler at 96 DPI, same CropBox, zero differing pixels",
+  "nativePixelSizes": [
+    [
+      816,
+      1056
+    ],
+    [
+      816,
+      1056
+    ],
+    [
+      990,
+      763
+    ]
+  ],
+  "portablePixelSizes": [
+    [
+      816,
+      1056
+    ],
+    [
+      816,
+      1056
+    ],
+    [
+      990,
+      763
+    ]
+  ],
+  "nativeHeaderOccurrences": 1,
+  "originalContentStreamsIntact": true,
+  "originalSourceBytesUnchanged": true,
+  "rotatedCropAndOcrGeometryVerified": true,
+  "nativePdfReimportedAsSelectableOcr": true,
+  "portableArchiveAndPageSubsetSearchable": true,
+  "portableReimportedInvisibleLayerPreserved": true,
+  "sourceReimportCorrectionPreservedPixels": true,
+  "duplicateOcrRejected": true,
+  "historyRestoredOriginalAndRecognizedState": true,
+  "browserArtifactIndependentlyVerified": true,
+  "outputDirectory": "/var/folders/k6/xb6x7dcn60z1bwxvmqyls7hr0000gn/T/officecli-workbench-native-5cUdo2/ocr/verification-vhei7z08"
+}

@@ -1,41 +1,77 @@
+import { DocumentVisitorIdentity, ShareControl } from './DocumentSharing.tsx'
+import { AppearanceSelect } from './Appearance.tsx'
+import { ZoomControls } from './CanvasZoom.tsx'
 import { useI18n } from './i18n.tsx'
 import { LocalText, localizeDynamic, localizeSource } from './sourceLocale.tsx'
 import type { ReactNode } from 'react'
+import { ArrowLeft, Check, ChevronDown, ChevronUp, Eye, Maximize2, Minimize2, MoreHorizontal, PanelLeftClose, PanelRightClose, Search } from 'lucide-react'
 import { ExportControl } from './ExportControl.tsx'
 import type { Session } from './api.ts'
+import { HostPublicationControl, permits, useHostPolicy } from './HostIntegration.tsx'
 
-export type EditorTab = 'home' | 'insert' | 'view' | 'revisions'
+export type EditorTab = 'home' | 'insert' | 'view' | 'review' | 'revisions' | 'format' | 'sheet' | 'data' | 'animation' | 'transition' | 'layout' | 'references' | 'formula' | 'design' | 'show' | 'pages' | 'ocr'
 
-export function EditorHeader({ session, revision, status, activeTab, onTab, onClose, onSettings, onSearch, settingsOpen, beforeExport, presence }: {
-  session: Session
-  revision: number | null
-  status: string
-  activeTab: EditorTab
-  onTab: (tab: EditorTab) => void
-  onClose: () => void
-  onSettings: () => void
-  onSearch: () => void
-  settingsOpen: boolean
-  beforeExport?: () => Promise<number | null>
-  presence?: ReactNode
+export function FileActionsMenu({ children }: { children: ReactNode }) {
+  const { locale } = useI18n()
+  return <details className="integrated-file-menu" onKeyDown={event => {
+    if (event.key === 'Escape') { event.currentTarget.open = false; event.currentTarget.querySelector('summary')?.focus() }
+  }} onBlur={event => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) event.currentTarget.open = false }}>
+    <summary aria-label={localizeSource(locale, '文件操作')} title={localizeSource(locale, '文件操作')}><MoreHorizontal size={17}/></summary>
+    {children}
+  </details>
+}
+
+export function EditorHeader({ session, revision, status, onClose, onSearch, beforeExport, activeSheetName, presence, focused, onFocus }: {
+  session: Session; revision: number | null; status: string
+  onClose: () => void; onSearch: () => void
+  beforeExport?: () => Promise<number | null>; activeSheetName?: string; presence?: ReactNode
+  focused: boolean; onFocus: () => void
 }) {
   const { locale } = useI18n()
+  const headerStatus = status === '只读' ? '已打开' : status === '历史只读' ? '历史版本' : status
+  const integrated = session.integratedToolbar
+  const actions = <div className="header-actions">{presence}<ShareControl /><AppearanceSelect />
+      <HostPublicationControl session={session} revision={revision} beforeSave={beforeExport} />
+      {!integrated && <button className="icon-button search-trigger" aria-label={localizeSource(locale, '搜索文档')} title={localizeSource(locale, '查找全文 · ⌘/Ctrl+F')} onClick={onSearch}><Search size={18} /></button>}
+      <button className="icon-button focus-trigger" aria-pressed={focused} aria-label={localizeSource(locale, focused ? '退出专注模式' : '专注模式')} title={localizeSource(locale, focused ? '退出专注模式' : '专注模式')} onClick={onFocus}>{focused ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>
+      {(permits(session, 'document.download') || permits(session, 'document.export')) && <ExportControl session={session} revision={revision} beforeExport={beforeExport} activeSheetName={activeSheetName} />}
+    </div>
+  if (integrated) return <FileActionsMenu>{actions}</FileActionsMenu>
   return <header className="editor-header">
-    <div className="document-identity"><span className="brand">HCD</span><div className="document-title"><strong title={session.documentId}>{session.documentId}</strong><small>{session.format.toUpperCase()} · r{revision ?? '…'}</small></div><span className="status" role="status">{localizeDynamic(locale, status)}</span></div>
-    <nav className="header-tabs" aria-label={localizeSource(locale, "编辑功能")}>{([
-      ['home', '开始'], ['insert', '插入'], ['view', '视图'], ['revisions', '修订'],
-    ] as const).map(([tab, label]) => <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => onTab(tab)}>{localizeSource(locale, label)}</button>)}</nav>
-    <div className="header-actions">{presence}<button aria-label={localizeSource(locale, "搜索文档")} title={localizeSource(locale, "查找全文 · ⌘/Ctrl+F")} onClick={onSearch}><LocalText source={"⌕ 搜索"} /></button><ExportControl session={session} revision={revision} beforeExport={beforeExport} /><button className="settings-trigger" aria-label={localizeSource(locale, "界面设置")} aria-expanded={settingsOpen} onClick={onSettings}>⚙</button><button className="ghost" onClick={onClose}><LocalText source={"关闭"} /></button></div>
+    <div className="document-identity"><button className="icon-button back-library" aria-label={localizeSource(locale, '返回文档库')} title={localizeSource(locale, '返回文档库')} onClick={onClose}><ArrowLeft size={18} /></button><div className="document-title"><strong title={session.documentId}>{session.title || session.documentId}</strong><small><LocalText source="工作空间" /> / {session.format.toUpperCase()} · r{revision ?? '…'}</small></div><span className="status" role="status"><Check size={13} />{localizeDynamic(locale, headerStatus)}</span></div>
+    {actions}
   </header>
 }
 
-export function EditorStatusbar({ mode, format, revision, readOnly, status }: {
-  mode: string
-  format: string
-  revision: number | null
-  readOnly: boolean
-  status: string
+export function ContentToolbar({ activeTab, onTab, expanded, onToggle, readOnly, format, onSearch, fileMenu, actions }: {
+  activeTab: EditorTab; onTab: (tab: EditorTab) => void; expanded: boolean; onToggle: () => void; readOnly: boolean; format: string; onSearch: () => void; fileMenu?: ReactNode; actions?: ReactNode
 }) {
   const { locale } = useI18n()
-  return <footer className="editor-statusbar"><span>{localizeSource(locale, mode)} · {format.toUpperCase()}</span><span>r{revision ?? '…'} · {localizeSource(locale, readOnly ? '只读' : '可编辑')} · {localizeDynamic(locale, status)}</span></footer>
+  const policy = useHostPolicy()
+  const workbook = ['xlsx', 'csv', 'tsv'].includes(format)
+  const tabs: [EditorTab, string][] = [
+    ['home', '开始'],
+    ...(workbook ? [['format', '单元格格式'], ['sheet', '工作表']] as [EditorTab, string][] : []),
+    ...(format !== 'txt' ? [['insert', '插入']] as [EditorTab, string][] : []),
+    ...(format === 'xlsx' ? [['layout', '页面布局']] as [EditorTab, string][] : []),
+    ...(format === 'docx' ? [['layout', '布局'], ['references', '引用'], ['review', '审阅']] as [EditorTab, string][] : []),
+    ...(['html', 'md'].includes(format) ? [['references', '引用']] as [EditorTab, string][] : []),
+    ...(workbook ? [['formula', '公式'], ['data', '数据']] as [EditorTab, string][] : []),
+    ...(format === 'pptx' ? [['design', '设计'], ['transition', '切换'], ['animation', '动画'], ['show', '放映'], ['review', '审阅']] as [EditorTab, string][] : []),
+    ...(format === 'pdf' ? [['pages', '页面'], ['ocr', '识别']] as [EditorTab, string][] : []),
+    ['view', '视图'], ['revisions', '修订'],
+  ]
+  return <div className="content-toolbar">
+    {readOnly ? <span className="preview-label"><Eye size={15} /><LocalText source="只读预览" /><small>{format.toUpperCase()}</small>{fileMenu && <button aria-pressed={activeTab === 'view'} onClick={() => onTab('view')}><LocalText source="视图" /></button>}{format === 'docx' && <button aria-pressed={activeTab === 'review'} onClick={() => onTab('review')}><LocalText source="审阅" /></button>}{['xlsx', 'csv', 'tsv'].includes(format) && <button aria-pressed={activeTab === 'data'} onClick={() => onTab('data')}><LocalText source="数据" /></button>}</span> : <nav aria-label={localizeSource(locale, '编辑功能')}>{tabs.filter(([tab]) => tab !== 'revisions' || policy.permits('history.view')).map(([tab, title]) => <button key={tab} aria-pressed={activeTab === tab} onClick={() => onTab(tab)}>{localizeSource(locale, title)}</button>)}</nav>}
+    <div className="content-toolbar-actions">{actions}{fileMenu}<button className="toolbar-search" aria-label={localizeSource(locale, '查找全文')} title={localizeSource(locale, '查找全文 · ⌘/Ctrl+F')} onClick={onSearch}><Search size={15} /><span><LocalText source="查找" /></span></button>
+    {!readOnly && <button className="icon-button toolbar-toggle" title={localizeSource(locale, expanded ? '收起工具栏' : '展开工具栏')} aria-label={localizeSource(locale, expanded ? '收起工具栏' : '展开工具栏')} aria-expanded={expanded} onClick={onToggle}>{expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</button>}</div>
+  </div>
+}
+
+export const CollapseOutlineIcon = () => <PanelLeftClose size={17} />
+export const CollapseSidebarIcon = () => <PanelRightClose size={17} />
+
+export function EditorStatusbar({ mode, format, revision, readOnly, status, draftProtection }: { mode: string; format: string; revision: number | null; readOnly: boolean; status: string; draftProtection?: 'loading' | 'protected' | 'writing' | 'failed' }) {
+  const { locale } = useI18n()
+  return <footer className="editor-statusbar"><span><i className="status-dot" />{localizeSource(locale, readOnly ? '可查看' : '可编辑')} · {localizeSource(locale, mode)} · {format.toUpperCase()}</span><span>r{revision ?? '…'} · {localizeDynamic(locale, status)}</span><DocumentVisitorIdentity />{draftProtection && <span data-draft-protection={draftProtection} aria-label={localizeSource(locale, '本地草稿保护')}>{localizeSource(locale, { loading: '准备本地草稿', protected: '本地草稿已保护', writing: '正在保护草稿', failed: '本地保护不可用' }[draftProtection])}</span>}<ZoomControls /></footer>
 }

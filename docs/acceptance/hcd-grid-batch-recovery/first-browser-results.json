@@ -1,0 +1,6 @@
+{
+  "passed": 5,
+  "failed": 0,
+  "duration": "44.0s",
+  "scope": "initial recovery cases; before formula-cache rollback and live retry additions"
+}

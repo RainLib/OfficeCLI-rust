@@ -1,27 +1,60 @@
+mod pdf;
+mod pptx;
+mod pptx_group;
+mod pptx_master;
+mod validation;
+mod xlsx;
+
+use pdf::*;
+use pptx::*;
+use pptx_group::require_pptx_group_patch;
+use validation::validate_patch_identity;
+pub use xlsx::cells::{xlsx_added_literals, XlsxAddedLiteral};
+use xlsx::*;
+
 use crate::bundle::{
     finalize_root_hash, hash_descriptor, now_epoch_ms, read_json_bounded, Bundle, INDEX_PAGE_SIZE,
 };
 use crate::hash::{hash_bytes, node_bloom, node_bloom_might_contain, stable_node_id};
+use crate::html::{escape_attribute, escape_text};
+use crate::xlsx_grid::{sheet_grid_id, sheet_window_chunk_id, XlsxSheetSection};
 #[cfg(test)]
 use crate::HCD_SCHEMA_VERSION;
+use crate::{drop_formula_sheet_references, rename_formula_sheet_references};
 use crate::{
     extract_html_image_nodes, extract_html_text_nodes, image_visual_hash, AnnotationSet,
     ApplyResult, AssetDescriptor, FidelityWarning, GridColumnDeletion, GridColumnInsertion,
     GridRowDeletion, GridRowInsertion, HcdError, ImageExtractEntry, ImageExtractPage,
     ImageGeometry, ImageGeometryUnit, ImageNodeLookup, ImageNodeState, NodeMapEntry,
-    NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxShapeGeometry, RevisionRecord,
-    SourceAnchor, TextExtractEntry, TextExtractPage, TextNodeLookup, XlsxGridAction, XlsxGridAxis,
-    HCD_PATCH_SCHEMA_VERSION, HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11,
-    HCD_PATCH_SCHEMA_VERSION_12, HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14,
-    HCD_PATCH_SCHEMA_VERSION_15, HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17,
-    HCD_PATCH_SCHEMA_VERSION_18, HCD_PATCH_SCHEMA_VERSION_19, HCD_PATCH_SCHEMA_VERSION_2,
-    HCD_PATCH_SCHEMA_VERSION_20, HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5,
-    HCD_PATCH_SCHEMA_VERSION_6, HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8,
-    HCD_PATCH_SCHEMA_VERSION_9, MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
+    NodeStylePatch, PatchBatch, PatchOperation, PdfTextGeometry, PptxRunFormat,
+    PptxShapeAlignPatch, PptxShapeGeometry, RevisionRecord, SheetAddition, SheetRemoval,
+    SheetRename, SlideAddition, SlideCopy, SlideRemoval, SlideReorder, SourceAnchor,
+    TextExtractEntry, TextExtractPage, TextNodeLookup, XlsxCellFormatPatch, XlsxCellLayoutPatch,
+    XlsxCellNumberFormatPatch, XlsxGridAction, XlsxGridAxis, HCD_PATCH_SCHEMA_VERSION,
+    HCD_PATCH_SCHEMA_VERSION_10, HCD_PATCH_SCHEMA_VERSION_11, HCD_PATCH_SCHEMA_VERSION_12,
+    HCD_PATCH_SCHEMA_VERSION_13, HCD_PATCH_SCHEMA_VERSION_14, HCD_PATCH_SCHEMA_VERSION_15,
+    HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_18,
+    HCD_PATCH_SCHEMA_VERSION_19, HCD_PATCH_SCHEMA_VERSION_2, HCD_PATCH_SCHEMA_VERSION_20,
+    HCD_PATCH_SCHEMA_VERSION_3, HCD_PATCH_SCHEMA_VERSION_5, HCD_PATCH_SCHEMA_VERSION_6,
+    HCD_PATCH_SCHEMA_VERSION_7, HCD_PATCH_SCHEMA_VERSION_8, HCD_PATCH_SCHEMA_VERSION_9,
+    MAX_CONTROL_PART_BYTES, MAX_PATCH_JSON_BYTES,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+
+mod grid_filter;
+mod grid_sort;
+mod worksheet_charts;
+mod worksheet_conditions;
+mod worksheet_pivots;
+pub use grid_filter::{worksheet_filter, GridFilterView};
+pub use grid_sort::{sort_grid, GridSortDirection, GridSortRequest};
+mod docx_pictures;
+pub use docx_pictures::validate_docx_picture_layout;
+pub use worksheet_charts::{valid_worksheet_chart_id, validate_worksheet_chart, worksheet_charts};
+pub use worksheet_conditions::validate_worksheet_condition;
+pub use worksheet_pivots::{pivot_output_range, validate_worksheet_pivot, worksheet_pivots};
 
 const MAX_PATCH_OPERATIONS: usize = 10_000;
 const MAX_PATCH_INSERT_BYTES: usize = 2 * 1024 * 1024;
@@ -46,143 +79,112 @@ struct StyleChange {
     node_hash: String,
 }
 
+/// What one `text.font` or `text.font.clear` operation asks for on a node.
+/// `font: None` is the clear: drop the pin the patch wrote, which a pin can never
+/// do by leaving slots out, because a pin requires at least one face.
+#[derive(Clone)]
+struct FontChange {
+    font: Option<crate::FontPatch>,
+    node_hash: String,
+}
+
 #[derive(Clone, Default)]
 struct ImageChange {
     asset_hash: Option<String>,
     geometry: Option<ImageGeometry>,
     visual_hash: String,
+    layers: Option<crate::image_layers::ImageLayerStack>,
 }
 
-#[derive(Clone)]
-struct PdfTextInsertion {
-    page: usize,
-    node_id: String,
-    x_pt: f32,
-    y_pt: f32,
-    width_pt: f32,
-    height_pt: f32,
-    font_size_pt: f32,
-    text: String,
+/// What an index rebuild needs after a page or a tab leaves the document:
+/// whether the target was there at all, how many chunks went with it, which
+/// source part held the nodes it took away, and whether the survivors shift a
+/// position because a tab list got one shorter. Slides carry no position in a
+/// package list, so only a worksheet removal asks for the shift.
+struct IndexRemoval {
+    label: &'static str,
+    target_found: bool,
+    dropped_chunks: usize,
+    source_part: String,
+    node_ids: Vec<String>,
+    shift_above: Option<usize>,
 }
 
-#[derive(Clone)]
-struct PptxTextInsertion {
-    node_id: String,
-    slide_part: String,
-    x_emu: u64,
-    y_emu: u64,
-    width_emu: u64,
-    height_emu: u64,
-    font_size_hundredths: u32,
-    text: String,
-}
-
-#[derive(Clone)]
-struct PptxGeometryChange {
-    geometry: PptxShapeGeometry,
-    expected: PptxShapeGeometry,
-    node_hash: String,
-}
-
-#[derive(Clone)]
-struct PdfGeometryChange {
-    geometry: PdfTextGeometry,
-    expected: PdfTextGeometry,
-    node_hash: String,
-}
-
-#[derive(Clone)]
-struct XlsxMerge {
-    sheet_id: String,
-    start_row: u32,
-    start_column: u32,
-    end_row: u32,
-    end_column: u32,
-    node_hash: String,
-}
-
-#[derive(Clone)]
-struct XlsxCellInsertion {
-    sheet_id: String,
-    row: u32,
-    column: u32,
-    text: String,
-    formula: bool,
-}
-
-#[derive(Clone)]
-struct XlsxFormulaChange {
-    sheet_id: String,
-    replacement: XlsxFormulaReplacement,
-    node_hash: String,
-}
-
-#[derive(Clone)]
-enum XlsxFormulaReplacement {
-    Formula(String),
-    Value(String),
-    Number(String),
-    NumberUpdate(String),
-}
-
-#[derive(Clone)]
-struct XlsxRowAppend {
-    sheet_id: String,
-    after_row: u32,
-}
-
-#[derive(Clone)]
-struct XlsxRowInsert {
-    sheet_id: String,
-    before_row: u32,
-    count: u32,
-}
-
-#[derive(Clone)]
-struct XlsxRowDelete {
-    sheet_id: String,
-    row: u32,
-    count: u32,
-}
-
-#[derive(Clone)]
-struct XlsxColumnInsert {
-    sheet_id: String,
-    before_column: u32,
-    count: u32,
-}
-
-#[derive(Clone)]
-struct XlsxColumnDelete {
-    sheet_id: String,
-    column: u32,
-    count: u32,
-}
-
-#[derive(Clone)]
-struct XlsxRowRemoval {
-    sheet_id: String,
-    row: u32,
-}
-
-#[derive(Clone)]
-struct XlsxColumnWidth {
-    sheet_id: String,
-    column: u32,
-    width_chars: f64,
-}
-
-#[derive(Clone)]
-struct XlsxRowHeight {
-    sheet_id: String,
-    row: u32,
-    height_points: f64,
+/// Lays the chunks the index ends up holding back over its pages: each one is
+/// numbered from its place in the list, folded into a fresh root digest, and
+/// written to the page that number puts it on, so the manifest counts the pages
+/// the document now has. `shift_above` is the part only a deletion asks for — a
+/// tab behind the hole finds its worksheet part one place nearer the front, and
+/// a rebuild that merely moves chunks around passes `None`. Returns the digest
+/// of the index as it was written, which is what the root hash is folded from.
+fn rewrite_index_pages(
+    bundle: &Bundle,
+    manifest: &mut crate::HcdManifest,
+    new_index_root: &std::path::Path,
+    new_revision: u64,
+    descriptors: Vec<crate::ChunkDescriptor>,
+    shift_above: Option<usize>,
+    index_root_href: &mut Option<String>,
+) -> Result<Sha256, HcdError> {
+    // The digest is folded over the list the index ends up holding, and the
+    // pages are written from it: the sequence a descriptor carries is part of
+    // that digest, so a rebuild changes the root hash without changing a chunk.
+    let mut rebuilt: Vec<crate::ChunkIndexPage> = Vec::new();
+    let mut rebuilt_hasher = Sha256::new();
+    for (sequence, mut descriptor) in descriptors.into_iter().enumerate() {
+        descriptor.sequence = sequence;
+        if let (Some(sheet_index), Some(grid)) = (shift_above, descriptor.grid.as_mut()) {
+            if grid.sheet_index > sheet_index {
+                grid.sheet_index -= 1;
+            }
+        }
+        hash_descriptor(&mut rebuilt_hasher, &descriptor);
+        let page_number = sequence / INDEX_PAGE_SIZE;
+        if rebuilt.len() <= page_number {
+            rebuilt.push(crate::ChunkIndexPage {
+                schema_version: manifest.schema_version.clone(),
+                revision: new_revision,
+                page: page_number,
+                chunks: Vec::new(),
+            });
+        }
+        rebuilt[page_number].chunks.push(descriptor);
+    }
+    if let Some(root) = index_root_href.as_ref() {
+        *index_root_href = Some(bundle.replace_index_pages(root, &rebuilt)?);
+    } else {
+        for page in &rebuilt {
+            crate::bundle::atomic_write_json_encoded(
+                &new_index_root.join(format!(
+                    "{:06}.json{}",
+                    page.page,
+                    manifest.storage_codec.suffix()
+                )),
+                page,
+            )?;
+        }
+    }
+    // The index tree keeps the shape it has, so a tail page a rebuild emptied is
+    // simply no longer counted; the manifest walks the pages that still describe
+    // the document.
+    manifest.index_page_count = rebuilt.len();
+    manifest.chunk_count = rebuilt.iter().map(|page| page.chunks.len()).sum();
+    Ok(rebuilt_hasher)
 }
 
 pub fn apply_patch(
     bundle: &Bundle,
     patch: &PatchBatch,
     expected_revision: u64,
+) -> Result<ApplyResult, HcdError> {
+    apply_patch_with_pivot(bundle, patch, expected_revision, None)
+}
+
+pub fn apply_patch_with_pivot(
+    bundle: &Bundle,
+    patch: &PatchBatch,
+    expected_revision: u64,
+    snapshot: Option<crate::PivotSnapshot>,
 ) -> Result<ApplyResult, HcdError> {
     let _write_guard = bundle.acquire_write_lock()?;
     let mut manifest = bundle.manifest()?;
@@ -213,13 +215,36 @@ pub fn apply_patch(
             || patch.operations.iter().any(|operation| {
                 matches!(
                     operation,
-                    PatchOperation::PdfTextInsert { .. }
+                    PatchOperation::ImageInsert { .. }
+                        | PatchOperation::ImageLayersSet { .. }
+                        | PatchOperation::PdfTextInsert { .. }
                         | PatchOperation::PdfTextGeometry { .. }
                         | PatchOperation::PdfTextDelete { .. }
+                        | PatchOperation::PdfPageLayoutSet { .. }
+                        | PatchOperation::PdfOcrApply { .. }
                         | PatchOperation::PptxTextInsert { .. }
+                        | PatchOperation::PptxShapeInsert { .. }
+                        | PatchOperation::PptxObjectsTransform { .. }
+                        | PatchOperation::PptxGroupCreate { .. }
+                        | PatchOperation::PptxGroupUngroup { .. }
+                        | PatchOperation::PptxAnimationsSet { .. }
+                        | PatchOperation::PptxMasterBackgroundSet { .. }
+                        | PatchOperation::PptxMasterTextStyleSet { .. }
+                        | PatchOperation::XlsxChartSet { .. }
+                        | PatchOperation::XlsxConditionSet { .. }
+                        | PatchOperation::XlsxPivotSet { .. }
+                        | PatchOperation::DocxPictureLayoutSet { .. }
                         | PatchOperation::PptxShapeGeometry { .. }
                         | PatchOperation::PptxTextDelete { .. }
+                        | PatchOperation::PptxRunFormat { .. }
+                        | PatchOperation::PptxShapeAlign { .. }
+                        | PatchOperation::XlsxCellFormat { .. }
+                        | PatchOperation::XlsxRichTextSet { .. }
+                        | PatchOperation::XlsxRichTextCreate { .. }
+                        | PatchOperation::XlsxCellLayout { .. }
+                        | PatchOperation::XlsxCellNumberFormat { .. }
                         | PatchOperation::XlsxCellSet { .. }
+                        | PatchOperation::XlsxCellClear { .. }
                         | PatchOperation::XlsxFormulaSet { .. }
                         | PatchOperation::XlsxFormulaToValue { .. }
                         | PatchOperation::XlsxFormulaToNumber { .. }
@@ -229,11 +254,19 @@ pub fn apply_patch(
                         | PatchOperation::XlsxRowRemoveLast { .. }
                         | PatchOperation::XlsxColumnWidth { .. }
                         | PatchOperation::XlsxRowHeight { .. }
+                        | PatchOperation::XlsxSheetRename { .. }
+                        | PatchOperation::XlsxSheetAdd { .. }
+                        | PatchOperation::XlsxSheetDelete { .. }
+                        | PatchOperation::XlsxSheetFreeze { .. }
+                        | PatchOperation::PptxSlideAdd { .. }
+                        | PatchOperation::PptxSlideDelete { .. }
+                        | PatchOperation::PptxSlideReorder { .. }
                         | PatchOperation::XlsxRowInsert { .. }
                         | PatchOperation::XlsxRowDelete { .. }
                         | PatchOperation::XlsxColumnInsert { .. }
                         | PatchOperation::XlsxColumnDelete { .. }
                         | PatchOperation::XlsxGridRange { .. }
+                        | PatchOperation::XlsxAutoFilterSet { .. }
                         | PatchOperation::XlsxMergeBlank { .. }
                         | PatchOperation::XlsxUnmerge { .. }
                 )
@@ -266,23 +299,125 @@ pub fn apply_patch(
 
     let splices = collect_splices(patch)?;
     let styles = collect_styles(patch)?;
-    let images = collect_image_changes(patch)?;
+    let fonts = collect_fonts(patch)?;
+    let mut images = collect_image_changes(patch)?;
+    let word_picture = match patch.operations.as_slice() {
+        [PatchOperation::DocxPictureLayoutSet {
+            node_id,
+            layout,
+            precondition,
+        }] => Some((node_id, layout, precondition)),
+        _ => None,
+    };
+    let image_insertions = crate::image_insert::collect(patch);
+    let mut flow_image_tail = None;
+    if !image_insertions.is_empty()
+        && matches!(manifest.source.format.as_str(), "docx" | "md" | "html")
+    {
+        for page in (0..manifest.index_page_count).rev() {
+            if let Some(chunk) = bundle
+                .read_index_page(&manifest, page)?
+                .chunks
+                .into_iter()
+                .rev()
+                .find(|chunk| chunk.region == "body")
+            {
+                flow_image_tail = Some(chunk.chunk_id);
+                break;
+            }
+        }
+        if flow_image_tail.is_none() {
+            return Err(HcdError::Unsupported(
+                "Flow document has no body chunk for image insertion".into(),
+            ));
+        }
+    }
+    let mut inserted_images = 0;
     let pdf_insertions = collect_pdf_insertions(patch);
+    let pdf_ocr_pages = match patch.operations.as_slice() {
+        [PatchOperation::PdfOcrApply { pages }] => {
+            crate::pdf_ocr::prepare_ocr_pages(bundle, &manifest, pages)?
+        }
+        _ => BTreeMap::new(),
+    };
     let pdf_geometry = collect_pdf_geometry(patch);
     let pdf_deletions = collect_pdf_deletions(patch);
     let pptx_insertions = collect_pptx_insertions(patch);
+    let pptx_object_chunk = pptx_object_chunk(patch);
+    let mut applied_pptx_objects = false;
+    let mut slide_group_edit = None;
+    let pptx_animation = match patch.operations.as_slice() {
+        [PatchOperation::PptxAnimationsSet { chunk_id, effects }] => {
+            pptx::validate_slide_animation_targets(bundle, &manifest, chunk_id, effects)?;
+            Some((chunk_id.as_str(), effects.as_slice()))
+        }
+        _ => None,
+    };
+    let master_background = match patch.operations.as_slice() {
+        [PatchOperation::PptxMasterBackgroundSet { chunk_id, color }] => {
+            let part = pptx::slide_master_part(bundle, &manifest, chunk_id)?;
+            Some((part, color.to_ascii_lowercase()))
+        }
+        _ => None,
+    };
+    let mut pptx_master_backgrounds = if manifest.source.format == "pptx" {
+        bundle.revision(manifest.revision)?.pptx_master_backgrounds
+    } else {
+        BTreeMap::new()
+    };
+    if let Some((part, color)) = &master_background {
+        pptx_master_backgrounds.insert(part.clone(), color.clone());
+    }
+    let master_text = match patch.operations.as_slice() {
+        [PatchOperation::PptxMasterTextStyleSet { chunk_id, style }] => {
+            Some((pptx::slide_master_part(bundle, &manifest, chunk_id)?, style))
+        }
+        _ => None,
+    };
+    let mut pptx_master_text_styles = if manifest.source.format == "pptx" {
+        bundle.revision(manifest.revision)?.pptx_master_text_styles
+    } else {
+        BTreeMap::new()
+    };
+    if let Some((part, style)) = &master_text {
+        crate::pptx_design::upsert_master_text(
+            pptx_master_text_styles.entry(part.clone()).or_default(),
+            style,
+        );
+    }
     let pptx_geometry = collect_pptx_geometry(patch);
     let pptx_deletions = collect_pptx_deletions(patch);
+    let pptx_formats = collect_pptx_formats(patch);
+    let pptx_aligns = collect_pptx_aligns(patch);
+    let xlsx_formats = collect_xlsx_formats(patch);
+    let mut rich_converted_formula_ids = HashSet::new();
+    let xlsx_rich: HashMap<_, _> = patch
+        .operations
+        .iter()
+        .filter_map(|op| match op {
+            PatchOperation::XlsxRichTextSet {
+                node_id,
+                runs,
+                precondition,
+            } => Some((node_id.clone(), (runs, precondition))),
+            _ => None,
+        })
+        .collect();
+    let xlsx_layouts = collect_xlsx_layouts(patch);
+    let xlsx_number_formats = collect_xlsx_number_formats(patch);
     let xlsx_merges = collect_xlsx_merges(patch);
     let xlsx_blank_merge = collect_xlsx_blank_merge(patch);
     let xlsx_unmerges = collect_xlsx_unmerges(patch);
     let xlsx_cell_set = collect_xlsx_cell_set(patch)?;
+    let xlsx_cell_clears = collect_xlsx_cell_clears(bundle, &manifest, patch)?;
     let xlsx_formula = collect_xlsx_formula_set(patch)?;
-    let shifted_grid = if !xlsx_cell_set.is_empty() || xlsx_blank_merge.is_some() {
+    let created_cell_generation = if !xlsx_cell_set.is_empty() || xlsx_blank_merge.is_some() {
         (1..=manifest.revision).try_fold(false, |found, revision| {
             let record = bundle.revision(revision)?;
             Ok::<_, HcdError>(
                 found
+                    // An address that has been cleared must mint a new identity.
+                    || !record.removed_node_ids.is_empty()
                     || !record.grid_row_insertions.is_empty()
                     || !record.grid_row_deletions.is_empty()
                     || !record.grid_column_insertions.is_empty()
@@ -300,6 +435,56 @@ pub fn apply_patch(
     let xlsx_row_removal = collect_xlsx_row_removal(patch);
     let xlsx_column_width = collect_xlsx_column_width(patch);
     let xlsx_row_height = collect_xlsx_row_height(patch);
+    let xlsx_sheet_freeze = collect_xlsx_sheet_freeze(patch);
+    // A frozen band names the rows and columns that stand inside it, so a shift
+    // that moves one through the band moves the band with it the way Excel keeps a
+    // freeze covering the window it was set on.
+    let xlsx_pane_band = xlsx_pane_band_move(
+        xlsx_row_insert.as_ref(),
+        xlsx_row_delete.as_ref(),
+        xlsx_column_insert.as_ref(),
+        xlsx_column_delete.as_ref(),
+    );
+    let auto_filter = match patch.operations.first() {
+        Some(PatchOperation::XlsxAutoFilterSet { sheet_id, filter }) => {
+            if let Some(filter) = filter {
+                grid_filter::evaluate_grid_filter(bundle, &manifest, sheet_id, filter, true)?;
+            }
+            Some((sheet_id.as_str(), filter))
+        }
+        _ => None,
+    };
+    let chart_change = worksheet_charts::resolve_chart_change(bundle, &manifest, patch)?;
+    let condition_change =
+        worksheet_conditions::resolve_condition_change(bundle, &manifest, patch)?;
+    let pivot_changes =
+        worksheet_pivots::resolve_pivot_changes(bundle, &manifest, patch, snapshot)?;
+    let pdf_layout = match patch.operations.first() {
+        Some(PatchOperation::PdfPageLayoutSet { pages }) => {
+            let source_page_count = crate::pdf_page_count(bundle, &manifest)?;
+            crate::validate_pdf_placements(pages, source_page_count)?;
+            if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_52
+                && (pages.len() != source_page_count
+                    || pages.iter().any(|page| page.source_page.is_none()))
+            {
+                return Err(HcdError::InvalidPatch(
+                    "hcd-patch/52 must include every source page exactly once".into(),
+                ));
+            }
+            Some(
+                if pages.len() == source_page_count
+                    && pages.iter().enumerate().all(|(index, page)| {
+                        page.source_page == Some(index as u32 + 1) && page.rotation == 0
+                    })
+                {
+                    &[][..]
+                } else {
+                    pages.as_slice()
+                },
+            )
+        }
+        _ => None,
+    };
     let xlsx_row_target = xlsx_row_append
         .as_ref()
         .map(|append| find_xlsx_row_tail(bundle, &manifest, append))
@@ -346,6 +531,50 @@ pub fn apply_patch(
         .as_ref()
         .map(|height| find_xlsx_sheet_part(bundle, &manifest, &height.sheet_id))
         .transpose()?;
+    let xlsx_freeze_part = xlsx_sheet_freeze
+        .as_ref()
+        .map(|freeze| {
+            find_xlsx_sheet_part(bundle, &manifest, &freeze.sheet_id).map_err(|error| match error {
+                HcdError::Unsupported(_) => HcdError::Unsupported(
+                    "XLSX freeze panes require a worksheet window with a known source part"
+                        .to_string(),
+                ),
+                other => other,
+            })
+        })
+        .transpose()?;
+    let xlsx_sheet_rename = collect_xlsx_sheet_rename(patch)
+        .as_ref()
+        .map(|rename| resolve_xlsx_sheet_rename(bundle, &manifest, rename))
+        .transpose()?;
+    let xlsx_sheet_add = collect_xlsx_sheet_add(patch)
+        .as_ref()
+        .map(|name| resolve_xlsx_sheet_add(bundle, &manifest, name))
+        .transpose()?;
+    let xlsx_sheet_removal = collect_xlsx_sheet_removal(patch)
+        .as_ref()
+        .map(|removal| resolve_xlsx_sheet_removal(bundle, &manifest, removal))
+        .transpose()?;
+    let pptx_slide_add = collect_pptx_slide_add(patch)
+        .then(|| resolve_pptx_slide_add(bundle, &manifest))
+        .transpose()?;
+    let pptx_slide_removal = collect_pptx_slide_removal(patch)
+        .as_ref()
+        .map(|removal| resolve_pptx_slide_removal(bundle, &manifest, removal))
+        .transpose()?;
+    let pptx_slide_reorder = collect_pptx_slide_reorder(patch)
+        .as_ref()
+        .map(|moving| resolve_pptx_slide_reorder(bundle, &manifest, moving))
+        .transpose()?;
+    let pptx_slide_copy = collect_pptx_slide_copy(patch)
+        .as_ref()
+        .map(|copy| resolve_pptx_slide_copy(bundle, &manifest, copy))
+        .transpose()?;
+    if pptx_slide_removal.is_some() && pptx_slide_reorder.is_some() {
+        return Err(HcdError::InvalidPatch(
+            "one patch moves or removes a slide, not both".to_string(),
+        ));
+    }
     let annotation_node_ids: HashSet<String> = patch
         .operations
         .iter()
@@ -358,12 +587,21 @@ pub fn apply_patch(
         .keys()
         .cloned()
         .chain(styles.keys().cloned())
+        .chain(fonts.keys().cloned())
         .chain(images.keys().cloned())
+        .chain(word_picture.map(|(id, _, _)| id.clone()))
         .chain(xlsx_merges.keys().cloned())
         .chain(xlsx_unmerges.keys().cloned())
+        .chain(xlsx_cell_clears.keys().map(|id| (*id).to_string()))
         .chain(xlsx_formula.keys().cloned())
         .chain(pptx_geometry.keys().cloned())
         .chain(pptx_deletions.keys().cloned())
+        .chain(pptx_formats.keys().cloned())
+        .chain(pptx_aligns.keys().cloned())
+        .chain(xlsx_formats.keys().cloned())
+        .chain(xlsx_rich.keys().cloned())
+        .chain(xlsx_layouts.keys().cloned())
+        .chain(xlsx_number_formats.keys().cloned())
         .chain(pdf_geometry.keys().cloned())
         .chain(pdf_deletions.keys().cloned())
         .chain(annotation_node_ids.iter().cloned())
@@ -374,17 +612,32 @@ pub fn apply_patch(
     let new_index_root = bundle.root().join(&new_index_prefix);
     let content_changed = !splices.is_empty()
         || !styles.is_empty()
+        || !fonts.is_empty()
         || !images.is_empty()
+        || word_picture.is_some()
+        || !image_insertions.is_empty()
         || !pdf_insertions.is_empty()
+        || !pdf_ocr_pages.is_empty()
         || !pdf_geometry.is_empty()
         || !pdf_deletions.is_empty()
         || !pptx_insertions.is_empty()
+        || pptx_object_chunk.is_some()
+        || pptx_animation.is_some()
+        || master_background.is_some()
+        || master_text.is_some()
         || !pptx_geometry.is_empty()
         || !pptx_deletions.is_empty()
+        || !pptx_formats.is_empty()
+        || !pptx_aligns.is_empty()
+        || !xlsx_formats.is_empty()
+        || !xlsx_rich.is_empty()
+        || !xlsx_layouts.is_empty()
+        || !xlsx_number_formats.is_empty()
         || !xlsx_merges.is_empty()
         || xlsx_blank_merge.is_some()
         || !xlsx_unmerges.is_empty()
         || !xlsx_cell_set.is_empty()
+        || !xlsx_cell_clears.is_empty()
         || !xlsx_formula.is_empty()
         || xlsx_row_append.is_some()
         || xlsx_row_insert.is_some()
@@ -393,7 +646,22 @@ pub fn apply_patch(
         || xlsx_column_delete.is_some()
         || xlsx_row_removal.is_some()
         || xlsx_column_width.is_some()
-        || xlsx_row_height.is_some();
+        || xlsx_row_height.is_some()
+        || xlsx_sheet_freeze.is_some()
+        || xlsx_sheet_rename.is_some()
+        || xlsx_sheet_add.is_some()
+        || xlsx_sheet_removal.is_some()
+        || pptx_slide_add.is_some()
+        || pptx_slide_removal.is_some()
+        // A move rewrites the index the deck's page order lives in, without
+        // touching a single chunk. A copy rewrites it with one page more.
+        || pptx_slide_reorder.is_some()
+        || pptx_slide_copy.is_some()
+        || auto_filter.is_some()
+        || chart_change.is_some()
+        || condition_change.is_some()
+        || !pivot_changes.is_empty()
+        || pdf_layout.is_some();
     let mut index_root_href = manifest.index_root_href.clone();
     if content_changed && index_root_href.is_none() {
         fs::create_dir_all(&new_index_root)?;
@@ -417,6 +685,39 @@ pub fn apply_patch(
     let mut removed_xlsx_row = false;
     let mut changed_xlsx_column = false;
     let mut changed_xlsx_row_height = false;
+    // A freeze rewrites the pane every window of one worksheet carries, so both
+    // counters add up across those windows: how many this patch read, and how
+    // many of them it actually rewrote.
+    let mut froze_xlsx_sheet_windows = 0usize;
+    let mut froze_xlsx_sheet_reads = 0usize;
+    let mut renamed_xlsx_sheet = false;
+    // A worksheet removal takes whole chunks out of the index, so the patch
+    // collects the chunks that survive instead of editing a page in place: the
+    // hole renumbers every chunk behind it, which rewrites every page after it.
+    let mut removed_xlsx_sheet = false;
+    let mut dropped_sheet_chunks = 0usize;
+    let mut removed_sheet_node_ids: Vec<String> = Vec::new();
+    let mut kept_index_descriptors: Vec<crate::ChunkDescriptor> = Vec::new();
+    let mut added_sheet_chunk = xlsx_sheet_add
+        .as_ref()
+        .map(|addition| mint_xlsx_sheet_chunk(bundle, &manifest, addition))
+        .transpose()?;
+    let mut added_xlsx_sheet = false;
+    // A new slide is one page chunk appended after the last one, so it takes the
+    // same tail-of-index write a new worksheet tab takes.
+    let mut added_slide_chunk = pptx_slide_add
+        .as_ref()
+        .map(|addition| mint_pptx_slide_chunk(bundle, &manifest, addition))
+        .transpose()?;
+    let mut added_pptx_slide = false;
+    // A deleted slide is the same hole in the index a deleted tab makes, so it
+    // collects its survivors the same way: the page leaves, its text nodes leave
+    // with it, and every chunk behind it moves up one sequence.
+    let mut removed_pptx_slide = false;
+    let mut dropped_slide_chunks = 0usize;
+    let mut removed_slide_node_ids: Vec<String> = Vec::new();
+    let mut appended_index_page: Option<crate::ChunkIndexPage> = None;
+    let mut wrote_auto_filter = false;
     let mut root_hasher = Sha256::new();
     let current_asset_index_href = bundle.asset_index_href_for_revision(manifest.revision)?;
     let mut asset_index = bundle.read_asset_index_for_revision(manifest.revision)?;
@@ -424,10 +725,22 @@ pub fn apply_patch(
         .iter()
         .map(|asset| (asset.hash.clone(), asset.clone()))
         .collect();
-    for change in images.values() {
-        let Some(hash) = change.asset_hash.as_deref() else {
-            continue;
-        };
+    for hash in images
+        .values()
+        .filter_map(|change| change.asset_hash.as_deref())
+        .chain(
+            images
+                .values()
+                .filter_map(|change| change.layers.as_ref())
+                .flat_map(|stack| stack.layers.iter().map(|layer| layer.asset_hash.as_str())),
+        )
+        .chain(
+            image_insertions
+                .values()
+                .flatten()
+                .map(|insertion| insertion.asset_hash.as_str()),
+        )
+    {
         if asset_by_hash.contains_key(hash) {
             continue;
         }
@@ -435,6 +748,16 @@ pub fn apply_patch(
         validate_staged_asset(bundle, &staged, hash)?;
         asset_by_hash.insert(hash.to_string(), staged.clone());
         asset_index.push(staged);
+    }
+    for change in images.values_mut().filter(|change| change.layers.is_some()) {
+        let stack = change.layers.as_ref().expect("validated layer change");
+        let data = crate::image_layers::render(bundle, stack, &asset_by_hash)?;
+        let staged = bundle.stage_asset_from_reader("png", &mut data.as_slice())?;
+        change.asset_hash = Some(staged.hash.clone());
+        if !asset_by_hash.contains_key(&staged.hash) {
+            asset_by_hash.insert(staged.hash.clone(), staged.clone());
+            asset_index.push(staged);
+        }
     }
     asset_index.sort_by(|left, right| left.hash.cmp(&right.hash));
     asset_index.dedup_by(|left, right| left.hash == right.hash);
@@ -449,8 +772,99 @@ pub fn apply_patch(
         let mut page = bundle.read_index_page(&manifest, page_number)?;
         let mut page_changed = false;
         for descriptor in &mut page.chunks {
+            if let Some(grid) = descriptor.grid.as_mut() {
+                let moved = worksheet_charts::shift_worksheet_charts(grid, patch);
+                let change = chart_change
+                    .as_ref()
+                    .filter(|change| change.chunk_id == descriptor.chunk_id);
+                if let Some(change) = change {
+                    grid.charts.clone_from(&change.charts);
+                }
+                let conditions_shifted = worksheet_conditions::shift_conditions(grid, patch);
+                let conditions = condition_change
+                    .as_ref()
+                    .filter(|(id, _)| *id == descriptor.chunk_id);
+                if let Some((_, rules)) = conditions {
+                    grid.conditions.clone_from(rules);
+                }
+                let pivots = pivot_changes.get(&descriptor.chunk_id);
+                if let Some(pivots) = pivots {
+                    grid.pivots.clone_from(pivots);
+                }
+                if moved
+                    || change.is_some()
+                    || conditions_shifted
+                    || conditions.is_some()
+                    || pivots.is_some()
+                {
+                    page_changed = true;
+                    dirty_chunks.insert(descriptor.chunk_id.clone());
+                    dirty_parts.extend(grid.sheet_part.iter().cloned());
+                }
+            }
+            if let Some(layout) = pdf_layout.filter(|_| descriptor.sequence == 0) {
+                if descriptor.pdf_layout == layout {
+                    return Err(HcdError::PreconditionFailed(
+                        "PDF page layout is already in the requested state".into(),
+                    ));
+                }
+                descriptor.pdf_layout = layout.to_vec();
+                page_changed = true;
+                dirty_chunks.insert(descriptor.chunk_id.clone());
+            }
+            if let Some(grid) = descriptor
+                .grid
+                .as_mut()
+                .filter(|grid| grid.kind == crate::GridChunkKind::Cells)
+            {
+                if let Some((_, filter)) = auto_filter
+                    .filter(|(sheet_id, _)| !wrote_auto_filter && *sheet_id == grid.sheet_id)
+                {
+                    if &grid.auto_filter == filter {
+                        return Err(HcdError::PreconditionFailed(
+                            "AutoFilter is already in the requested state".into(),
+                        ));
+                    }
+                    grid.auto_filter.clone_from(filter);
+                    wrote_auto_filter = true;
+                    page_changed = true;
+                    dirty_chunks.insert(descriptor.chunk_id.clone());
+                }
+                if grid.auto_filter.is_some()
+                    && patch.operations.iter().any(|operation| match operation {
+                        PatchOperation::XlsxRowInsert { sheet_id, .. }
+                        | PatchOperation::XlsxRowDelete { sheet_id, .. }
+                        | PatchOperation::XlsxRowRemoveLast { sheet_id, .. }
+                        | PatchOperation::XlsxColumnInsert { sheet_id, .. }
+                        | PatchOperation::XlsxColumnDelete { sheet_id, .. }
+                        | PatchOperation::XlsxGridRange { sheet_id, .. }
+                        | PatchOperation::XlsxMerge { sheet_id, .. }
+                        | PatchOperation::XlsxMergeBlank { sheet_id, .. } => {
+                            sheet_id == &grid.sheet_id
+                        }
+                        _ => false,
+                    })
+                {
+                    return Err(HcdError::Unsupported("Clear the saved AutoFilter before shifting rows or columns or merging cells on this sheet".into()));
+                }
+            }
             let insertions = pdf_insertions.get(&descriptor.chunk_id);
+            let ocr_page = pdf_ocr_pages.get(&descriptor.chunk_id);
             let slide_insertions = pptx_insertions.get(&descriptor.chunk_id);
+            let has_slide_objects = pptx_object_chunk == Some(descriptor.chunk_id.as_str());
+            let slide_animation = pptx_animation
+                .filter(|(chunk_id, _)| *chunk_id == descriptor.chunk_id)
+                .map(|(_, effects)| effects);
+            let prune_slide_animation = !pptx_deletions.is_empty()
+                && descriptor.region == "slide"
+                && !descriptor.continuation;
+            let master_background_here = master_background
+                .as_ref()
+                .filter(|_| descriptor.region == "slide");
+            let master_text_here = master_text
+                .as_ref()
+                .filter(|_| descriptor.region == "slide");
+            let inserted_visuals = image_insertions.get(&descriptor.chunk_id);
             let append_here = xlsx_row_target.as_deref() == Some(descriptor.chunk_id.as_str());
             let cell_row_extension = xlsx_cell_row_extensions.get(&descriptor.chunk_id).copied();
             let blank_merge_here =
@@ -540,17 +954,74 @@ pub fn apply_patch(
                         && grid.row_end.is_some_and(|end| u64::from(height.row) <= end)
                 })
             });
+            let freeze_here = xlsx_sheet_freeze.as_ref().filter(|freeze| {
+                descriptor.grid.as_ref().is_some_and(|grid| {
+                    grid.kind == crate::GridChunkKind::Cells && grid.sheet_id == freeze.sheet_id
+                })
+            });
+            // Every window of a shifted sheet is asked about its band, not only
+            // the windows whose own rows or columns moved: the band is the sheet's
+            // split and the export refuses a sheet whose windows disagree.
+            let pane_band_here = xlsx_pane_band.as_ref().filter(|band| {
+                descriptor.grid.as_ref().is_some_and(|grid| {
+                    grid.kind == crate::GridChunkKind::Cells && grid.sheet_id == band.sheet_id
+                })
+            });
+            let rename_here = xlsx_sheet_rename.as_ref().is_some_and(|rename| {
+                descriptor
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.sheet_id == rename.sheet_id)
+            });
+            let delete_here = xlsx_sheet_removal.as_ref().is_some_and(|removal| {
+                descriptor
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.sheet_id == removal.sheet_id)
+            });
+            if delete_here {
+                // Every chunk of the deleted tab leaves the index, and the cells
+                // it mapped leave with it. The rebuild behind this loop puts the
+                // chunks that survive back on pages and renumbers them.
+                for entry in bundle.read_map(descriptor)?.entries {
+                    removed_sheet_node_ids.push(entry.node_id);
+                }
+                dirty_chunks.insert(descriptor.chunk_id.clone());
+                dropped_sheet_chunks += 1;
+                removed_xlsx_sheet = true;
+                continue;
+            }
+            // A page can reach across more than one chunk when a table on it is
+            // split, so the chunks to drop were worked up front, from the part
+            // each section names, instead of matching only the one chunk id.
+            let delete_slide_here = pptx_slide_removal
+                .as_ref()
+                .is_some_and(|removal| removal.dropped_chunk_ids.contains(&descriptor.chunk_id));
+            if delete_slide_here {
+                for entry in bundle.read_map(descriptor)?.entries {
+                    removed_slide_node_ids.push(entry.node_id);
+                }
+                dirty_chunks.insert(descriptor.chunk_id.clone());
+                dropped_slide_chunks += 1;
+                removed_pptx_slide = true;
+                continue;
+            }
             let cell_insertions: Vec<&XlsxCellInsertion> = descriptor
                 .grid
                 .as_ref()
                 .filter(|grid| grid.kind == crate::GridChunkKind::Cells)
                 .and_then(|grid| {
+                    let extension = cell_row_extension.unwrap_or(0);
+                    let end = grid.row_end.unwrap_or(0).max(u64::from(extension));
+                    // A window without row bounds is an empty worksheet. It only
+                    // takes part in a patch when that patch creates its first row.
+                    if end == 0 {
+                        return None;
+                    }
                     Some((
                         grid.sheet_id.clone(),
-                        u32::try_from(grid.row_start?).ok()?,
-                        u32::try_from(grid.row_end?)
-                            .ok()?
-                            .max(cell_row_extension.unwrap_or(0)),
+                        u32::try_from(grid.row_start.unwrap_or(1)).ok()?,
+                        u32::try_from(end).ok()?,
                     ))
                 })
                 .map(|(sheet_id, start, end)| {
@@ -566,8 +1037,15 @@ pub fn apply_patch(
                 .collect();
             if candidates.is_empty()
                 && insertions.is_none()
+                && ocr_page.is_none()
                 && cell_insertions.is_empty()
                 && slide_insertions.is_none()
+                && !has_slide_objects
+                && slide_animation.is_none()
+                && !prune_slide_animation
+                && master_background_here.is_none()
+                && master_text_here.is_none()
+                && inserted_visuals.is_none()
                 && !blank_merge_here
                 && !append_here
                 && !row_shift_here
@@ -581,6 +1059,19 @@ pub fn apply_patch(
                 && !remove_here
                 && width_here.is_none()
                 && height_here.is_none()
+                && freeze_here.is_none()
+                && pane_band_here.is_none()
+                // A rename can touch a formula in any worksheet, so every chunk
+                // is inspected for references to the old tab name.
+                && xlsx_sheet_rename.is_none()
+                // A removal rebuilds the whole index, so every surviving chunk
+                // has to be collected, not just the ones this patch edits. A
+                // move rebuilds it too, with nothing taken out of it, and a copy
+                // rebuilds it with the copied page spliced in.
+                && xlsx_sheet_removal.is_none()
+                && pptx_slide_removal.is_none()
+                && pptx_slide_reorder.is_none()
+                && pptx_slide_copy.is_none()
             {
                 hash_descriptor(&mut root_hasher, descriptor);
                 continue;
@@ -610,8 +1101,51 @@ pub fn apply_patch(
                     )));
                 }
                 found_nodes.insert(entry.node_id.clone(), current_text.chars().count());
+                if let Some((id, layout, precondition)) =
+                    word_picture.filter(|(id, _, _)| *id == &entry.node_id)
+                {
+                    let current = image_nodes.get(id).ok_or_else(|| {
+                        HcdError::InvalidPatch("Word picture has no visual state".into())
+                    })?;
+                    // The persisted layout is consumed separately from text and
+                    // image-binary rewrites during source-backed export.
+                    docx_pictures::apply(
+                        &mut html,
+                        entry,
+                        current,
+                        layout.as_ref(),
+                        &precondition.visual_hash,
+                    )?;
+                    chunk_changed = true;
+                    continue;
+                }
+                if let Some(&(sheet_id, node_hash)) = xlsx_cell_clears.get(entry.node_id.as_str()) {
+                    if entry.source.node_kind != "cell"
+                        || !entry.source.editable
+                        || !entry.source.created_in_hcd
+                        || entry.node_hash != node_hash
+                        || descriptor
+                            .grid
+                            .as_ref()
+                            .is_none_or(|grid| grid.sheet_id != sheet_id)
+                    {
+                        return Err(HcdError::PreconditionFailed(
+                            "XLSX cell no longer matches its original write".into(),
+                        ));
+                    }
+                    clear_xlsx_cell(&mut html, entry)?;
+                    html_nodes.remove(&entry.node_id);
+                    deleted_here.push(entry.node_id.clone());
+                    removed_nodes.insert(entry.node_id.clone());
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                    continue;
+                }
                 if entry.source.node_kind == "image"
-                    && (styles.contains_key(&entry.node_id) || splices.contains_key(&entry.node_id))
+                    && (styles.contains_key(&entry.node_id)
+                        || fonts.contains_key(&entry.node_id)
+                        || splices.contains_key(&entry.node_id))
                 {
                     return Err(HcdError::Unsupported(format!(
                         "image node {} accepts image.replace/image.geometry, not text or node.style operations",
@@ -631,6 +1165,14 @@ pub fn apply_patch(
                             entry.node_id
                         ))
                     })?;
+                    if crate::image_layers::standalone(&manifest.source.format)
+                        && change.layers.is_none()
+                        && crate::image_layers::saved_stack(&html)?.is_some()
+                    {
+                        return Err(HcdError::Unsupported(
+                            "图片已有图层，请通过图层操作提交修改".into(),
+                        ));
+                    }
                     if current.visual_hash != change.visual_hash {
                         return Err(HcdError::PreconditionFailed(format!(
                             "image node {} expected visual hash {}, actual {}",
@@ -649,10 +1191,35 @@ pub fn apply_patch(
                         replace_image_asset(&mut html, &entry.node_id, asset)?;
                     }
                     if let Some(geometry) = change.geometry.as_ref() {
+                        if manifest.source.format == "pptx" {
+                            let (_, width, height) = pptx_slide_page(&html)?;
+                            if geometry.unit != crate::ImageGeometryUnit::Emu
+                                || [geometry.x, geometry.y, geometry.width, geometry.height]
+                                    .iter()
+                                    .any(|value| *value < 0.0 || value.fract() != 0.0)
+                                || geometry.x + geometry.width > width as f64
+                                || geometry.y + geometry.height > height as f64
+                            {
+                                return Err(HcdError::InvalidPatch(
+                                    "PPTX image must use integral EMU within its slide".into(),
+                                ));
+                            }
+                        }
                         replace_image_geometry(&mut html, &entry.node_id, geometry)?;
                     }
-                    let new_visual_hash =
-                        image_visual_hash(asset_hash.as_deref(), geometry.as_ref());
+                    if let Some(stack) = change.layers.as_ref() {
+                        set_element_attribute(
+                            &mut html,
+                            &entry.node_id,
+                            crate::image_layers::ATTRIBUTE,
+                            &stack.encode()?,
+                        )?;
+                    }
+                    let new_visual_hash = crate::html::image_visual_hash_with_layout(
+                        asset_hash.as_deref(),
+                        geometry.as_ref(),
+                        current.docx_picture_layout.as_ref(),
+                    );
                     set_element_attribute(
                         &mut html,
                         &entry.node_id,
@@ -665,6 +1232,8 @@ pub fn apply_patch(
                             visual_hash: new_visual_hash,
                             asset_hash,
                             geometry,
+                            docx_drawing_id: current.docx_drawing_id,
+                            docx_picture_layout: current.docx_picture_layout.clone(),
                         },
                     );
                     dirty_nodes.insert(entry.node_id.clone());
@@ -673,6 +1242,21 @@ pub fn apply_patch(
                 }
                 let style_change = styles.get(&entry.node_id);
                 if let Some(change) = style_change {
+                    if !entry.source.editable {
+                        return Err(HcdError::Unsupported(format!(
+                            "node {} is read-only",
+                            entry.node_id
+                        )));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "node {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                }
+                let font_change = fonts.get(&entry.node_id);
+                if let Some(change) = font_change {
                     if !entry.source.editable {
                         return Err(HcdError::Unsupported(format!(
                             "node {} is read-only",
@@ -702,12 +1286,64 @@ pub fn apply_patch(
                         }
                     }
                     let replacement = splice_text(current_text, node_splices)?;
+                    let pdf_ocr = matches!(
+                        entry.source.node_kind.as_str(),
+                        crate::pdf_ocr::OCR_NODE_KIND | "pdf-source-ocr"
+                    );
+                    if pdf_ocr && !crate::pdf_ocr::valid_ocr_text(&replacement) {
+                        return Err(HcdError::InvalidPatch(
+                            "set a single bounded line of recognized text".into(),
+                        ));
+                    }
                     let replacement_hash = hash_bytes(replacement.as_bytes());
-                    replace_node_text(&mut html, &entry.node_id, &replacement, &replacement_hash)?;
-                    if manifest.source.format == "xlsx" && entry.source.node_kind == "cell" {
+                    let mut rich = crate::extract_docx_inline_runs(&html)?;
+                    let mut grid_rich = crate::extract_xlsx_inline_runs(&html)?;
+                    if let Some(mut runs) = grid_rich.remove(&entry.node_id) {
+                        let mut ordered = node_splices.clone();
+                        ordered.sort_by_key(|splice| splice.start);
+                        for splice in ordered.into_iter().rev() {
+                            runs = crate::splice_xlsx_inline_runs(
+                                &runs,
+                                splice.start,
+                                splice.delete_count,
+                                &splice.insert_text,
+                            );
+                        }
+                        replace_node_content(
+                            &mut html,
+                            &entry.node_id,
+                            &crate::render_xlsx_inline_runs(&runs)?,
+                            &replacement_hash,
+                        )?;
+                    } else if let Some(mut runs) = rich.remove(&entry.node_id) {
+                        let mut ordered = node_splices.clone();
+                        ordered.sort_by_key(|splice| splice.start);
+                        for splice in ordered.into_iter().rev() {
+                            runs = crate::docx_inline::splice_docx_inline_runs(
+                                &runs,
+                                splice.start,
+                                splice.delete_count,
+                                &splice.insert_text,
+                            );
+                        }
+                        replace_node_content(
+                            &mut html,
+                            &entry.node_id,
+                            &crate::docx_inline::render_docx_inline_runs(&runs),
+                            &replacement_hash,
+                        )?;
+                    } else {
+                        replace_node_text(
+                            &mut html,
+                            &entry.node_id,
+                            &replacement,
+                            &replacement_hash,
+                        )?;
+                    }
+                    if manifest.source.is_spreadsheet() && entry.source.node_kind == "cell" {
                         set_xlsx_raw_value(&mut html, &entry.node_id, "")?;
                     }
-                    if manifest.source.format == "pdf" {
+                    if manifest.source.format == "pdf" && !pdf_ocr {
                         set_element_attribute(
                             &mut html,
                             &entry.node_id,
@@ -779,7 +1415,12 @@ pub fn apply_patch(
                         }
                     };
                     let replacement_hash = hash_bytes(replacement.as_bytes());
-                    replace_node_text(&mut html, &entry.node_id, replacement, &replacement_hash)?;
+                    replace_node_content(
+                        &mut html,
+                        &entry.node_id,
+                        &escape_text(replacement),
+                        &replacement_hash,
+                    )?;
                     entry.node_hash = replacement_hash;
                     found_nodes.insert(entry.node_id.clone(), replacement.chars().count());
                     html_nodes.insert(entry.node_id.clone(), replacement.clone());
@@ -789,6 +1430,15 @@ pub fn apply_patch(
                 }
                 if let Some(change) = style_change {
                     apply_node_style(&mut html, &entry.node_id, &change.style)?;
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = font_change {
+                    match change.font {
+                        Some(ref font) => apply_node_font(&mut html, &entry.node_id, font)?,
+                        None => clear_node_font(&mut html, &entry.node_id)?,
+                    }
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
@@ -808,6 +1458,168 @@ pub fn apply_patch(
                     update_pptx_shape_geometry(&mut html, entry, change)?;
                     dirty_nodes.insert(entry.node_id.clone());
                     dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = pptx_formats.get(&entry.node_id) {
+                    if !matches!(
+                        entry.source.node_kind.as_str(),
+                        "slide-text" | "table-cell-text"
+                    ) || !entry.source.editable
+                    {
+                        return Err(HcdError::Unsupported(
+                            "PPTX run formatting requires editable slide or table text".to_string(),
+                        ));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "PPTX text node {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                    update_pptx_run_format(&mut html, entry, &change.format)?;
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = pptx_aligns.get(&entry.node_id) {
+                    // Alignment is a shape's, not a run's: the request lands on a
+                    // text node because that is what the editor selects, and the
+                    // shape that holds it is what moves.
+                    if entry.source.node_kind != "slide-text" || !entry.source.editable {
+                        return Err(HcdError::Unsupported(
+                            "PPTX shape alignment requires an editable slide text node".to_string(),
+                        ));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "PPTX text node {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                    update_pptx_shape_align(&mut html, &entry.node_id, &change.align)?;
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some((runs, precondition)) = xlsx_rich.get(&entry.node_id) {
+                    if entry.source.node_kind != "cell" {
+                        return Err(HcdError::Unsupported(
+                            "XLSX rich text requires an editable string cell".into(),
+                        ));
+                    }
+                    if precondition.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(
+                            "XLSX rich text cell has changed".into(),
+                        ));
+                    }
+                    let marker_at = html
+                        .find(&format!("data-hcd-id=\"{}\"", entry.node_id))
+                        .ok_or_else(|| HcdError::InvalidBundle("missing XLSX rich cell".into()))?;
+                    let cell_start = html[..marker_at].rfind("<td ").ok_or_else(|| {
+                        HcdError::InvalidBundle("missing XLSX rich cell container".into())
+                    })?;
+                    let cell_end = html[cell_start..]
+                        .find('>')
+                        .map(|i| cell_start + i)
+                        .ok_or_else(|| HcdError::InvalidBundle("unclosed XLSX rich cell".into()))?;
+                    let tag = &html[cell_start..=cell_end];
+                    let formula = xlsx_attribute(tag, "data-hcd-formula") == Some("true");
+                    if !entry.source.editable
+                        && (!formula
+                            || xlsx_attribute(tag, "data-hcd-formula-editable") != Some("true"))
+                    {
+                        return Err(HcdError::Unsupported(
+                            "XLSX rich text target is read-only".into(),
+                        ));
+                    }
+                    if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_50
+                        && (formula
+                            || xlsx_attribute(tag, "data-hcd-value-type")
+                                .is_some_and(|kind| kind != "string")
+                            || xlsx_attribute(tag, "data-hcd-raw-value")
+                                .is_some_and(|value| !value.is_empty()))
+                    {
+                        return Err(HcdError::Unsupported(
+                            "Convert a numeric or formula cell to text before rich-text editing"
+                                .into(),
+                        ));
+                    }
+                    if formula {
+                        set_xlsx_formula_value(&mut html, &entry.node_id)?;
+                        rich_converted_formula_ids.insert(entry.node_id.clone());
+                    }
+                    let replacement: String = runs.iter().map(|run| run.text.as_str()).collect();
+                    let replacement_hash = hash_bytes(replacement.as_bytes());
+                    replace_node_content(
+                        &mut html,
+                        &entry.node_id,
+                        &crate::render_xlsx_inline_runs(runs)?,
+                        &replacement_hash,
+                    )?;
+                    set_xlsx_raw_value(&mut html, &entry.node_id, "")?;
+                    entry.source.editable = true;
+                    entry.node_hash = replacement_hash;
+                    found_nodes.insert(entry.node_id.clone(), replacement.chars().count());
+                    html_nodes.insert(entry.node_id.clone(), replacement);
+                    dirty_nodes.insert(entry.node_id.clone());
+                    dirty_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = xlsx_formats.get(&entry.node_id) {
+                    if entry.source.node_kind != "cell" {
+                        return Err(HcdError::Unsupported(
+                            "XLSX cell formatting requires a worksheet cell".to_string(),
+                        ));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "XLSX cell {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                    let rich_changed =
+                        update_xlsx_cell_format(&mut html, &entry.node_id, &change.format)?;
+                    if rich_changed {
+                        dirty_nodes.insert(entry.node_id.clone());
+                        dirty_parts.insert(entry.source.part.clone());
+                    }
+                    dirty_grid_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = xlsx_layouts.get(&entry.node_id) {
+                    if entry.source.node_kind != "cell" {
+                        return Err(HcdError::Unsupported(
+                            "XLSX cell layout requires a worksheet cell".to_string(),
+                        ));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "XLSX cell {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                    update_xlsx_cell_layout(&mut html, &entry.node_id, &change.layout)?;
+                    dirty_grid_parts.insert(entry.source.part.clone());
+                    chunk_changed = true;
+                }
+                if let Some(change) = xlsx_number_formats.get(&entry.node_id) {
+                    if entry.source.node_kind != "cell" {
+                        return Err(HcdError::Unsupported(
+                            "XLSX number format requires a worksheet cell".to_string(),
+                        ));
+                    }
+                    if change.node_hash != entry.node_hash {
+                        return Err(HcdError::PreconditionFailed(format!(
+                            "XLSX cell {} expected hash {}, actual {}",
+                            entry.node_id, change.node_hash, entry.node_hash
+                        )));
+                    }
+                    update_xlsx_cell_number_format(
+                        &mut html,
+                        &entry.node_id,
+                        &change.number_format,
+                    )?;
+                    dirty_grid_parts.insert(entry.source.part.clone());
                     chunk_changed = true;
                 }
                 if let Some(expected_hash) = pptx_deletions.get(&entry.node_id) {
@@ -995,12 +1807,14 @@ pub fn apply_patch(
                     .entries
                     .retain(|entry| !deleted_here.contains(&entry.node_id));
                 descriptor.node_count = source_map.entries.len();
-                descriptor.block_count = descriptor
-                    .block_count
-                    .checked_sub(deleted_here.len())
-                    .ok_or_else(|| {
-                        HcdError::InvalidBundle("fixed-page block count underflow".to_string())
-                    })?;
+                if descriptor.grid.is_none() {
+                    descriptor.block_count = descriptor
+                        .block_count
+                        .checked_sub(deleted_here.len())
+                        .ok_or_else(|| {
+                            HcdError::InvalidBundle("fixed-page block count underflow".to_string())
+                        })?;
+                }
                 descriptor.node_bloom = node_bloom(
                     source_map
                         .entries
@@ -1015,6 +1829,7 @@ pub fn apply_patch(
                     source_map.entries.last().map(|entry| entry.node_id.clone());
             }
 
+            let count_before_insertion = source_map.entries.len();
             if let Some(insertions) = insertions {
                 for insertion in insertions {
                     insert_pdf_text(&mut html, &mut source_map, insertion)?;
@@ -1022,8 +1837,24 @@ pub fn apply_patch(
                     dirty_nodes.insert(insertion.node_id.clone());
                     dirty_parts.insert(format!("pdf/pages/{}", insertion.page));
                 }
-                descriptor.node_count += insertions.len();
-                descriptor.block_count += insertions.len();
+            }
+            if let Some(page) = ocr_page {
+                let nodes = crate::pdf_ocr::write_ocr_page(
+                    &mut html,
+                    &mut source_map,
+                    &manifest.document_id,
+                    page,
+                )?;
+                for (node_id, text) in nodes {
+                    dirty_nodes.insert(node_id.clone());
+                    html_nodes.insert(node_id, text);
+                }
+                dirty_parts.insert(format!("pdf/pages/{}", page.page));
+            }
+            let additions = source_map.entries.len() - count_before_insertion;
+            if additions > 0 {
+                descriptor.node_count += additions;
+                descriptor.block_count += additions;
                 descriptor.node_bloom = node_bloom(
                     source_map
                         .entries
@@ -1036,6 +1867,87 @@ pub fn apply_patch(
                         .first()
                         .map(|entry| entry.node_id.clone());
                 }
+                descriptor.last_node_id =
+                    source_map.entries.last().map(|entry| entry.node_id.clone());
+                chunk_changed = true;
+            }
+            if has_slide_objects {
+                let (part, added_blocks, topology) =
+                    apply_pptx_objects(&mut html, &mut source_map, patch)?;
+                slide_group_edit = topology.map(|edit| crate::pptx_group::SlideGroupEdit {
+                    slide_part: part.clone(),
+                    edit,
+                });
+                descriptor.block_count += added_blocks;
+                dirty_parts.insert(part);
+                applied_pptx_objects = true;
+                chunk_changed = true;
+            }
+            if slide_animation.is_some() || prune_slide_animation {
+                use crate::pptx_animation::{
+                    read_pptx_animation_track, write_pptx_animation_track,
+                };
+                let mut track = read_pptx_animation_track(&html)?;
+                let len = track.effects.len();
+                track
+                    .effects
+                    .retain(|effect| !pptx_deletions.contains_key(&effect.target));
+                if let Some(effects) = slide_animation {
+                    track.effects = effects.to_vec();
+                }
+                if slide_animation.is_some() || len != track.effects.len() {
+                    track.edited = true;
+                    let (part, _, _) = pptx::pptx_slide_page(&html)?;
+                    write_pptx_animation_track(&mut html, &track)?;
+                    dirty_parts.insert(part);
+                    chunk_changed = true;
+                }
+            }
+            if let Some((part, color)) = master_background_here {
+                if pptx::update_slide_master_background(&mut html, part, color)? {
+                    dirty_parts.insert(part.clone());
+                    chunk_changed = true;
+                }
+            }
+            if let Some((part, style)) = master_text_here {
+                if pptx_master::update_master_text(&mut html, part, style)? {
+                    dirty_parts.insert(part.clone());
+                    chunk_changed = true;
+                }
+            }
+            if let Some(insertions) = inserted_visuals {
+                if flow_image_tail
+                    .as_ref()
+                    .is_some_and(|tail| tail != &descriptor.chunk_id)
+                {
+                    return Err(HcdError::Unsupported("Flow-document image insertion appends to the document body end; target the last chunk in the body region to preserve native export placement".into()));
+                }
+                for insertion in insertions {
+                    let asset = &asset_by_hash[&insertion.asset_hash];
+                    let node = crate::image_insert::insert(
+                        &mut html,
+                        &mut source_map,
+                        descriptor,
+                        &manifest.source.format,
+                        insertion,
+                        asset,
+                    )?;
+                    dirty_nodes.insert(node);
+                    dirty_parts.insert(source_map.entries.last().unwrap().source.part.clone());
+                    inserted_images += 1;
+                }
+                descriptor.node_count += insertions.len();
+                descriptor.block_count += insertions.len();
+                descriptor.node_bloom = node_bloom(
+                    source_map
+                        .entries
+                        .iter()
+                        .map(|entry| entry.node_id.as_str()),
+                );
+                descriptor.first_node_id = source_map
+                    .entries
+                    .first()
+                    .map(|entry| entry.node_id.clone());
                 descriptor.last_node_id =
                     source_map.entries.last().map(|entry| entry.node_id.clone());
                 chunk_changed = true;
@@ -1068,24 +1980,20 @@ pub fn apply_patch(
             if !cell_insertions.is_empty() {
                 if let Some(new_row) = cell_row_extension {
                     let old_row = new_row - 1;
-                    let part = source_map
-                        .entries
-                        .iter()
-                        .find(|entry| entry.source.node_kind == "cell")
-                        .map(|entry| entry.source.part.clone())
-                        .ok_or_else(|| {
-                            HcdError::Unsupported(
-                                "XLSX new row requires a mapped cell in the last window"
-                                    .to_string(),
-                            )
-                        })?;
+                    let part = xlsx_chunk_sheet_part(descriptor, &source_map)?;
                     append_xlsx_row(&mut html, old_row)?;
-                    descriptor
-                        .grid
-                        .as_mut()
-                        .expect("validated cell window")
-                        .row_end = Some(u64::from(new_row));
-                    descriptor.block_count += 1;
+                    let first_row = {
+                        let grid = descriptor.grid.as_mut().expect("validated cell window");
+                        let first_row = grid.row_start.is_none();
+                        grid.row_start = Some(grid.row_start.unwrap_or(u64::from(new_row)));
+                        grid.row_end = Some(u64::from(new_row));
+                        first_row
+                    };
+                    // An empty window is already one block: its first row opens
+                    // it instead of adding another.
+                    if !first_row {
+                        descriptor.block_count += 1;
+                    }
                     dirty_grid_parts.insert(part);
                 }
                 for insertion in cell_insertions {
@@ -1101,9 +2009,13 @@ pub fn apply_patch(
                     let (node_id, part) = insert_xlsx_cell(
                         &mut html,
                         &mut source_map,
+                        descriptor
+                            .grid
+                            .as_ref()
+                            .and_then(|grid| grid.sheet_part.as_deref()),
                         &manifest.document_id,
                         insertion,
-                        shifted_grid.then_some(manifest.revision),
+                        created_cell_generation.then_some(manifest.revision),
                     )?;
                     html_nodes.insert(node_id.clone(), insertion.text.clone());
                     descriptor.node_count += 1;
@@ -1142,13 +2054,18 @@ pub fn apply_patch(
                     column: merge.start_column,
                     text: String::new(),
                     formula: false,
+                    runs: None,
                 };
                 let (node_id, part) = insert_xlsx_cell(
                     &mut html,
                     &mut source_map,
+                    descriptor
+                        .grid
+                        .as_ref()
+                        .and_then(|grid| grid.sheet_part.as_deref()),
                     &manifest.document_id,
                     &insertion,
-                    shifted_grid.then_some(manifest.revision),
+                    created_cell_generation.then_some(manifest.revision),
                 )?;
                 merge_xlsx_cells(&mut html, merge)?;
                 html_nodes.insert(node_id.clone(), String::new());
@@ -1185,20 +2102,18 @@ pub fn apply_patch(
                 let append = xlsx_row_append
                     .as_ref()
                     .expect("target requires row append");
-                let part = source_map
-                    .entries
-                    .iter()
-                    .find(|entry| entry.source.node_kind == "cell")
-                    .map(|entry| entry.source.part.clone())
-                    .ok_or_else(|| {
-                        HcdError::Unsupported(
-                            "XLSX row append requires a mapped cell in the last window".to_string(),
-                        )
-                    })?;
+                let part = xlsx_chunk_sheet_part(descriptor, &source_map)?;
                 append_xlsx_row(&mut html, append.after_row)?;
-                let grid = descriptor.grid.as_mut().expect("validated row target");
-                grid.row_end = Some(u64::from(append.after_row) + 1);
-                descriptor.block_count += 1;
+                let first_row = {
+                    let grid = descriptor.grid.as_mut().expect("validated row target");
+                    let first_row = grid.row_start.is_none();
+                    grid.row_start = Some(grid.row_start.unwrap_or(1));
+                    grid.row_end = Some(u64::from(append.after_row) + 1);
+                    first_row
+                };
+                if !first_row {
+                    descriptor.block_count += 1;
+                }
                 dirty_grid_parts.insert(part);
                 appended_xlsx_row = true;
                 chunk_changed = true;
@@ -1443,6 +2358,61 @@ pub fn apply_patch(
                 changed_xlsx_row_height = true;
                 chunk_changed = true;
             }
+            if let Some(freeze) = freeze_here {
+                let (rewritten, read) =
+                    freeze_xlsx_sheet_sections(&mut html, freeze.rows, freeze.columns)?;
+                froze_xlsx_sheet_windows += rewritten;
+                froze_xlsx_sheet_reads += read;
+                if rewritten > 0 {
+                    dirty_grid_parts.insert(
+                        xlsx_freeze_part
+                            .as_ref()
+                            .expect("resolved sheet part")
+                            .clone(),
+                    );
+                    chunk_changed = true;
+                }
+            }
+            if let Some(band) = pane_band_here {
+                // The band each window keeps follows the rows and columns the
+                // history moved through it, once per moved row or column. The
+                // worksheet part this sheet lives in is already marked for a
+                // rebuild by the shift itself, so a window that only its band
+                // changed needs no part of its own.
+                let mut moved = false;
+                for _ in 0..band.count {
+                    moved |= shift_xlsx_pane_band(&mut html, band.shift)?;
+                }
+                chunk_changed |= moved;
+            }
+            if let Some(rename) = xlsx_sheet_rename.as_ref() {
+                let mut sheet_changed_here = rename_here;
+                if rename_here {
+                    rename_xlsx_sheet_sections(&mut html, &rename.old_name, &rename.new_name)?;
+                    let grid = descriptor
+                        .grid
+                        .as_mut()
+                        .expect("validated worksheet rename target");
+                    grid.sheet_name = rename.new_name.clone();
+                    renamed_xlsx_sheet = true;
+                }
+                if rename_xlsx_formula_references(&mut html, &rename.old_name, &rename.new_name)? {
+                    sheet_changed_here = true;
+                }
+                chunk_changed |= sheet_changed_here;
+            }
+            if let Some(removal) = xlsx_sheet_removal.as_ref() {
+                // A kept tab whose formula named the deleted tab breaks in the
+                // stored expression too, so the bundle view matches the workbook.
+                if drop_xlsx_formula_references(&mut html, &removal.name)? {
+                    chunk_changed = true;
+                }
+                // And a tab behind the hole moves up one place in the section it
+                // stores, the same way its descriptor does below.
+                if shift_xlsx_sheet_sections(&mut html, removal.sheet_index)? {
+                    chunk_changed = true;
+                }
+            }
 
             if chunk_changed {
                 page_changed = true;
@@ -1456,10 +2426,75 @@ pub fn apply_patch(
                 descriptor.text_chars = html_nodes.values().map(|text| text.chars().count()).sum();
                 dirty_chunks.insert(descriptor.chunk_id.clone());
             }
+            if xlsx_sheet_removal.is_some()
+                || pptx_slide_removal.is_some()
+                || pptx_slide_reorder.is_some()
+                || pptx_slide_copy.is_some()
+            {
+                kept_index_descriptors.push(descriptor.clone());
+            }
             hash_descriptor(&mut root_hasher, descriptor);
         }
 
-        if content_changed && (index_root_href.is_none() || page_changed) {
+        if page_number + 1 == manifest.index_page_count {
+            if let Some(new_chunk) = added_sheet_chunk.take() {
+                dirty_chunks.insert(new_chunk.chunk_id.clone());
+                added_xlsx_sheet = true;
+                if page.chunks.len() < INDEX_PAGE_SIZE {
+                    page.chunks.push(new_chunk);
+                    hash_descriptor(
+                        &mut root_hasher,
+                        page.chunks.last().expect("appended worksheet chunk"),
+                    );
+                    page_changed = true;
+                } else {
+                    // The last page is already full, so the new window starts a
+                    // page of its own once this one has been rewritten. It is
+                    // still a descriptor of the document, so the root digest
+                    // covers it exactly where the page loop left off.
+                    hash_descriptor(&mut root_hasher, &new_chunk);
+                    appended_index_page = Some(crate::ChunkIndexPage {
+                        schema_version: manifest.schema_version.clone(),
+                        revision: new_revision,
+                        page: page_number + 1,
+                        chunks: vec![new_chunk],
+                    });
+                }
+            } else if let Some(new_chunk) = added_slide_chunk.take() {
+                // A new page lands where a new tab lands: at the end of the last
+                // index page, or on a page of its own once that one is full.
+                dirty_chunks.insert(new_chunk.chunk_id.clone());
+                added_pptx_slide = true;
+                if page.chunks.len() < INDEX_PAGE_SIZE {
+                    page.chunks.push(new_chunk);
+                    hash_descriptor(
+                        &mut root_hasher,
+                        page.chunks.last().expect("appended slide chunk"),
+                    );
+                    page_changed = true;
+                } else {
+                    hash_descriptor(&mut root_hasher, &new_chunk);
+                    appended_index_page = Some(crate::ChunkIndexPage {
+                        schema_version: manifest.schema_version.clone(),
+                        revision: new_revision,
+                        page: page_number + 1,
+                        chunks: vec![new_chunk],
+                    });
+                }
+            }
+        }
+
+        // A removal rewrites the index from the chunks it left behind, a move
+        // rewrites it from the chunks it put in a different order, and a copy
+        // rewrites it with the copied page spliced in, so pages are not written
+        // here while their lists still hold the old shape.
+        if xlsx_sheet_removal.is_none()
+            && pptx_slide_removal.is_none()
+            && pptx_slide_reorder.is_none()
+            && pptx_slide_copy.is_none()
+            && content_changed
+            && (index_root_href.is_none() || page_changed)
+        {
             page.revision = new_revision;
             if let Some(root) = &index_root_href {
                 index_root_href = Some(bundle.replace_index_page(root, page_number, &page)?);
@@ -1484,6 +2519,11 @@ pub fn apply_patch(
                 "PDF page {}",
                 insertion.page
             )));
+        }
+    }
+    if let Some(chunk_id) = pptx_object_chunk {
+        if !applied_pptx_objects {
+            return Err(HcdError::NodeNotFound(chunk_id.to_string()));
         }
     }
     for insertion in pptx_insertions.values().flatten() {
@@ -1575,12 +2615,256 @@ pub fn apply_patch(
             "XLSX row height target disappeared".to_string(),
         ));
     }
+    // A pane request that rewrites nothing is not a silent success: either there
+    // was no freeze to release, or the worksheet already stands at that split.
+    if let Some(freeze) = xlsx_sheet_freeze.as_ref() {
+        if froze_xlsx_sheet_windows == 0 {
+            if froze_xlsx_sheet_reads == 0 {
+                return Err(HcdError::InvalidBundle(
+                    "XLSX worksheet freeze target disappeared".to_string(),
+                ));
+            }
+            if freeze.rows == 0 && freeze.columns == 0 {
+                return Err(HcdError::Unsupported(
+                    "XLSX worksheet has no frozen panes to release".to_string(),
+                ));
+            }
+            return Err(HcdError::Unsupported(format!(
+                "XLSX worksheet already freezes {} rows and {} columns",
+                freeze.rows, freeze.columns
+            )));
+        }
+    }
+    if xlsx_sheet_add.is_some() && !added_xlsx_sheet {
+        return Err(HcdError::InvalidBundle(
+            "XLSX worksheet addition had nowhere to write its window".to_string(),
+        ));
+    }
+    if let Some(appended) = appended_index_page.as_ref() {
+        let page_number = appended.page;
+        if let Some(root) = index_root_href.as_ref() {
+            index_root_href = Some(bundle.append_index_page(root, page_number, appended)?);
+        } else {
+            crate::bundle::atomic_write_json_encoded(
+                &new_index_root.join(format!(
+                    "{page_number:06}.json{}",
+                    manifest.storage_codec.suffix()
+                )),
+                appended,
+            )?;
+        }
+        manifest.index_page_count += 1;
+    }
+    if pptx_slide_add.is_some() && !added_pptx_slide {
+        return Err(HcdError::InvalidBundle(
+            "PPTX slide addition had nowhere to write its page".to_string(),
+        ));
+    }
+    if added_xlsx_sheet || added_pptx_slide {
+        manifest.chunk_count += 1;
+    }
+    if xlsx_sheet_rename.is_some() && !renamed_xlsx_sheet {
+        return Err(HcdError::InvalidBundle(
+            "XLSX worksheet rename target disappeared".to_string(),
+        ));
+    }
+    // A slide leaves the index the way a tab does, so one rebuild serves both and
+    // reports the kind it is closing. A patch carries a single operation, so it
+    // never asks for both at once; asking is refused rather than guessed at.
+    let index_removal = match (
+        xlsx_sheet_removal.as_ref().map(|removal| IndexRemoval {
+            label: "XLSX worksheet",
+            target_found: removed_xlsx_sheet,
+            dropped_chunks: dropped_sheet_chunks,
+            source_part: removal.sheet_part.clone(),
+            node_ids: std::mem::take(&mut removed_sheet_node_ids),
+            shift_above: Some(removal.sheet_index),
+        }),
+        pptx_slide_removal.as_ref().map(|removal| IndexRemoval {
+            label: "PPTX slide",
+            target_found: removed_pptx_slide,
+            dropped_chunks: dropped_slide_chunks,
+            source_part: removal.slide_part.clone(),
+            node_ids: std::mem::take(&mut removed_slide_node_ids),
+            shift_above: None,
+        }),
+    ) {
+        (Some(sheet), None) => Some(sheet),
+        (None, slide) => slide,
+        (Some(_), Some(_)) => {
+            return Err(HcdError::InvalidPatch(
+                "one patch removes either a worksheet or a slide, not both".to_string(),
+            ))
+        }
+    };
+    if let Some(removal) = index_removal.as_ref() {
+        if !removal.target_found {
+            return Err(HcdError::InvalidBundle(format!(
+                "{} deletion target disappeared",
+                removal.label
+            )));
+        }
+        if kept_index_descriptors.len() + removal.dropped_chunks != manifest.chunk_count {
+            return Err(HcdError::InvalidBundle(format!(
+                "index pages cover {} chunks, manifest says {}",
+                kept_index_descriptors.len() + removal.dropped_chunks,
+                manifest.chunk_count
+            )));
+        }
+        // The tab is gone from the package as well as from the index, and its
+        // cells are gone with it, so the revision records them as removed nodes.
+        for node_id in &removal.node_ids {
+            dirty_nodes.insert(node_id.clone());
+            removed_nodes.insert(node_id.clone());
+        }
+        // Naming the source part belongs to that node set: a tab nobody typed into
+        // leaves no cell behind, and a revision whose nodes changed must name the
+        // parts that held them, so an empty tab keeps both sets empty.
+        if !removal.node_ids.is_empty() {
+            dirty_parts.insert(removal.source_part.clone());
+        }
+        // Chunks behind the hole move up one slot each, so every one of them is
+        // renumbered and lands on a different page.
+        root_hasher = rewrite_index_pages(
+            bundle,
+            &mut manifest,
+            &new_index_root,
+            new_revision,
+            std::mem::take(&mut kept_index_descriptors),
+            removal.shift_above,
+            &mut index_root_href,
+        )?;
+    }
+    if auto_filter.is_some() && !wrote_auto_filter {
+        return Err(HcdError::InvalidPatch(
+            "AutoFilter worksheet does not exist".into(),
+        ));
+    }
 
+    // A move puts two pages in each other's place and rewrites nothing else: a
+    // page says the same thing wherever it stands, so only the index — which is
+    // where the deck's order lives — has to change. The two pages swap the runs
+    // their chunks form, and every chunk is numbered again from the front the
+    // way a deletion numbers the chunks that survive it.
+    if let Some(moving) = pptx_slide_reorder.as_ref() {
+        let swapped = swap_pptx_slide_pages(
+            &kept_index_descriptors,
+            &moving.moving_chunk_ids,
+            &moving.passed_chunk_ids,
+        )?;
+        // Only the chunks that ended up somewhere else are dirty. Which ones
+        // those are is a fact about the list this revision writes, so it is read
+        // off the list rather than assumed from the two pages the patch named.
+        for (position, descriptor) in swapped.iter().enumerate() {
+            if position != descriptor.sequence {
+                dirty_chunks.insert(descriptor.chunk_id.clone());
+            }
+        }
+        if dirty_chunks.is_empty() {
+            return Err(HcdError::InvalidBundle(
+                "PPTX slide reorder moved no chunk".to_string(),
+            ));
+        }
+        root_hasher = rewrite_index_pages(
+            bundle,
+            &mut manifest,
+            &new_index_root,
+            new_revision,
+            swapped,
+            None,
+            &mut index_root_href,
+        )?;
+    }
+
+    // A copy gives the deck one more page, standing right behind the page it came
+    // from. The chunks it is made of are new objects carrying new ids: nothing
+    // that already stands in the index is rewritten, so the copy is spliced into
+    // the list the index keeps and every chunk is numbered again from the front
+    // the way a move numbers the list it put in a different order.
+    if let Some(copy) = pptx_slide_copy.as_ref() {
+        let cloned = clone_pptx_slide_chunks(bundle, &manifest, copy, &kept_index_descriptors)?;
+        let cloned_notes =
+            clone_pptx_note_chunks(bundle, &manifest, copy, &kept_index_descriptors)?;
+        let copied_count = cloned.len() + cloned_notes.len();
+        let Some(last_of_page) = copy.page_chunk_ids.last() else {
+            return Err(HcdError::InvalidBundle(
+                "PPTX slide copy found a page with no chunks".to_string(),
+            ));
+        };
+        let Some(at) = kept_index_descriptors
+            .iter()
+            .position(|descriptor| &descriptor.chunk_id == last_of_page)
+        else {
+            return Err(HcdError::InvalidBundle(
+                "PPTX slide copy target disappeared from the index".to_string(),
+            ));
+        };
+        for (offset, descriptor) in cloned.into_iter().enumerate() {
+            if copy.snapshot {
+                let map = bundle.read_map_verified(&descriptor)?;
+                // Images are materialized separately from the scene and assets;
+                // declaring a source image as text-dirty rejects native export.
+                dirty_nodes.extend(
+                    map.entries
+                        .into_iter()
+                        .filter(|entry| entry.source.node_kind != "image")
+                        .map(|entry| entry.node_id),
+                );
+            }
+            dirty_chunks.insert(descriptor.chunk_id.clone());
+            kept_index_descriptors.insert(at + 1 + offset, descriptor);
+        }
+        if copy.snapshot {
+            dirty_parts.insert(copy.new_slide_part.clone());
+        }
+        for descriptor in cloned_notes {
+            let map = bundle.read_map_verified(&descriptor)?;
+            dirty_nodes.extend(
+                map.entries
+                    .into_iter()
+                    .filter(|entry| entry.source.node_kind != "image")
+                    .map(|entry| entry.node_id),
+            );
+            dirty_chunks.insert(descriptor.chunk_id.clone());
+            kept_index_descriptors.push(descriptor);
+        }
+        if let Some(part) = &copy.new_note_part {
+            dirty_parts.insert(part.clone());
+        }
+        if kept_index_descriptors.len() != manifest.chunk_count + copied_count {
+            return Err(HcdError::InvalidBundle(format!(
+                "index pages cover {} chunks, manifest says {} with {} copied",
+                kept_index_descriptors.len(),
+                manifest.chunk_count + copied_count,
+                copied_count,
+            )));
+        }
+        root_hasher = rewrite_index_pages(
+            bundle,
+            &mut manifest,
+            &new_index_root,
+            new_revision,
+            std::mem::take(&mut kept_index_descriptors),
+            None,
+            &mut index_root_href,
+        )?;
+    }
+
+    if inserted_images != image_insertions.values().map(Vec::len).sum::<usize>() {
+        return Err(HcdError::InvalidPatch(
+            "image.insert target chunk was not found".into(),
+        ));
+    }
     validate_annotation_ranges(patch, &found_nodes)?;
     let (annotation_href, annotation_root_hash) =
         apply_annotations(bundle, &manifest, patch, &removed_nodes)?;
     let root_hash = if content_changed {
-        finalize_root_hash(bundle, root_hasher, &asset_index_href)?
+        finalize_root_hash(
+            bundle,
+            root_hasher,
+            &asset_index_href,
+            &manifest.styles_href,
+        )?
     } else {
         manifest.root_hash.clone()
     };
@@ -1615,6 +2899,16 @@ pub fn apply_patch(
                 node_id: Some(node_id.clone()),
                 source_part: None,
             })
+            // A clear leaves nothing behind for a source-backed export to refuse,
+            // so only the pins are reported.
+            .chain(fonts.iter().filter_map(|(node_id, change)| {
+                change.font.is_some().then_some(node_id)
+            }).map(|node_id| FidelityWarning {
+                code: "HCD_FONT_PATCH_SEMANTIC_EXPORT".to_string(),
+                message: "text.font is canonical in HCD HTML and applied by the pure-Rust semantic export and preview; source-backed Office/PDF export rejects revisions carrying it instead of silently dropping the face".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
             .chain(images.keys().map(|node_id| FidelityWarning {
                 code: "HCD_IMAGE_PATCH_SEMANTIC_EXPORT".to_string(),
                 message: "image changes are canonical in HCD and pure-Rust semantic exports; source-backed Office/PDF export rejects them before writing until format-specific media rewrites are implemented".to_string(),
@@ -1645,10 +2939,77 @@ pub fn apply_patch(
                 node_id: Some(insertion.node_id.clone()),
                 source_part: Some(insertion.slide_part.clone()),
             }))
+            .chain(pptx_formats.keys().map(|node_id| FidelityWarning {
+                code: "PPTX_DIRECT_RUN_FORMAT".to_string(),
+                message: "slide run formatting writes direct bold, italic, underline, size, and sRGB color; theme colors, fonts, and spacing stay on the source run".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
+            .chain(pptx_aligns.keys().map(|node_id| FidelityWarning {
+                code: "PPTX_DIRECT_SHAPE_ALIGN".to_string(),
+                message: "slide shape alignment writes a:pPr@algn on every paragraph of the shape and a:bodyPr@anchor on its text body; indents, spacing, and autofit stay on the source shape".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
+            .chain(xlsx_formats.keys().map(|node_id| FidelityWarning {
+                code: "XLSX_DIRECT_CELL_FORMAT".to_string(),
+                message: "cell formatting clones the source style and writes direct bold, italic, underline, size, sRGB font color, and solid fill; borders and number formats stay on the source style".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
+            .chain(xlsx_layouts.keys().map(|node_id| FidelityWarning {
+                code: "XLSX_DIRECT_CELL_LAYOUT".to_string(),
+                message: "cell layout clones the source style and writes horizontal alignment, vertical alignment, wrap, and a thin or cleared border; number formats stay on the source style".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
+            .chain(xlsx_sheet_add.iter().map(|addition| FidelityWarning {
+                code: "XLSX_WORKSHEET_ADDED".to_string(),
+                message: "new worksheet tab is blank in HCD; source-backed export writes it as a worksheet part the source workbook never had".to_string(),
+                node_id: None,
+                source_part: Some(addition.sheet_part.clone()),
+            }))
+            .chain(xlsx_sheet_removal.iter().map(|removal| FidelityWarning {
+                code: "XLSX_WORKSHEET_REMOVED".to_string(),
+                message: "worksheet tab is deleted: its cells leave the document, formulas that named it read #REF!, and source-backed export drops the worksheet part with the workbook entry that pointed at it".to_string(),
+                node_id: None,
+                source_part: Some(removal.sheet_part.clone()),
+            }))
+            .chain(pptx_slide_add.iter().map(|addition| FidelityWarning {
+                code: "PPTX_SLIDE_ADDED".to_string(),
+                message: "new slide is blank in HCD; source-backed export writes it as a slide part the source package never had, on the layout the last existing slide uses".to_string(),
+                node_id: None,
+                source_part: Some(addition.slide_part.clone()),
+            }))
+            .chain(pptx_slide_removal.iter().map(|removal| FidelityWarning {
+                code: "PPTX_SLIDE_REMOVED".to_string(),
+                message: "slide is deleted: its shapes and text leave the document, and source-backed export drops the slide part with the page entry, relationship and content type that pointed at it".to_string(),
+                node_id: None,
+                source_part: Some(removal.slide_part.clone()),
+            }))
+            .chain(pptx_slide_reorder.iter().map(|moving| FidelityWarning {
+                code: "PPTX_SLIDE_MOVED".to_string(),
+                message: "slide is moved: the order the index holds its pages in is what a source-backed export writes into the presentation's slide list, and the page's own content is untouched".to_string(),
+                node_id: None,
+                source_part: Some(moving.slide_part.clone()),
+            }))
+            .chain(pptx_slide_copy.iter().map(|copy| FidelityWarning {
+                code: "PPTX_SLIDE_COPIED".to_string(),
+                message: "slide is duplicated: the copy stands right behind the page it came from, holds the same content under ids of its own, and is written as a slide part the source package never had".to_string(),
+                node_id: None,
+                source_part: Some(copy.new_slide_part.clone()),
+            }))
+            .chain(xlsx_number_formats.keys().map(|node_id| FidelityWarning {
+                code: "XLSX_DIRECT_CELL_NUMBER_FORMAT".to_string(),
+                message: "cell number format clones the source style and writes a built-in or custom Excel format code".to_string(),
+                node_id: Some(node_id.clone()),
+                source_part: None,
+            }))
             .collect(),
         idempotent_replay: false,
     };
     let record = RevisionRecord {
+        canvas_rewrite: None,
         schema_version: manifest.schema_version.clone(),
         document_id: manifest.document_id.clone(),
         revision: new_revision,
@@ -1658,6 +3019,7 @@ pub fn apply_patch(
         patch_base_revision: Some(patch.base_revision),
         author_id: None,
         author_name: None,
+        theme_revision_id: manifest.theme_revision_id.clone(),
         root_hash,
         annotation_root_hash,
         index_prefix: manifest.index_prefix.clone(),
@@ -1665,6 +3027,7 @@ pub fn apply_patch(
         index_page_count: Some(manifest.index_page_count),
         chunk_count: Some(manifest.chunk_count),
         asset_index_href,
+        styles_href: manifest.styles_href.clone(),
         created_at_epoch_ms: now_epoch_ms(),
         dirty_node_ids: result.dirty_node_ids.clone(),
         removed_node_ids: removed_nodes.into_iter().collect(),
@@ -1683,7 +3046,22 @@ pub fn apply_patch(
                     None
                 }
             })
+            .chain(rich_converted_formula_ids)
             .collect(),
+        grid_values_reordered: manifest.source.is_spreadsheet()
+            && patch
+                .metadata
+                .get("gridValuesReordered")
+                .is_some_and(|value| value == "true"),
+        grid_filter_changed: wrote_auto_filter,
+        pdf_layout_changed: pdf_layout.is_some(),
+        pptx_scene_changed: applied_pptx_objects
+            || pptx_animation.is_some()
+            || master_background.is_some()
+            || master_text.is_some()
+            || pptx_slide_copy
+                .as_ref()
+                .is_some_and(|copy| copy.snapshot || copy.new_note_part.is_some()),
         grid_row_insertions: xlsx_row_insert
             .as_ref()
             .into_iter()
@@ -1748,6 +3126,63 @@ pub fn apply_patch(
                 })
             })
             .collect(),
+        sheet_renames: xlsx_sheet_rename
+            .as_ref()
+            .into_iter()
+            .map(|rename| SheetRename {
+                sheet_part: rename.sheet_part.clone(),
+                old_name: rename.old_name.clone(),
+                new_name: rename.new_name.clone(),
+            })
+            .collect(),
+        sheet_additions: xlsx_sheet_add
+            .as_ref()
+            .into_iter()
+            .map(|addition| SheetAddition {
+                sheet_part: addition.sheet_part.clone(),
+                sheet_index: addition.sheet_index,
+            })
+            .collect(),
+        sheet_removals: xlsx_sheet_removal
+            .as_ref()
+            .into_iter()
+            .map(|removal| SheetRemoval {
+                sheet_part: removal.sheet_part.clone(),
+                name: removal.name.clone(),
+            })
+            .collect(),
+        slide_additions: pptx_slide_add
+            .as_ref()
+            .into_iter()
+            .map(|addition| SlideAddition {
+                slide_part: addition.slide_part.clone(),
+            })
+            .collect(),
+        slide_removals: pptx_slide_removal
+            .as_ref()
+            .into_iter()
+            .map(|removal| SlideRemoval {
+                slide_part: removal.slide_part.clone(),
+            })
+            .collect(),
+        slide_reorders: pptx_slide_reorder
+            .as_ref()
+            .into_iter()
+            .map(|moving| SlideReorder {
+                slide_part: moving.slide_part.clone(),
+            })
+            .collect(),
+        slide_copies: pptx_slide_copy
+            .as_ref()
+            .into_iter()
+            .map(|copy| SlideCopy {
+                slide_part: copy.new_slide_part.clone(),
+                source_slide_part: copy.slide_part.clone(),
+            })
+            .collect(),
+        slide_group_edit,
+        pptx_master_backgrounds,
+        pptx_master_text_styles,
         structural_change: false,
     };
     bundle.write_revision(&record)?;
@@ -1826,6 +3261,7 @@ pub fn get_text_node(bundle: &Bundle, node_id: &str) -> Result<TextNodeLookup, H
     validate_node_id(node_id)?;
     let manifest = bundle.manifest()?;
     let mut found = None;
+    let mut xlsx_runs = None;
 
     for page_number in 0..manifest.index_page_count {
         let page = bundle.read_index_page(&manifest, page_number)?;
@@ -1850,6 +3286,9 @@ pub fn get_text_node(bundle: &Bundle, node_id: &str) -> Result<TextNodeLookup, H
                 )));
             }
             let html = bundle.read_chunk(descriptor)?;
+            if manifest.source.format == "xlsx" && entry.source.node_kind == "cell" {
+                xlsx_runs = crate::extract_xlsx_inline_runs(&html)?.remove(node_id);
+            }
             let html_nodes = extract_html_text_nodes(&html)?;
             let text = html_nodes.get(node_id).ok_or_else(|| {
                 HcdError::InvalidBundle(format!(
@@ -1878,6 +3317,7 @@ pub fn get_text_node(bundle: &Bundle, node_id: &str) -> Result<TextNodeLookup, H
         document_id: manifest.document_id,
         revision: manifest.revision,
         node,
+        xlsx_runs,
     })
 }
 
@@ -1920,6 +3360,8 @@ pub fn get_image_node(bundle: &Bundle, node_id: &str) -> Result<ImageNodeLookup,
                     visual_hash: image.visual_hash.clone(),
                     asset_hash: image.asset_hash.clone(),
                     geometry: image.geometry.clone(),
+                    docx_drawing_id: image.docx_drawing_id,
+                    docx_picture_layout: image.docx_picture_layout.clone(),
                     source: entry.source.clone(),
                 },
             });
@@ -1969,6 +3411,8 @@ pub fn extract_image_page(
                     visual_hash: image.visual_hash.clone(),
                     asset_hash: image.asset_hash.clone(),
                     geometry: image.geometry.clone(),
+                    docx_drawing_id: image.docx_drawing_id,
+                    docx_picture_layout: image.docx_picture_layout.clone(),
                     source: entry.source.clone(),
                 },
             });
@@ -2010,1123 +3454,6 @@ fn validate_patch_header(
         return Err(HcdError::RevisionConflict(format!(
             "base revision {} is ahead of head {}",
             patch.base_revision, manifest.revision
-        )));
-    }
-    Ok(())
-}
-
-fn validate_patch_identity(
-    manifest: &crate::HcdManifest,
-    patch: &PatchBatch,
-) -> Result<(), HcdError> {
-    if patch.schema_version != HCD_PATCH_SCHEMA_VERSION
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_2
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_5
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_6
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_7
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_8
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_9
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_10
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_11
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_12
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_13
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_14
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_15
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_16
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_17
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_18
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_19
-        && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_20
-        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_21
-        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
-        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_23
-        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_24
-        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_25
-        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_26
-        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_27
-        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
-        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
-    {
-        return Err(HcdError::InvalidPatch(format!(
-            "unsupported schema version {}",
-            patch.schema_version
-        )));
-    }
-    validate_identifier("documentId", &patch.document_id)?;
-    if patch.document_id != manifest.document_id {
-        return Err(HcdError::InvalidPatch(
-            "documentId does not match the bundle manifest".to_string(),
-        ));
-    }
-    if patch.patch_id.trim().is_empty() {
-        return Err(HcdError::InvalidPatch("patchId is required".to_string()));
-    }
-    if patch.patch_id.len() > MAX_IDENTIFIER_BYTES {
-        return Err(HcdError::ResourceLimit(format!(
-            "patchId exceeds {MAX_IDENTIFIER_BYTES} bytes"
-        )));
-    }
-    if patch.operations.is_empty() || patch.operations.len() > MAX_PATCH_OPERATIONS {
-        return Err(HcdError::ResourceLimit(format!(
-            "patch operation count must be between 1 and {MAX_PATCH_OPERATIONS}"
-        )));
-    }
-    if patch.schema_version == HCD_PATCH_SCHEMA_VERSION_19
-        && (manifest.source.format != "xlsx"
-            || !patch
-                .operations
-                .iter()
-                .any(|operation| matches!(operation, PatchOperation::XlsxCellSet { .. }))
-            || patch.operations.iter().any(|operation| {
-                !matches!(
-                    operation,
-                    PatchOperation::XlsxCellSet { .. } | PatchOperation::TextSplice { .. }
-                )
-            }))
-    {
-        return Err(HcdError::Unsupported(
-            "hcd-patch/19 accepts XLSX cell insertions and text splices only".to_string(),
-        ));
-    }
-    if patch.schema_version == HCD_PATCH_SCHEMA_VERSION_20
-        && (manifest.source.format != "xlsx"
-            || patch.operations.len() != 1
-            || !matches!(
-                patch.operations.first(),
-                Some(PatchOperation::XlsxFormulaSet { .. })
-            ))
-    {
-        return Err(HcdError::Unsupported(
-            "hcd-patch/20 accepts one XLSX formula replacement only".to_string(),
-        ));
-    }
-    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_21
-        && (manifest.source.format != "xlsx"
-            || patch.operations.len() != 1
-            || !matches!(
-                patch.operations.first(),
-                Some(PatchOperation::XlsxFormulaCreate { .. })
-            ))
-    {
-        return Err(HcdError::Unsupported(
-            "hcd-patch/21 accepts one XLSX formula creation only".to_string(),
-        ));
-    }
-    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_22 {
-        if manifest.source.format != "xlsx"
-            || !patch.operations.iter().any(|operation| {
-                matches!(
-                    operation,
-                    PatchOperation::XlsxFormulaSet { .. }
-                        | PatchOperation::XlsxFormulaCreate { .. }
-                )
-            })
-            || patch.operations.iter().any(|operation| {
-                !matches!(
-                    operation,
-                    PatchOperation::TextSplice { .. }
-                        | PatchOperation::XlsxCellSet { .. }
-                        | PatchOperation::XlsxFormulaSet { .. }
-                        | PatchOperation::XlsxFormulaCreate { .. }
-                )
-            })
-        {
-            return Err(HcdError::Unsupported(
-                "hcd-patch/22 accepts XLSX text, blank-cell, and formula changes only".to_string(),
-            ));
-        }
-        let mut targets = HashSet::new();
-        for operation in &patch.operations {
-            if let Some(node_id) = operation.node_id() {
-                if !targets.insert(node_id) {
-                    return Err(HcdError::InvalidPatch(
-                        "XLSX batch contains duplicate node targets".to_string(),
-                    ));
-                }
-            }
-        }
-    }
-    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_28
-        || patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_29
-    {
-        if manifest.source.format != "xlsx"
-            || !patch
-                .operations
-                .iter()
-                .any(|operation| match patch.schema_version.as_str() {
-                    crate::HCD_PATCH_SCHEMA_VERSION_28 => {
-                        matches!(operation, PatchOperation::XlsxFormulaToValue { .. })
-                    }
-                    _ => matches!(
-                        operation,
-                        PatchOperation::XlsxFormulaToNumber { .. }
-                            | PatchOperation::XlsxNumberSet { .. }
-                    ),
-                })
-            || patch.operations.iter().any(|operation| {
-                !matches!(
-                    operation,
-                    PatchOperation::TextSplice { .. }
-                        | PatchOperation::XlsxCellSet { .. }
-                        | PatchOperation::XlsxFormulaSet { .. }
-                        | PatchOperation::XlsxFormulaCreate { .. }
-                        | PatchOperation::XlsxFormulaToValue { .. }
-                        | PatchOperation::XlsxFormulaToNumber { .. }
-                        | PatchOperation::XlsxNumberSet { .. }
-                )
-            })
-        {
-            return Err(HcdError::Unsupported(
-                "XLSX formula conversion batches accept formula conversion and cell edits only"
-                    .to_string(),
-            ));
-        }
-        let mut targets = HashSet::new();
-        for operation in &patch.operations {
-            if let Some(node_id) = operation.node_id() {
-                if !targets.insert(node_id) {
-                    return Err(HcdError::InvalidPatch(
-                        "XLSX batch contains duplicate node targets".to_string(),
-                    ));
-                }
-            }
-        }
-    }
-    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_23
-        && (manifest.source.format != "pdf"
-            || patch.operations.len() != 1
-            || !matches!(
-                patch.operations.first(),
-                Some(PatchOperation::PdfTextGeometry { .. })
-            ))
-    {
-        return Err(HcdError::Unsupported(
-            "hcd-patch/23 accepts one PDF text-box geometry edit only".to_string(),
-        ));
-    }
-    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_24
-        && (manifest.source.format != "pdf"
-            || patch.operations.len() != 1
-            || !matches!(
-                patch.operations.first(),
-                Some(PatchOperation::PdfTextDelete { .. })
-            ))
-    {
-        return Err(HcdError::Unsupported(
-            "hcd-patch/24 accepts one PDF text-box deletion only".to_string(),
-        ));
-    }
-    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_25
-        && (manifest.source.format != "xlsx"
-            || patch.operations.len() != 1
-            || !matches!(
-                patch.operations.first(),
-                Some(PatchOperation::XlsxGridRange { .. })
-            ))
-    {
-        return Err(HcdError::Unsupported(
-            "hcd-patch/25 accepts one XLSX grid range operation only".to_string(),
-        ));
-    }
-    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_26
-        && (manifest.source.format != "xlsx"
-            || patch.operations.len() != 1
-            || !matches!(
-                patch.operations.first(),
-                Some(PatchOperation::XlsxMergeBlank { .. })
-            ))
-    {
-        return Err(HcdError::Unsupported(
-            "hcd-patch/26 accepts one XLSX blank merge only".to_string(),
-        ));
-    }
-    if patch.schema_version == crate::HCD_PATCH_SCHEMA_VERSION_27
-        && (manifest.source.format != "pptx"
-            || patch.operations.len() != 1
-            || !matches!(
-                patch.operations.first(),
-                Some(PatchOperation::PptxTextDelete { .. })
-            ))
-    {
-        return Err(HcdError::Unsupported(
-            "hcd-patch/27 accepts one PPTX text-box deletion only".to_string(),
-        ));
-    }
-    validate_string_map("actor", &patch.actor, MAX_ACTOR_ENTRIES, MAX_ACTOR_BYTES)?;
-    validate_string_map(
-        "metadata",
-        &patch.metadata,
-        MAX_METADATA_ENTRIES,
-        MAX_METADATA_BYTES,
-    )?;
-    let mut inserted = 0usize;
-    for operation in &patch.operations {
-        match operation {
-            PatchOperation::TextSplice {
-                node_id,
-                insert_text,
-                precondition,
-                ..
-            } => {
-                validate_node_id(node_id)?;
-                validate_sha256("nodeHash", &precondition.node_hash)?;
-                if insert_text.len() > MAX_PATCH_INSERT_BYTES {
-                    return Err(HcdError::ResourceLimit(format!(
-                        "one text.splice inserts {} bytes; maximum is {MAX_PATCH_INSERT_BYTES}",
-                        insert_text.len()
-                    )));
-                }
-                inserted = inserted.checked_add(insert_text.len()).ok_or_else(|| {
-                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
-                })?;
-            }
-            PatchOperation::PdfTextInsert {
-                page,
-                x_pt,
-                y_pt,
-                width_pt,
-                height_pt,
-                font_size_pt,
-                text,
-            } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_5
-                    || manifest.source.format != "pdf"
-                {
-                    return Err(HcdError::Unsupported(
-                        "pdf.text.insert requires a PDF bundle and hcd-patch/5".to_string(),
-                    ));
-                }
-                if *page == 0 || *page > manifest.chunk_count {
-                    return Err(HcdError::InvalidPatch(
-                        "PDF page is outside the document".to_string(),
-                    ));
-                }
-                if !x_pt.is_finite()
-                    || !y_pt.is_finite()
-                    || !width_pt.is_finite()
-                    || !height_pt.is_finite()
-                    || !font_size_pt.is_finite()
-                    || *x_pt < 0.0
-                    || *y_pt < 0.0
-                    || *width_pt <= 0.0
-                    || *height_pt <= 0.0
-                    || *x_pt > 14_400.0
-                    || *y_pt > 14_400.0
-                    || *width_pt > 14_400.0
-                    || *height_pt > 14_400.0
-                    || !(1.0..=256.0).contains(font_size_pt)
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "PDF text box geometry is invalid".to_string(),
-                    ));
-                }
-                if text.trim().is_empty()
-                    || text.chars().count() > 10_000
-                    || text.contains(['\r', '\n'])
-                    || text.chars().any(is_forbidden_xml_character)
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "PDF text box is empty or contains unsupported text".to_string(),
-                    ));
-                }
-                inserted = inserted.checked_add(text.len()).ok_or_else(|| {
-                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
-                })?;
-            }
-            PatchOperation::PptxTextInsert {
-                chunk_id,
-                slide_part,
-                x_emu,
-                y_emu,
-                width_emu,
-                height_emu,
-                font_size_pt,
-                text,
-            } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_16
-                    || manifest.source.format != "pptx"
-                {
-                    return Err(HcdError::Unsupported(
-                        "pptx.text.insert requires a PPTX bundle and hcd-patch/16".to_string(),
-                    ));
-                }
-                if !chunk_id.starts_with("c_")
-                    || chunk_id.len() != 34
-                    || !chunk_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "PPTX chunk ID is invalid".to_string(),
-                    ));
-                }
-                let number = slide_part
-                    .strip_prefix("ppt/slides/slide")
-                    .and_then(|part| part.strip_suffix(".xml"));
-                if !number.is_some_and(|part| {
-                    !part.starts_with('0') && part.parse::<u32>().is_ok_and(|value| value > 0)
-                }) {
-                    return Err(HcdError::InvalidPatch(
-                        "PPTX slide part is invalid".to_string(),
-                    ));
-                }
-                if *x_emu > 100_000_000
-                    || *y_emu > 100_000_000
-                    || !(1..=100_000_000).contains(width_emu)
-                    || !(1..=100_000_000).contains(height_emu)
-                    || !font_size_pt.is_finite()
-                    || !(1.0..=256.0).contains(font_size_pt)
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "PPTX text box geometry is invalid".to_string(),
-                    ));
-                }
-                if text.trim().is_empty()
-                    || text.chars().count() > 10_000
-                    || text.contains(['\r', '\n'])
-                    || text.chars().any(is_forbidden_xml_character)
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "PPTX text box is empty or contains unsupported text".to_string(),
-                    ));
-                }
-                inserted = inserted.checked_add(text.len()).ok_or_else(|| {
-                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
-                })?;
-            }
-            PatchOperation::PptxShapeGeometry {
-                node_id,
-                geometry,
-                precondition,
-            } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_17
-                    || manifest.source.format != "pptx"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported(
-                        "pptx.shape.geometry requires one operation on a PPTX bundle with hcd-patch/17"
-                            .to_string(),
-                    ));
-                }
-                validate_node_id(node_id)?;
-                validate_sha256("nodeHash", &precondition.node_hash)?;
-                if !valid_pptx_geometry(*geometry)
-                    || !valid_pptx_geometry(precondition.geometry)
-                    || *geometry == precondition.geometry
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "PPTX shape geometry is invalid or unchanged".to_string(),
-                    ));
-                }
-            }
-            PatchOperation::PdfTextGeometry {
-                node_id,
-                geometry,
-                precondition,
-            } => {
-                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_23
-                    || manifest.source.format != "pdf"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported(
-                        "pdf.text.geometry requires one PDF operation with hcd-patch/23"
-                            .to_string(),
-                    ));
-                }
-                validate_node_id(node_id)?;
-                validate_sha256("nodeHash", &precondition.node_hash)?;
-                if !valid_pdf_text_geometry(*geometry)
-                    || !valid_pdf_text_geometry(precondition.geometry)
-                    || *geometry == precondition.geometry
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "PDF text-box geometry is invalid or unchanged".to_string(),
-                    ));
-                }
-            }
-            PatchOperation::PdfTextDelete {
-                node_id,
-                precondition,
-            } => {
-                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_24
-                    || manifest.source.format != "pdf"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported(
-                        "pdf.text.delete requires one PDF operation with hcd-patch/24".to_string(),
-                    ));
-                }
-                validate_node_id(node_id)?;
-                validate_sha256("nodeHash", &precondition.node_hash)?;
-            }
-            PatchOperation::PptxTextDelete {
-                node_id,
-                precondition,
-            } => {
-                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_27
-                    || manifest.source.format != "pptx"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported(
-                        "pptx.text.delete requires one PPTX operation with hcd-patch/27"
-                            .to_string(),
-                    ));
-                }
-                validate_node_id(node_id)?;
-                validate_sha256("nodeHash", &precondition.node_hash)?;
-            }
-            PatchOperation::XlsxMerge {
-                node_id,
-                sheet_id,
-                start_row,
-                start_column,
-                end_row,
-                end_column,
-                precondition,
-            } => {
-                if !matches!(
-                    patch.schema_version.as_str(),
-                    HCD_PATCH_SCHEMA_VERSION_6
-                        | HCD_PATCH_SCHEMA_VERSION_7
-                        | HCD_PATCH_SCHEMA_VERSION_8
-                        | HCD_PATCH_SCHEMA_VERSION_9
-                        | HCD_PATCH_SCHEMA_VERSION_10
-                        | HCD_PATCH_SCHEMA_VERSION_11
-                        | HCD_PATCH_SCHEMA_VERSION_12
-                        | HCD_PATCH_SCHEMA_VERSION_13
-                        | HCD_PATCH_SCHEMA_VERSION_14
-                        | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported(
-                        "xlsx.merge requires one operation on an XLSX bundle with hcd-patch/6"
-                            .to_string(),
-                    ));
-                }
-                validate_node_id(node_id)?;
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                {
-                    return Err(HcdError::InvalidPatch("invalid XLSX sheetId".to_string()));
-                }
-                validate_sha256("nodeHash", &precondition.node_hash)?;
-                let rows = end_row.saturating_sub(*start_row).saturating_add(1);
-                let columns = end_column.saturating_sub(*start_column).saturating_add(1);
-                if *start_row == 0
-                    || *start_column == 0
-                    || *end_row > 1_048_576
-                    || *end_column > 16_384
-                    || *end_row < *start_row
-                    || *end_column < *start_column
-                    || rows.saturating_mul(columns) < 2
-                    || rows.saturating_mul(columns) > 10_000
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "XLSX merge range must contain 2 to 10000 valid cells".to_string(),
-                    ));
-                }
-            }
-            PatchOperation::XlsxMergeBlank {
-                sheet_id,
-                start_row,
-                start_column,
-                end_row,
-                end_column,
-            } => {
-                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_26
-                    || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
-                    || sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "invalid XLSX blank merge target".to_string(),
-                    ));
-                }
-                let rows = end_row.saturating_sub(*start_row).saturating_add(1);
-                let columns = end_column.saturating_sub(*start_column).saturating_add(1);
-                if *start_row == 0
-                    || *start_column == 0
-                    || *end_row > 1_048_576
-                    || *end_column > 16_384
-                    || *end_row < *start_row
-                    || *end_column < *start_column
-                    || rows.saturating_mul(columns) < 2
-                    || rows.saturating_mul(columns) > 10_000
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "XLSX blank merge range must contain 2 to 10000 valid cells".to_string(),
-                    ));
-                }
-            }
-            PatchOperation::XlsxCellSet {
-                sheet_id,
-                row,
-                column,
-                text,
-            } => {
-                if !matches!(
-                    patch.schema_version.as_str(),
-                    HCD_PATCH_SCHEMA_VERSION_7
-                        | HCD_PATCH_SCHEMA_VERSION_8
-                        | HCD_PATCH_SCHEMA_VERSION_9
-                        | HCD_PATCH_SCHEMA_VERSION_10
-                        | HCD_PATCH_SCHEMA_VERSION_11
-                        | HCD_PATCH_SCHEMA_VERSION_12
-                        | HCD_PATCH_SCHEMA_VERSION_13
-                        | HCD_PATCH_SCHEMA_VERSION_14
-                        | HCD_PATCH_SCHEMA_VERSION_15
-                        | HCD_PATCH_SCHEMA_VERSION_19
-                        | crate::HCD_PATCH_SCHEMA_VERSION_22
-                        | crate::HCD_PATCH_SCHEMA_VERSION_28
-                        | crate::HCD_PATCH_SCHEMA_VERSION_29
-                ) || manifest.source.format != "xlsx"
-                    || (patch.schema_version != HCD_PATCH_SCHEMA_VERSION_19
-                        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
-                        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
-                        && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
-                        && patch.operations.len() != 1)
-                {
-                    return Err(HcdError::Unsupported(
-                        "xlsx.cell.set requires one operation with hcd-patch/7-15 or an XLSX range batch with hcd-patch/19, /22, or /28"
-                            .to_string(),
-                    ));
-                }
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !(1..=1_048_576).contains(row)
-                    || !(1..=16_384).contains(column)
-                    || text.is_empty()
-                    || text.chars().count() > 32_767
-                    || text.chars().any(is_forbidden_xml_character)
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "XLSX cell insertion has an invalid sheet, address, or text".to_string(),
-                    ));
-                }
-                inserted = inserted.checked_add(text.len()).ok_or_else(|| {
-                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
-                })?;
-            }
-            PatchOperation::XlsxFormulaSet {
-                node_id,
-                sheet_id,
-                formula,
-                precondition,
-            } => {
-                if (patch.schema_version != HCD_PATCH_SCHEMA_VERSION_20
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29)
-                    || manifest.source.format != "xlsx"
-                    || (patch.schema_version == HCD_PATCH_SCHEMA_VERSION_20
-                        && patch.operations.len() != 1)
-                {
-                    return Err(HcdError::Unsupported(
-                        "xlsx.formula.set requires one XLSX operation with hcd-patch/20 or a batch with /22 or /28"
-                            .to_string(),
-                    ));
-                }
-                validate_node_id(node_id)?;
-                validate_sha256("nodeHash", &precondition.node_hash)?;
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !formula.starts_with('=')
-                    || formula.len() < 2
-                    || formula.len() > 8192
-                    || formula.chars().any(is_forbidden_xml_character)
-                    || formula.contains(['\r', '\n'])
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "XLSX formula has an invalid sheet, length, or XML character".to_string(),
-                    ));
-                }
-                inserted = inserted.checked_add(formula.len()).ok_or_else(|| {
-                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
-                })?;
-            }
-            PatchOperation::XlsxFormulaToValue {
-                node_id,
-                sheet_id,
-                text,
-                precondition,
-            } => {
-                if (patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29)
-                    || manifest.source.format != "xlsx"
-                {
-                    return Err(HcdError::Unsupported(
-                        "xlsx.formula.to-value requires an XLSX hcd-patch/28 batch".to_string(),
-                    ));
-                }
-                validate_node_id(node_id)?;
-                validate_sha256("nodeHash", &precondition.node_hash)?;
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || text.chars().count() > 32_767
-                    || text.chars().any(is_forbidden_xml_character)
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "XLSX formula conversion has an invalid sheet or value".to_string(),
-                    ));
-                }
-                inserted = inserted.checked_add(text.len()).ok_or_else(|| {
-                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
-                })?;
-            }
-            PatchOperation::XlsxFormulaToNumber {
-                node_id,
-                sheet_id,
-                value,
-                precondition,
-            }
-            | PatchOperation::XlsxNumberSet {
-                node_id,
-                sheet_id,
-                value,
-                precondition,
-            } => {
-                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29
-                    || manifest.source.format != "xlsx"
-                {
-                    return Err(HcdError::Unsupported(
-                        "numeric XLSX cell edits require an XLSX hcd-patch/29 batch".to_string(),
-                    ));
-                }
-                validate_node_id(node_id)?;
-                validate_sha256("nodeHash", &precondition.node_hash)?;
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !valid_xlsx_number(value)
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "XLSX numeric cell edit requires a finite numeric value".to_string(),
-                    ));
-                }
-                inserted = inserted.checked_add(value.len()).ok_or_else(|| {
-                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
-                })?;
-            }
-            PatchOperation::XlsxFormulaCreate {
-                sheet_id,
-                row,
-                column,
-                formula,
-            } => {
-                if (patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_21
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_22
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_28
-                    && patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_29)
-                    || manifest.source.format != "xlsx"
-                    || sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !(1..=1_048_576).contains(row)
-                    || !(1..=16_384).contains(column)
-                    || !formula.starts_with('=')
-                    || formula.len() < 2
-                    || formula.len() > 8192
-                    || formula.chars().any(is_forbidden_xml_character)
-                    || formula.contains(['\r', '\n'])
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "XLSX formula creation has an invalid sheet, address, or formula"
-                            .to_string(),
-                    ));
-                }
-                inserted = inserted.checked_add(formula.len()).ok_or_else(|| {
-                    HcdError::ResourceLimit("patch insert byte count overflowed".to_string())
-                })?;
-            }
-            PatchOperation::XlsxUnmerge {
-                node_id,
-                sheet_id,
-                start_row,
-                start_column,
-                end_row,
-                end_column,
-                precondition,
-            } => {
-                if !matches!(
-                    patch.schema_version.as_str(),
-                    HCD_PATCH_SCHEMA_VERSION_11
-                        | HCD_PATCH_SCHEMA_VERSION_12
-                        | HCD_PATCH_SCHEMA_VERSION_13
-                        | HCD_PATCH_SCHEMA_VERSION_14
-                        | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported(
-                        "xlsx.unmerge requires one operation on an XLSX bundle with hcd-patch/11"
-                            .to_string(),
-                    ));
-                }
-                validate_node_id(node_id)?;
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || *start_row == 0
-                    || *start_column == 0
-                    || *end_row > 1_048_576
-                    || *end_column > 16_384
-                    || *end_row < *start_row
-                    || *end_column < *start_column
-                    || end_row
-                        .saturating_sub(*start_row)
-                        .saturating_add(1)
-                        .saturating_mul(end_column.saturating_sub(*start_column).saturating_add(1))
-                        < 2
-                    || end_row
-                        .saturating_sub(*start_row)
-                        .saturating_add(1)
-                        .saturating_mul(end_column.saturating_sub(*start_column).saturating_add(1))
-                        > 10_000
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "invalid XLSX unmerge range".to_string(),
-                    ));
-                }
-                validate_sha256("nodeHash", &precondition.node_hash)?;
-            }
-            PatchOperation::XlsxRowAppend {
-                sheet_id,
-                after_row,
-            } => {
-                if !matches!(
-                    patch.schema_version.as_str(),
-                    HCD_PATCH_SCHEMA_VERSION_8
-                        | HCD_PATCH_SCHEMA_VERSION_9
-                        | HCD_PATCH_SCHEMA_VERSION_10
-                        | HCD_PATCH_SCHEMA_VERSION_11
-                        | HCD_PATCH_SCHEMA_VERSION_12
-                        | HCD_PATCH_SCHEMA_VERSION_13
-                        | HCD_PATCH_SCHEMA_VERSION_14
-                        | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported(
-                        "xlsx.row.append requires one operation on an XLSX bundle with hcd-patch/8"
-                            .to_string(),
-                    ));
-                }
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !(1..1_048_576).contains(after_row)
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "XLSX row append has an invalid sheet or last row".to_string(),
-                    ));
-                }
-            }
-            PatchOperation::XlsxRowInsert {
-                sheet_id,
-                before_row,
-            } => {
-                if !matches!(
-                    patch.schema_version.as_str(),
-                    HCD_PATCH_SCHEMA_VERSION_12
-                        | HCD_PATCH_SCHEMA_VERSION_13
-                        | HCD_PATCH_SCHEMA_VERSION_14
-                        | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported("xlsx.row.insert requires one operation on an XLSX bundle with hcd-patch/12".to_string()));
-                }
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !(1..=1_048_575).contains(before_row)
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "invalid XLSX middle row insertion target".to_string(),
-                    ));
-                }
-            }
-            PatchOperation::XlsxRowDelete { sheet_id, row } => {
-                if !matches!(
-                    patch.schema_version.as_str(),
-                    HCD_PATCH_SCHEMA_VERSION_14 | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported("xlsx.row.delete requires one operation on an XLSX bundle with hcd-patch/14".to_string()));
-                }
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !(1..=1_048_576).contains(row)
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "invalid XLSX row deletion target".to_string(),
-                    ));
-                }
-            }
-            PatchOperation::XlsxColumnInsert {
-                sheet_id,
-                before_column,
-            } => {
-                if !matches!(
-                    patch.schema_version.as_str(),
-                    HCD_PATCH_SCHEMA_VERSION_13
-                        | HCD_PATCH_SCHEMA_VERSION_14
-                        | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported("xlsx.column.insert requires one operation on an XLSX bundle with hcd-patch/13".to_string()));
-                }
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !(1..=16_384).contains(before_column)
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "invalid XLSX middle column insertion target".to_string(),
-                    ));
-                }
-            }
-            PatchOperation::XlsxColumnDelete { sheet_id, column } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_15
-                    || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported("xlsx.column.delete requires one operation on an XLSX bundle with hcd-patch/15".to_string()));
-                }
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !(1..=16_384).contains(column)
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "invalid XLSX column deletion target".to_string(),
-                    ));
-                }
-            }
-            PatchOperation::XlsxGridRange {
-                sheet_id,
-                axis,
-                action,
-                start,
-                count,
-            } => {
-                if patch.schema_version != crate::HCD_PATCH_SCHEMA_VERSION_25
-                    || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported(
-                        "xlsx.grid.range requires hcd-patch/25".to_string(),
-                    ));
-                }
-                let maximum = if *axis == XlsxGridAxis::Row {
-                    1_048_576u32
-                } else {
-                    16_384u32
-                };
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !(2..=100).contains(count)
-                    || *start == 0
-                    || start
-                        .checked_add(*count - 1)
-                        .is_none_or(|last| last > maximum)
-                    || (*action == XlsxGridAction::Insert
-                        && start.checked_add(*count).is_none_or(|last| last > maximum))
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "invalid XLSX grid selection".to_string(),
-                    ));
-                }
-            }
-            PatchOperation::XlsxColumnWidth {
-                sheet_id,
-                column,
-                width_chars,
-            } => {
-                if !matches!(
-                    patch.schema_version.as_str(),
-                    HCD_PATCH_SCHEMA_VERSION_9
-                        | HCD_PATCH_SCHEMA_VERSION_10
-                        | HCD_PATCH_SCHEMA_VERSION_11
-                        | HCD_PATCH_SCHEMA_VERSION_12
-                        | HCD_PATCH_SCHEMA_VERSION_13
-                        | HCD_PATCH_SCHEMA_VERSION_14
-                        | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported(
-                        "xlsx.column.width requires one operation on an XLSX bundle with hcd-patch/9".to_string(),
-                    ));
-                }
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !(1..=16_384).contains(column)
-                    || !width_chars.is_finite()
-                    || !(1.0..=255.0).contains(width_chars)
-                    || ((width_chars * 100.0).round() - width_chars * 100.0).abs() > 1e-7
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "invalid XLSX column width target or value".to_string(),
-                    ));
-                }
-            }
-            PatchOperation::XlsxRowHeight {
-                sheet_id,
-                row,
-                height_points,
-            } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_18
-                    || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported(
-                        "xlsx.row.height requires one operation on an XLSX bundle with hcd-patch/18".to_string(),
-                    ));
-                }
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !(1..=1_048_576).contains(row)
-                    || !height_points.is_finite()
-                    || !(1.0..=409.0).contains(height_points)
-                    || ((height_points * 100.0).round() - height_points * 100.0).abs() > 1e-7
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "invalid XLSX row height target or value".to_string(),
-                    ));
-                }
-            }
-            PatchOperation::XlsxRowRemoveLast { sheet_id, row } => {
-                if !matches!(
-                    patch.schema_version.as_str(),
-                    HCD_PATCH_SCHEMA_VERSION_10
-                        | HCD_PATCH_SCHEMA_VERSION_11
-                        | HCD_PATCH_SCHEMA_VERSION_12
-                        | HCD_PATCH_SCHEMA_VERSION_13
-                        | HCD_PATCH_SCHEMA_VERSION_14
-                        | HCD_PATCH_SCHEMA_VERSION_15
-                ) || manifest.source.format != "xlsx"
-                    || patch.operations.len() != 1
-                {
-                    return Err(HcdError::Unsupported(
-                        "xlsx.row.remove-last requires one operation on an XLSX bundle with hcd-patch/10".to_string(),
-                    ));
-                }
-                if sheet_id.len() != 34
-                    || !sheet_id.starts_with("s_")
-                    || !sheet_id[2..]
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-                    || !(2..=1_048_576).contains(row)
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "invalid XLSX last row removal target".to_string(),
-                    ));
-                }
-            }
-            PatchOperation::NodeStyle {
-                node_id,
-                style,
-                precondition,
-            } => {
-                if patch.schema_version == HCD_PATCH_SCHEMA_VERSION {
-                    return Err(HcdError::InvalidPatch(
-                        "node.style requires schemaVersion hcd-patch/2".to_string(),
-                    ));
-                }
-                validate_node_id(node_id)?;
-                validate_sha256("nodeHash", &precondition.node_hash)?;
-                validate_node_style(style)?;
-            }
-            PatchOperation::ImageReplace {
-                node_id,
-                asset_hash,
-                precondition,
-            } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3
-                    && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_5
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "image.replace requires schemaVersion hcd-patch/3".to_string(),
-                    ));
-                }
-                validate_node_id(node_id)?;
-                validate_sha256("assetHash", asset_hash)?;
-                validate_sha256("visualHash", &precondition.visual_hash)?;
-            }
-            PatchOperation::ImageGeometry {
-                node_id,
-                geometry,
-                precondition,
-            } => {
-                if patch.schema_version != HCD_PATCH_SCHEMA_VERSION_3
-                    && patch.schema_version != HCD_PATCH_SCHEMA_VERSION_5
-                {
-                    return Err(HcdError::InvalidPatch(
-                        "image.geometry requires schemaVersion hcd-patch/3".to_string(),
-                    ));
-                }
-                validate_node_id(node_id)?;
-                validate_sha256("visualHash", &precondition.visual_hash)?;
-                crate::html::validate_image_geometry(geometry)?;
-            }
-            PatchOperation::AnnotationUpsert { annotation } => {
-                validate_annotation(annotation)?;
-            }
-            PatchOperation::AnnotationRemove { annotation_id } => {
-                validate_identifier("annotationId", annotation_id)?;
-            }
-        }
-    }
-    if inserted > MAX_PATCH_INSERT_BYTES {
-        return Err(HcdError::ResourceLimit(format!(
-            "patch inserts {inserted} bytes; maximum is {MAX_PATCH_INSERT_BYTES}"
         )));
     }
     Ok(())
@@ -3289,3350 +3616,77 @@ fn collect_splices(patch: &PatchBatch) -> Result<BTreeMap<String, Vec<Splice>>, 
     Ok(grouped)
 }
 
-fn collect_pdf_insertions(patch: &PatchBatch) -> HashMap<String, Vec<PdfTextInsertion>> {
-    let mut grouped: HashMap<String, Vec<PdfTextInsertion>> = HashMap::new();
-    for (index, operation) in patch.operations.iter().enumerate() {
-        let PatchOperation::PdfTextInsert {
-            page,
-            x_pt,
-            y_pt,
-            width_pt,
-            height_pt,
-            font_size_pt,
-            text,
-        } = operation
-        else {
-            continue;
-        };
-        let part = format!("pdf/pages/{page}");
-        let chunk_id =
-            stable_node_id(&[&patch.document_id, &part, "page-chunk", "0"]).replacen("n_", "c_", 1);
-        let node_id = stable_node_id(&[
-            &patch.document_id,
-            &patch.patch_id,
-            &index.to_string(),
-            "pdf-text-insert",
-        ]);
-        grouped.entry(chunk_id).or_default().push(PdfTextInsertion {
-            page: *page,
-            node_id,
-            x_pt: *x_pt,
-            y_pt: *y_pt,
-            width_pt: *width_pt,
-            height_pt: *height_pt,
-            font_size_pt: *font_size_pt,
-            text: text.clone(),
-        });
-    }
-    grouped
-}
-
-fn collect_pptx_insertions(patch: &PatchBatch) -> HashMap<String, Vec<PptxTextInsertion>> {
-    let mut grouped: HashMap<String, Vec<PptxTextInsertion>> = HashMap::new();
-    for (index, operation) in patch.operations.iter().enumerate() {
-        let PatchOperation::PptxTextInsert {
-            chunk_id,
-            slide_part,
-            x_emu,
-            y_emu,
-            width_emu,
-            height_emu,
-            font_size_pt,
-            text,
-        } = operation
-        else {
-            continue;
-        };
-        grouped
-            .entry(chunk_id.clone())
-            .or_default()
-            .push(PptxTextInsertion {
-                node_id: stable_node_id(&[
-                    &patch.document_id,
-                    &patch.patch_id,
-                    &index.to_string(),
-                    "pptx-text-insert",
-                ]),
-                slide_part: slide_part.clone(),
-                x_emu: *x_emu,
-                y_emu: *y_emu,
-                width_emu: *width_emu,
-                height_emu: *height_emu,
-                font_size_hundredths: (*font_size_pt * 100.0).round() as u32,
-                text: text.clone(),
-            });
-    }
-    grouped
-}
-
-fn collect_pptx_geometry(patch: &PatchBatch) -> HashMap<String, PptxGeometryChange> {
-    patch
-        .operations
-        .iter()
-        .filter_map(|operation| {
-            let PatchOperation::PptxShapeGeometry {
-                node_id,
-                geometry,
-                precondition,
-            } = operation
-            else {
-                return None;
-            };
-            Some((
-                node_id.clone(),
-                PptxGeometryChange {
-                    geometry: *geometry,
-                    expected: precondition.geometry,
-                    node_hash: precondition.node_hash.clone(),
-                },
-            ))
-        })
-        .collect()
-}
-
-fn collect_pdf_geometry(patch: &PatchBatch) -> HashMap<String, PdfGeometryChange> {
-    patch
-        .operations
-        .iter()
-        .filter_map(|operation| {
-            let PatchOperation::PdfTextGeometry {
-                node_id,
-                geometry,
-                precondition,
-            } = operation
-            else {
-                return None;
-            };
-            Some((
-                node_id.clone(),
-                PdfGeometryChange {
-                    geometry: *geometry,
-                    expected: precondition.geometry,
-                    node_hash: precondition.node_hash.clone(),
-                },
-            ))
-        })
-        .collect()
-}
-
-fn collect_pdf_deletions(patch: &PatchBatch) -> HashMap<String, String> {
-    patch
-        .operations
-        .iter()
-        .filter_map(|operation| {
-            let PatchOperation::PdfTextDelete {
-                node_id,
-                precondition,
-            } = operation
-            else {
-                return None;
-            };
-            Some((node_id.clone(), precondition.node_hash.clone()))
-        })
-        .collect()
-}
-
-fn collect_pptx_deletions(patch: &PatchBatch) -> HashMap<String, String> {
-    patch
-        .operations
-        .iter()
-        .filter_map(|operation| {
-            let PatchOperation::PptxTextDelete {
-                node_id,
-                precondition,
-            } = operation
-            else {
-                return None;
-            };
-            Some((node_id.clone(), precondition.node_hash.clone()))
-        })
-        .collect()
-}
-
-fn valid_pdf_text_geometry(geometry: PdfTextGeometry) -> bool {
-    [
-        geometry.x_pt,
-        geometry.y_pt,
-        geometry.width_pt,
-        geometry.height_pt,
-    ]
-    .into_iter()
-    .all(f32::is_finite)
-        && geometry.x_pt >= 0.0
-        && geometry.y_pt >= 0.0
-        && geometry.width_pt >= 1.0
-        && geometry.height_pt >= 1.0
-        && geometry.x_pt + geometry.width_pt <= 14_400.0
-        && geometry.y_pt + geometry.height_pt <= 14_400.0
-}
-
-fn valid_pptx_geometry(geometry: PptxShapeGeometry) -> bool {
-    geometry.x_emu <= 100_000_000
-        && geometry.y_emu <= 100_000_000
-        && (1..=100_000_000).contains(&geometry.width_emu)
-        && (1..=100_000_000).contains(&geometry.height_emu)
-}
-
-fn collect_xlsx_merges(patch: &PatchBatch) -> HashMap<String, XlsxMerge> {
-    patch
-        .operations
-        .iter()
-        .filter_map(|operation| {
-            let PatchOperation::XlsxMerge {
-                node_id,
-                sheet_id,
-                start_row,
-                start_column,
-                end_row,
-                end_column,
-                precondition,
-            } = operation
-            else {
-                return None;
-            };
-            Some((
-                node_id.clone(),
-                XlsxMerge {
-                    sheet_id: sheet_id.clone(),
-                    start_row: *start_row,
-                    start_column: *start_column,
-                    end_row: *end_row,
-                    end_column: *end_column,
-                    node_hash: precondition.node_hash.clone(),
-                },
-            ))
-        })
-        .collect()
-}
-
-fn collect_xlsx_blank_merge(patch: &PatchBatch) -> Option<XlsxMerge> {
-    patch.operations.iter().find_map(|operation| {
-        let PatchOperation::XlsxMergeBlank {
-            sheet_id,
-            start_row,
-            start_column,
-            end_row,
-            end_column,
-        } = operation
-        else {
-            return None;
-        };
-        Some(XlsxMerge {
-            sheet_id: sheet_id.clone(),
-            start_row: *start_row,
-            start_column: *start_column,
-            end_row: *end_row,
-            end_column: *end_column,
-            node_hash: hash_bytes(b""),
-        })
-    })
-}
-
-fn collect_xlsx_unmerges(patch: &PatchBatch) -> HashMap<String, XlsxMerge> {
-    patch
-        .operations
-        .iter()
-        .filter_map(|operation| {
-            let PatchOperation::XlsxUnmerge {
-                node_id,
-                sheet_id,
-                start_row,
-                start_column,
-                end_row,
-                end_column,
-                precondition,
-            } = operation
-            else {
-                return None;
-            };
-            Some((
-                node_id.clone(),
-                XlsxMerge {
-                    sheet_id: sheet_id.clone(),
-                    start_row: *start_row,
-                    start_column: *start_column,
-                    end_row: *end_row,
-                    end_column: *end_column,
-                    node_hash: precondition.node_hash.clone(),
-                },
-            ))
-        })
-        .collect()
-}
-
-fn collect_xlsx_cell_set(
-    patch: &PatchBatch,
-) -> Result<BTreeMap<(String, u32, u32), XlsxCellInsertion>, HcdError> {
-    let mut insertions = BTreeMap::new();
-    for operation in &patch.operations {
-        let (sheet_id, row, column, text, formula) = match operation {
-            PatchOperation::XlsxCellSet {
-                sheet_id,
-                row,
-                column,
-                text,
-            } => (sheet_id, row, column, text, false),
-            PatchOperation::XlsxFormulaCreate {
-                sheet_id,
-                row,
-                column,
-                formula,
-            } => (sheet_id, row, column, formula, true),
-            _ => continue,
-        };
-        let key = (sheet_id.clone(), *row, *column);
-        if insertions
-            .insert(
-                key,
-                XlsxCellInsertion {
-                    sheet_id: sheet_id.clone(),
-                    row: *row,
-                    column: *column,
-                    text: text.clone(),
-                    formula,
-                },
-            )
-            .is_some()
-        {
-            return Err(HcdError::InvalidPatch(
-                "XLSX batch contains duplicate cell addresses".to_string(),
-            ));
-        }
-    }
-    Ok(insertions)
-}
-
-fn collect_xlsx_formula_set(
-    patch: &PatchBatch,
-) -> Result<HashMap<String, XlsxFormulaChange>, HcdError> {
-    let mut changes = HashMap::new();
-    for operation in &patch.operations {
-        let change = match operation {
-            PatchOperation::XlsxFormulaSet {
-                node_id,
-                sheet_id,
-                formula,
-                precondition,
-            } => Some((
-                node_id,
-                sheet_id,
-                XlsxFormulaReplacement::Formula(formula.clone()),
-                precondition,
-            )),
-            PatchOperation::XlsxFormulaToValue {
-                node_id,
-                sheet_id,
-                text,
-                precondition,
-            } => Some((
-                node_id,
-                sheet_id,
-                XlsxFormulaReplacement::Value(text.clone()),
-                precondition,
-            )),
-            PatchOperation::XlsxFormulaToNumber {
-                node_id,
-                sheet_id,
-                value,
-                precondition,
-            } => Some((
-                node_id,
-                sheet_id,
-                XlsxFormulaReplacement::Number(value.clone()),
-                precondition,
-            )),
-            PatchOperation::XlsxNumberSet {
-                node_id,
-                sheet_id,
-                value,
-                precondition,
-            } => Some((
-                node_id,
-                sheet_id,
-                XlsxFormulaReplacement::NumberUpdate(value.clone()),
-                precondition,
-            )),
-            _ => None,
-        };
-        if let Some((node_id, sheet_id, replacement, precondition)) = change {
-            if changes
-                .insert(
-                    node_id.clone(),
-                    XlsxFormulaChange {
-                        sheet_id: sheet_id.clone(),
-                        replacement,
-                        node_hash: precondition.node_hash.clone(),
-                    },
-                )
-                .is_some()
-            {
-                return Err(HcdError::InvalidPatch(
-                    "XLSX batch contains duplicate formula targets".to_string(),
-                ));
-            }
-        }
-    }
-    Ok(changes)
-}
-
-fn collect_xlsx_row_append(patch: &PatchBatch) -> Option<XlsxRowAppend> {
-    patch.operations.iter().find_map(|operation| {
-        let PatchOperation::XlsxRowAppend {
-            sheet_id,
-            after_row,
-        } = operation
-        else {
-            return None;
-        };
-        Some(XlsxRowAppend {
-            sheet_id: sheet_id.clone(),
-            after_row: *after_row,
-        })
-    })
-}
-
-fn collect_xlsx_row_insert(patch: &PatchBatch) -> Option<XlsxRowInsert> {
-    patch.operations.iter().find_map(|operation| {
-        if let PatchOperation::XlsxGridRange {
-            sheet_id,
-            axis: XlsxGridAxis::Row,
-            action: XlsxGridAction::Insert,
-            start,
-            count,
-        } = operation
-        {
-            return Some(XlsxRowInsert {
-                sheet_id: sheet_id.clone(),
-                before_row: *start,
-                count: *count,
-            });
-        }
-        let PatchOperation::XlsxRowInsert {
-            sheet_id,
-            before_row,
-        } = operation
-        else {
-            return None;
-        };
-        Some(XlsxRowInsert {
-            sheet_id: sheet_id.clone(),
-            before_row: *before_row,
-            count: 1,
-        })
-    })
-}
-
-fn collect_xlsx_row_delete(patch: &PatchBatch) -> Option<XlsxRowDelete> {
-    patch.operations.iter().find_map(|operation| {
-        if let PatchOperation::XlsxGridRange {
-            sheet_id,
-            axis: XlsxGridAxis::Row,
-            action: XlsxGridAction::Delete,
-            start,
-            count,
-        } = operation
-        {
-            return Some(XlsxRowDelete {
-                sheet_id: sheet_id.clone(),
-                row: *start,
-                count: *count,
-            });
-        }
-        let PatchOperation::XlsxRowDelete { sheet_id, row } = operation else {
-            return None;
-        };
-        Some(XlsxRowDelete {
-            sheet_id: sheet_id.clone(),
-            row: *row,
-            count: 1,
-        })
-    })
-}
-
-fn collect_xlsx_column_insert(patch: &PatchBatch) -> Option<XlsxColumnInsert> {
-    patch.operations.iter().find_map(|operation| {
-        if let PatchOperation::XlsxGridRange {
-            sheet_id,
-            axis: XlsxGridAxis::Column,
-            action: XlsxGridAction::Insert,
-            start,
-            count,
-        } = operation
-        {
-            return Some(XlsxColumnInsert {
-                sheet_id: sheet_id.clone(),
-                before_column: *start,
-                count: *count,
-            });
-        }
-        let PatchOperation::XlsxColumnInsert {
-            sheet_id,
-            before_column,
-        } = operation
-        else {
-            return None;
-        };
-        Some(XlsxColumnInsert {
-            sheet_id: sheet_id.clone(),
-            before_column: *before_column,
-            count: 1,
-        })
-    })
-}
-
-fn collect_xlsx_column_delete(patch: &PatchBatch) -> Option<XlsxColumnDelete> {
-    patch.operations.iter().find_map(|operation| {
-        if let PatchOperation::XlsxGridRange {
-            sheet_id,
-            axis: XlsxGridAxis::Column,
-            action: XlsxGridAction::Delete,
-            start,
-            count,
-        } = operation
-        {
-            return Some(XlsxColumnDelete {
-                sheet_id: sheet_id.clone(),
-                column: *start,
-                count: *count,
-            });
-        }
-        let PatchOperation::XlsxColumnDelete { sheet_id, column } = operation else {
-            return None;
-        };
-        Some(XlsxColumnDelete {
-            sheet_id: sheet_id.clone(),
-            column: *column,
-            count: 1,
-        })
-    })
-}
-
-fn collect_xlsx_row_removal(patch: &PatchBatch) -> Option<XlsxRowRemoval> {
-    patch.operations.iter().find_map(|operation| {
-        let PatchOperation::XlsxRowRemoveLast { sheet_id, row } = operation else {
-            return None;
-        };
-        Some(XlsxRowRemoval {
-            sheet_id: sheet_id.clone(),
-            row: *row,
-        })
-    })
-}
-
-fn collect_xlsx_column_width(patch: &PatchBatch) -> Option<XlsxColumnWidth> {
-    patch.operations.iter().find_map(|operation| {
-        let PatchOperation::XlsxColumnWidth {
-            sheet_id,
-            column,
-            width_chars,
-        } = operation
-        else {
-            return None;
-        };
-        Some(XlsxColumnWidth {
-            sheet_id: sheet_id.clone(),
-            column: *column,
-            width_chars: *width_chars,
-        })
-    })
-}
-
-fn collect_xlsx_row_height(patch: &PatchBatch) -> Option<XlsxRowHeight> {
-    patch.operations.iter().find_map(|operation| {
-        let PatchOperation::XlsxRowHeight {
-            sheet_id,
-            row,
-            height_points,
-        } = operation
-        else {
-            return None;
-        };
-        Some(XlsxRowHeight {
-            sheet_id: sheet_id.clone(),
-            row: *row,
-            height_points: *height_points,
-        })
-    })
-}
-
-fn set_xlsx_row_height(html: &mut String, row: u32, height: f64) -> Result<(), HcdError> {
-    let marker = format!("<tr data-hcd-row=\"{row}\"");
-    let start = html.find(&marker).ok_or_else(|| {
-        HcdError::Unsupported("XLSX row height requires a materialized row".to_string())
-    })?;
-    let end = html[start..]
-        .find('>')
-        .map(|offset| start + offset)
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX row tag is not closed".to_string()))?;
-    if xlsx_attribute(&html[start..=end], "data-hcd-hidden") == Some("true") {
-        return Err(HcdError::Unsupported(
-            "XLSX hidden row cannot be resized before it is shown".to_string(),
-        ));
-    }
-    update_start_tag_style(
-        html,
-        &marker,
-        &BTreeMap::from([("height".to_string(), format!("{height:.2}pt"))]),
-        false,
-    )?;
-    let end = html[start..]
-        .find('>')
-        .map(|offset| start + offset)
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX row tag is not closed".to_string()))?;
-    set_attribute_in_range(
-        html,
-        start,
-        end,
-        "data-hcd-height-points",
-        &format!("{height:.2}"),
-    )?;
-    let end = html[start..]
-        .find('>')
-        .map(|offset| start + offset)
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX row tag is not closed".to_string()))?;
-    set_attribute_in_range(html, start, end, "data-hcd-height-edited", "true")?;
-    Ok(())
-}
-
-fn find_xlsx_sheet_part(
-    bundle: &Bundle,
-    manifest: &crate::HcdManifest,
-    sheet_id: &str,
-) -> Result<String, HcdError> {
-    let mut found_sheet = false;
-    for page_number in 0..manifest.index_page_count {
-        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
-            let Some(grid) = descriptor.grid.as_ref() else {
-                continue;
-            };
-            if grid.kind != crate::GridChunkKind::Cells || grid.sheet_id != sheet_id {
-                continue;
-            }
-            found_sheet = true;
-            if let Some(part) = bundle
-                .read_map(&descriptor)?
-                .entries
-                .iter()
-                .find(|entry| entry.source.node_kind == "cell")
-                .map(|entry| entry.source.part.clone())
-            {
-                return Ok(part);
-            }
-        }
-    }
-    Err(HcdError::Unsupported(if found_sheet {
-        "XLSX column width requires a worksheet with a mapped cell".to_string()
-    } else {
-        "XLSX worksheet is not in the HCD grid".to_string()
-    }))
-}
-
-fn find_xlsx_blank_merge_target(
-    bundle: &Bundle,
-    manifest: &crate::HcdManifest,
-    merge: &XlsxMerge,
-) -> Result<String, HcdError> {
-    let mut target = None;
-    for page_number in 0..manifest.index_page_count {
-        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
-            let Some(grid) = descriptor.grid.as_ref() else {
-                continue;
-            };
-            if grid.kind != crate::GridChunkKind::Cells || grid.sheet_id != merge.sheet_id {
-                continue;
-            }
-            let contains_range = grid
-                .row_start
-                .is_some_and(|start| u64::from(merge.start_row) >= start)
-                && grid
-                    .row_end
-                    .is_some_and(|end| u64::from(merge.end_row) <= end);
-            if !contains_range {
-                continue;
-            }
-            if target.replace(descriptor.chunk_id.clone()).is_some() {
-                return Err(HcdError::InvalidBundle(
-                    "XLSX merge is present in multiple windows".to_string(),
-                ));
-            }
-        }
-    }
-    target.ok_or_else(|| {
-        HcdError::Unsupported(
-            "XLSX blank merge must stay within one materialized cell window".to_string(),
-        )
-    })
-}
-
-fn hcd_column_tag(start: u32, end: u32, width: Option<f64>, hidden: bool, edited: bool) -> String {
-    let mut tag = format!(
-        "<col span=\"{}\" data-hcd-column-start=\"{start}\" data-hcd-column-end=\"{end}\"",
-        end - start + 1
-    );
-    if let Some(width) = width {
-        tag.push_str(&format!(" data-hcd-width=\"{width:.2}\""));
-    }
-    if edited {
-        tag.push_str(" data-hcd-width-edited=\"true\"");
-    }
-    if hidden {
-        tag.push_str(" data-hcd-hidden=\"true\" style=\"display:none\"");
-    } else if let Some(width) = width {
-        tag.push_str(&format!(" style=\"width:{:.2}px\"", width * 7.5));
-    }
-    tag.push_str("/>");
-    tag
-}
-
-fn set_xlsx_column_width(html: &mut String, column: u32, width: f64) -> Result<(), HcdError> {
-    let group_start = html.find("<colgroup>").ok_or_else(|| {
-        HcdError::InvalidBundle("XLSX grid is missing its column group".to_string())
-    })?;
-    let group_end = html[group_start..]
-        .find("</colgroup>")
-        .map(|offset| group_start + offset)
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX column group is not closed".to_string()))?;
-    let mut cursor = group_start + "<colgroup>".len();
-    let mut insert_at = group_end;
-    while let Some(offset) = html[cursor..group_end].find("<col ") {
-        let tag_start = cursor + offset;
-        let tag_end = html[tag_start..group_end]
-            .find("/>")
-            .map(|offset| tag_start + offset + 2)
-            .ok_or_else(|| HcdError::InvalidBundle("XLSX column tag is not closed".to_string()))?;
-        let tag = &html[tag_start..tag_end];
-        let start = xlsx_attribute(tag, "data-hcd-column-start")
-            .and_then(|value| value.parse::<u32>().ok())
-            .ok_or_else(|| HcdError::InvalidBundle("XLSX column start is invalid".to_string()))?;
-        let end = xlsx_attribute(tag, "data-hcd-column-end")
-            .and_then(|value| value.parse::<u32>().ok())
-            .ok_or_else(|| HcdError::InvalidBundle("XLSX column end is invalid".to_string()))?;
-        if start == 0 || end < start || end > 16_384 {
-            return Err(HcdError::InvalidBundle(
-                "XLSX column range is invalid".to_string(),
-            ));
-        }
-        if column < start {
-            insert_at = tag_start;
-            break;
-        }
-        if column <= end {
-            let old_width =
-                xlsx_attribute(tag, "data-hcd-width").and_then(|value| value.parse().ok());
-            let hidden = xlsx_attribute(tag, "data-hcd-hidden") == Some("true");
-            let mut replacement = String::new();
-            if start < column {
-                replacement.push_str(&hcd_column_tag(start, column - 1, old_width, hidden, false));
-            }
-            replacement.push_str(&hcd_column_tag(column, column, Some(width), hidden, true));
-            if column < end {
-                replacement.push_str(&hcd_column_tag(column + 1, end, old_width, hidden, false));
-            }
-            html.replace_range(tag_start..tag_end, &replacement);
-            return Ok(());
-        }
-        cursor = tag_end;
-    }
-    html.insert_str(
-        insert_at,
-        &hcd_column_tag(column, column, Some(width), false, true),
-    );
-    Ok(())
-}
-
-fn find_xlsx_row_tail(
-    bundle: &Bundle,
-    manifest: &crate::HcdManifest,
-    append: &XlsxRowAppend,
-) -> Result<String, HcdError> {
-    let (last_row, tail) = last_xlsx_row(bundle, manifest, &append.sheet_id)?;
-    if last_row != u64::from(append.after_row) {
-        return Err(HcdError::PreconditionFailed(format!(
-            "XLSX current last row is {last_row}, expected {}",
-            append.after_row
-        )));
-    }
-    Ok(tail)
-}
-
-fn find_xlsx_row_insert_target(
-    bundle: &Bundle,
-    manifest: &crate::HcdManifest,
-    insert: &XlsxRowInsert,
-) -> Result<(String, String), HcdError> {
-    let (last_row, tail) = last_xlsx_row(bundle, manifest, &insert.sheet_id)?;
-    if last_row + u64::from(insert.count) > 1_048_576 {
-        return Err(HcdError::ResourceLimit(
-            "XLSX row insertion exceeds the last worksheet row".to_string(),
-        ));
-    }
-    if u64::from(insert.before_row) > last_row + 1 {
-        return Err(HcdError::Unsupported(
-            "insert at or before the next XLSX row".to_string(),
-        ));
-    }
-    let mut target = None;
-    let mut part = None;
-    for page_number in 0..manifest.index_page_count {
-        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
-            let Some(grid) = descriptor.grid.as_ref() else {
-                continue;
-            };
-            if matches!(
-                grid.kind,
-                crate::GridChunkKind::Picture | crate::GridChunkKind::Chart
-            ) && grid.sheet_id == insert.sheet_id
-            {
-                let mut html = bundle.read_chunk(&descriptor)?;
-                let mut preview = descriptor.clone();
-                shift_xlsx_visual_anchor(
-                    &mut html,
-                    &mut preview,
-                    XlsxVisualShift::InsertRow(insert.before_row),
-                )?;
-            }
-            if grid.kind != crate::GridChunkKind::Cells {
-                continue;
-            }
-            let html = bundle.read_chunk(&descriptor)?;
-            if grid.sheet_id != insert.sheet_id {
-                continue;
-            }
-            rewrite_xlsx_inserted_formula_references(
-                &mut html.clone(),
-                crate::FormulaInsertion::Row(insert.before_row),
-            )?;
-            check_xlsx_merge_shift(&html, XlsxMergeShift::InsertRow(insert.before_row))?;
-            if part.is_none() {
-                part = bundle
-                    .read_map(&descriptor)?
-                    .entries
-                    .into_iter()
-                    .find(|entry| entry.source.node_kind == "cell")
-                    .map(|entry| entry.source.part);
-            }
-            if grid
-                .row_start
-                .is_some_and(|start| start <= u64::from(insert.before_row))
-                && grid
-                    .row_end
-                    .is_some_and(|end| end >= u64::from(insert.before_row))
-                && html.contains(&format!("<tr data-hcd-row=\"{}\"", insert.before_row))
-                && target.replace(descriptor.chunk_id).is_some()
-            {
-                return Err(HcdError::InvalidBundle(
-                    "duplicate XLSX row insertion target".to_string(),
-                ));
-            }
-        }
-    }
-    let target = target
-        .or_else(|| (u64::from(insert.before_row) == last_row + 1).then_some(tail))
-        .ok_or_else(|| {
-            HcdError::Unsupported("insert before a materialized XLSX row".to_string())
-        })?;
-    let part = part.ok_or_else(|| {
-        HcdError::Unsupported("XLSX worksheet has no mapped source cells".to_string())
-    })?;
-    Ok((target, part))
-}
-
-fn find_xlsx_row_delete_target(
-    bundle: &Bundle,
-    manifest: &crate::HcdManifest,
-    delete: &XlsxRowDelete,
-) -> Result<(String, String), HcdError> {
-    let (last_row, _) = last_xlsx_row(bundle, manifest, &delete.sheet_id)?;
-    if u64::from(delete.row) + u64::from(delete.count) - 1 > last_row {
-        return Err(HcdError::Unsupported(
-            "XLSX row selection extends beyond the materialized sheet".to_string(),
-        ));
-    }
-    let mut target = None;
-    let mut part = None;
-    for page_number in 0..manifest.index_page_count {
-        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
-            let Some(grid) = descriptor.grid.as_ref() else {
-                continue;
-            };
-            if grid.sheet_id != delete.sheet_id {
-                continue;
-            }
-            if grid.kind != crate::GridChunkKind::Cells {
-                continue;
-            }
-            let html = bundle.read_chunk(&descriptor)?;
-            rewrite_xlsx_formula_references(
-                &mut html.clone(),
-                crate::FormulaDeletion::Row(delete.row),
-            )?;
-            check_xlsx_merge_shift(&html, XlsxMergeShift::DeleteRow(delete.row))?;
-            if part.is_none() {
-                part = bundle
-                    .read_map(&descriptor)?
-                    .entries
-                    .into_iter()
-                    .find(|entry| entry.source.node_kind == "cell")
-                    .map(|entry| entry.source.part);
-            }
-            if html.contains(&format!("<tr data-hcd-row=\"{}\"", delete.row))
-                && target.replace(descriptor.chunk_id).is_some()
-            {
-                return Err(HcdError::InvalidBundle(
-                    "duplicate XLSX row deletion target".to_string(),
-                ));
-            }
-        }
-    }
-    Ok((
-        part.ok_or_else(|| {
-            HcdError::Unsupported("XLSX sheet has no mapped source cells".to_string())
-        })?,
-        target.ok_or_else(|| HcdError::Unsupported("delete an existing XLSX row".to_string()))?,
-    ))
-}
-
-fn find_xlsx_column_insert_part(
-    bundle: &Bundle,
-    manifest: &crate::HcdManifest,
-    insert: &XlsxColumnInsert,
-) -> Result<String, HcdError> {
-    let mut part = None;
-    let mut last_column = 0u32;
-    for page_number in 0..manifest.index_page_count {
-        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
-            let Some(grid) = descriptor.grid.as_ref() else {
-                continue;
-            };
-            if matches!(
-                grid.kind,
-                crate::GridChunkKind::Picture | crate::GridChunkKind::Chart
-            ) && grid.sheet_id == insert.sheet_id
-            {
-                let mut html = bundle.read_chunk(&descriptor)?;
-                let mut preview = descriptor.clone();
-                shift_xlsx_visual_anchor(
-                    &mut html,
-                    &mut preview,
-                    XlsxVisualShift::InsertColumn(insert.before_column),
-                )?;
-            }
-            if grid.kind != crate::GridChunkKind::Cells {
-                continue;
-            }
-            let html = bundle.read_chunk(&descriptor)?;
-            if grid.sheet_id != insert.sheet_id {
-                continue;
-            }
-            rewrite_xlsx_inserted_formula_references(
-                &mut html.clone(),
-                crate::FormulaInsertion::Column(insert.before_column),
-            )?;
-            check_xlsx_merge_shift(&html, XlsxMergeShift::InsertColumn(insert.before_column))?;
-            shift_xlsx_column_widths(&mut html.clone(), insert.before_column)?;
-            last_column = last_column.max(grid.column_end.unwrap_or(0));
-            if part.is_none() {
-                part = bundle
-                    .read_map(&descriptor)?
-                    .entries
-                    .into_iter()
-                    .find(|entry| entry.source.node_kind == "cell")
-                    .map(|entry| entry.source.part);
-            }
-        }
-    }
-    if u64::from(last_column) + u64::from(insert.count) > 16_384 {
-        return Err(HcdError::ResourceLimit(
-            "XLSX column insertion exceeds the last worksheet column".to_string(),
-        ));
-    }
-    if insert.before_column > last_column.saturating_add(1) {
-        return Err(HcdError::Unsupported(
-            "insert at or before the next XLSX column".to_string(),
-        ));
-    }
-    part.ok_or_else(|| {
-        HcdError::Unsupported("XLSX worksheet has no mapped source cells".to_string())
-    })
-}
-
-fn find_xlsx_column_delete_part(
-    bundle: &Bundle,
-    manifest: &crate::HcdManifest,
-    delete: &XlsxColumnDelete,
-) -> Result<String, HcdError> {
-    let mut part = None;
-    let mut last_column = 0u32;
-    for page_number in 0..manifest.index_page_count {
-        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
-            let Some(grid) = descriptor.grid.as_ref() else {
-                continue;
-            };
-            if grid.sheet_id != delete.sheet_id {
-                continue;
-            }
-            if grid.kind != crate::GridChunkKind::Cells {
-                continue;
-            }
-            let html = bundle.read_chunk(&descriptor)?;
-            rewrite_xlsx_formula_references(
-                &mut html.clone(),
-                crate::FormulaDeletion::Column(delete.column),
-            )?;
-            check_xlsx_merge_shift(&html, XlsxMergeShift::DeleteColumn(delete.column))?;
-            last_column = last_column.max(grid.column_end.unwrap_or(0));
-            if part.is_none() {
-                part = bundle
-                    .read_map(&descriptor)?
-                    .entries
-                    .into_iter()
-                    .find(|entry| entry.source.node_kind == "cell")
-                    .map(|entry| entry.source.part);
-            }
-        }
-    }
-    if u64::from(delete.column) + u64::from(delete.count) - 1 > u64::from(last_column) {
-        return Err(HcdError::Unsupported(
-            "XLSX column selection extends beyond the materialized sheet".to_string(),
-        ));
-    }
-    if delete.column > last_column {
-        return Err(HcdError::Unsupported(
-            "delete an existing XLSX column".to_string(),
-        ));
-    }
-    if part.is_none() {
-        let (original, _) = crate::manifest_at_revision(bundle, manifest, Some(0))?;
-        for page_number in 0..original.index_page_count {
-            for descriptor in bundle.read_index_page(&original, page_number)?.chunks {
-                if descriptor.grid.as_ref().is_some_and(|grid| {
-                    grid.kind == crate::GridChunkKind::Cells && grid.sheet_id == delete.sheet_id
-                }) {
-                    part = bundle
-                        .read_map(&descriptor)?
-                        .entries
-                        .into_iter()
-                        .find(|entry| entry.source.node_kind == "cell")
-                        .map(|entry| entry.source.part);
-                    if part.is_some() {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    part.ok_or_else(|| {
-        HcdError::Unsupported("XLSX worksheet has no mapped source cells".to_string())
-    })
-}
-
-fn find_xlsx_row_removal_target(
-    bundle: &Bundle,
-    manifest: &crate::HcdManifest,
-    removal: &XlsxRowRemoval,
-) -> Result<String, HcdError> {
-    let (last_row, tail) = last_xlsx_row(bundle, manifest, &removal.sheet_id)?;
-    if last_row != u64::from(removal.row) {
-        return Err(HcdError::PreconditionFailed(format!(
-            "XLSX current last row is {last_row}, expected {}",
-            removal.row
-        )));
-    }
-    let (original, _) = crate::manifest_at_revision(bundle, manifest, Some(0))?;
-    let (original_last_row, _) = last_xlsx_row(bundle, &original, &removal.sheet_id)?;
-    if last_row <= original_last_row {
-        return Err(HcdError::PreconditionFailed(
-            "XLSX source rows cannot be removed with this operation".to_string(),
-        ));
-    }
-    Ok(tail)
-}
-
-fn last_xlsx_row(
-    bundle: &Bundle,
-    manifest: &crate::HcdManifest,
-    sheet_id: &str,
-) -> Result<(u64, String), HcdError> {
-    let mut tail = None;
-    let mut last_row = 0u64;
-    for page_number in 0..manifest.index_page_count {
-        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
-            let Some(grid) = descriptor.grid.as_ref() else {
-                continue;
-            };
-            if grid.kind != crate::GridChunkKind::Cells || grid.sheet_id != sheet_id {
-                continue;
-            }
-            let Some(end) = grid.row_end else { continue };
-            if end > last_row {
-                last_row = end;
-                tail = Some(descriptor.chunk_id);
-            } else if end == last_row {
-                return Err(HcdError::InvalidBundle(
-                    "XLSX last row appears in multiple cell windows".to_string(),
-                ));
-            }
-        }
-    }
-    tail.map(|tail| (last_row, tail)).ok_or_else(|| {
-        HcdError::Unsupported(
-            "XLSX row operation requires an existing nonempty worksheet".to_string(),
-        )
-    })
-}
-
-fn append_xlsx_row(html: &mut String, after_row: u32) -> Result<(), HcdError> {
-    let old_end = format!(" data-hcd-row-end=\"{after_row}\"");
-    let section_end = html
-        .find('>')
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX sheet section is not closed".to_string()))?;
-    let marker = html[..section_end].find(&old_end).ok_or_else(|| {
-        HcdError::InvalidBundle("XLSX sheet row end disagrees with its descriptor".to_string())
-    })?;
-    let body_end = html
-        .find("</tbody>")
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX sheet has no table body".to_string()))?;
-    let last_row_start = html[..body_end]
-        .rfind("<tr ")
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX sheet has no last row".to_string()))?;
-    let last_tag_end = html[last_row_start..body_end]
-        .find('>')
-        .map(|offset| last_row_start + offset)
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX last row tag is unclosed".to_string()))?;
-    if !html[last_row_start..last_tag_end].contains(&format!(" data-hcd-row=\"{after_row}\""))
-        || !html[last_tag_end..body_end].ends_with("</tr>")
-    {
-        return Err(HcdError::InvalidBundle(
-            "XLSX last row does not match the append precondition".to_string(),
-        ));
-    }
-    html.insert_str(
-        body_end,
-        &format!("<tr data-hcd-row=\"{}\"></tr>", after_row + 1),
-    );
-    html.replace_range(
-        marker..marker + old_end.len(),
-        &format!(" data-hcd-row-end=\"{}\"", after_row + 1),
-    );
-    Ok(())
-}
-
-fn shift_xlsx_row_window(
-    html: &mut String,
-    source_map: &mut crate::ChunkSourceMap,
-    descriptor: &mut crate::ChunkDescriptor,
-    before_row: u32,
-    insert_here: bool,
-) -> Result<(), HcdError> {
-    rewrite_xlsx_merge_refs(html, XlsxMergeShift::InsertRow(before_row))?;
-    let grid = descriptor.grid.as_mut().ok_or_else(|| {
-        HcdError::InvalidBundle("XLSX row window has no grid address".to_string())
-    })?;
-    let old_start = grid
-        .row_start
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX row window has no start".to_string()))?;
-    let old_end = grid
-        .row_end
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX row window has no end".to_string()))?;
-    if insert_here && u64::from(before_row) == old_end + 1 {
-        append_xlsx_row(html, old_end as u32)?;
-        grid.row_end = Some(old_end + 1);
-        descriptor.block_count += 1;
-        return Ok(());
-    }
-    let mut rows = BTreeSet::new();
-    let cells = xlsx_cells(html)?;
-    let mut cursor = 0usize;
-    while let Some(offset) = html[cursor..].find("<tr data-hcd-row=\"") {
-        let start = cursor + offset + "<tr data-hcd-row=\"".len();
-        let end = html[start..]
-            .find('"')
-            .map(|offset| start + offset)
-            .ok_or_else(|| HcdError::InvalidBundle("XLSX row label is unclosed".to_string()))?;
-        let row: u32 = html[start..end]
-            .parse()
-            .map_err(|_| HcdError::InvalidBundle("XLSX row label is invalid".to_string()))?;
-        if row >= before_row {
-            rows.insert(row);
-        }
-        cursor = end + 1;
-    }
-    if insert_here && !rows.contains(&before_row) {
-        return Err(HcdError::PreconditionFailed(
-            "XLSX insertion row disappeared".to_string(),
-        ));
-    }
-    for row in rows.into_iter().rev() {
-        let next = row
-            .checked_add(1)
-            .filter(|next| *next <= 1_048_576)
-            .ok_or_else(|| {
-                HcdError::ResourceLimit("XLSX row exceeds the worksheet limit".to_string())
-            })?;
-        for cell in cells.iter().filter(|cell| cell.row == row) {
-            let old = format!("{}{}", xlsx_column_name(cell.column), row);
-            let new = format!("{}{}", xlsx_column_name(cell.column), next);
-            *html = html.replace(
-                &format!(" data-hcd-cell=\"{old}\""),
-                &format!(" data-hcd-cell=\"{new}\""),
-            );
-        }
-        *html = html.replace(
-            &format!("<tr data-hcd-row=\"{row}\""),
-            &format!("<tr data-hcd-row=\"{next}\""),
-        );
-    }
-    for entry in &mut source_map.entries {
-        if entry.source.node_kind != "cell" {
-            continue;
-        }
-        let Some(reference) = entry.source.paragraph_id.clone() else {
-            continue;
-        };
-        let Some((row, column)) = xlsx_cell_coordinates(&reference) else {
-            return Err(HcdError::InvalidBundle(
-                "XLSX mapped cell has invalid address".to_string(),
-            ));
-        };
-        if row < before_row {
-            continue;
-        }
-        if !entry.source.created_in_hcd && entry.source.source_cell_ref.is_none() {
-            entry.source.source_cell_ref = Some(reference);
-        }
-        entry.source.paragraph_id = Some(format!("{}{}", xlsx_column_name(column), row + 1));
-    }
-    let new_start = if old_start >= u64::from(before_row) && !insert_here {
-        old_start + 1
-    } else {
-        old_start
-    };
-    let new_end = old_end + 1;
-    for (name, old, new) in [
-        ("data-hcd-row-start", old_start, new_start),
-        ("data-hcd-row-end", old_end, new_end),
-    ] {
-        let before = format!(" {name}=\"{old}\"");
-        if !html.contains(&before) {
-            return Err(HcdError::InvalidBundle(format!(
-                "XLSX window is missing {name}"
-            )));
-        }
-        *html = html.replacen(&before, &format!(" {name}=\"{new}\""), 1);
-    }
-    if insert_here {
-        let marker = format!("<tr data-hcd-row=\"{}\"", before_row + 1);
-        let position = html.find(&marker).ok_or_else(|| {
-            HcdError::InvalidBundle("shifted XLSX insertion row is missing".to_string())
-        })?;
-        html.insert_str(
-            position,
-            &format!("<tr data-hcd-row=\"{before_row}\"></tr>"),
-        );
-        descriptor.block_count += 1;
-    }
-    grid.row_start = Some(new_start);
-    grid.row_end = Some(new_end);
-    Ok(())
-}
-
-fn delete_xlsx_row_window(
-    html: &mut String,
-    source_map: &mut crate::ChunkSourceMap,
-    descriptor: &mut crate::ChunkDescriptor,
-    deleted_row: u32,
-) -> Result<Vec<String>, HcdError> {
-    rewrite_xlsx_formula_references(html, crate::FormulaDeletion::Row(deleted_row))?;
-    rewrite_xlsx_merge_refs(html, XlsxMergeShift::DeleteRow(deleted_row))?;
-    let grid = descriptor.grid.as_mut().ok_or_else(|| {
-        HcdError::InvalidBundle("XLSX row window has no grid address".to_string())
-    })?;
-    let old_start = grid
-        .row_start
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX row window has no start".to_string()))?;
-    let old_end = grid
-        .row_end
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX row window has no end".to_string()))?;
-    let promoted_merges: Vec<_> = xlsx_cells(html)?
-        .into_iter()
-        .filter(|cell| cell.row == deleted_row)
-        .filter_map(|cell| cell.merged_range)
-        .filter(|range| range.0 == deleted_row)
-        .collect();
-    let mut rebuilt = String::with_capacity(html.len());
-    let mut cursor = 0;
-    let mut removed_row = false;
-    while let Some(offset) = html[cursor..].find("<tr data-hcd-row=\"") {
-        let start = cursor + offset;
-        rebuilt.push_str(&html[cursor..start]);
-        let label_start = start + "<tr data-hcd-row=\"".len();
-        let label_end = html[label_start..]
-            .find('"')
-            .map(|offset| label_start + offset)
-            .ok_or_else(|| HcdError::InvalidBundle("XLSX row label is unclosed".to_string()))?;
-        let row: u32 = html[label_start..label_end]
-            .parse()
-            .map_err(|_| HcdError::InvalidBundle("XLSX row label is invalid".to_string()))?;
-        let end = html[label_end..]
-            .find("</tr>")
-            .map(|offset| label_end + offset + 5)
-            .ok_or_else(|| HcdError::InvalidBundle("XLSX row is unclosed".to_string()))?;
-        if row == deleted_row {
-            removed_row = true;
-        } else if row > deleted_row {
-            let mut fragment = html[start..end].replacen(
-                &format!("data-hcd-row=\"{row}\""),
-                &format!("data-hcd-row=\"{}\"", row - 1),
-                1,
-            );
-            for cell in xlsx_cells(&fragment)? {
-                let old = format!("{}{}", xlsx_column_name(cell.column), row);
-                let new = format!("{}{}", xlsx_column_name(cell.column), row - 1);
-                fragment = fragment.replace(
-                    &format!("data-hcd-cell=\"{old}\""),
-                    &format!("data-hcd-cell=\"{new}\""),
-                );
-            }
-            if row == deleted_row + 1 {
-                for &(start_row, start_column, end_row, end_column) in promoted_merges.iter().rev()
-                {
-                    let cells = xlsx_cells(&fragment)?;
-                    if cells.iter().any(|cell| cell.column == start_column) {
-                        return Err(HcdError::InvalidBundle(
-                            "XLSX merged row anchor overlaps an existing cell".to_string(),
-                        ));
-                    }
-                    let insert_at = cells
-                        .iter()
-                        .find(|cell| cell.column > start_column)
-                        .map(|cell| cell.start)
-                        .or_else(|| fragment.find("</tr>"))
-                        .ok_or_else(|| {
-                            HcdError::InvalidBundle("XLSX row is unclosed".to_string())
-                        })?;
-                    let range = format!(
-                        "{}{}:{}{}",
-                        xlsx_column_name(start_column),
-                        start_row,
-                        xlsx_column_name(end_column),
-                        end_row
-                    );
-                    fragment.insert_str(insert_at, &format!(
-                        "<td class=\"hcd-cell hcd-empty\" data-hcd-column=\"{start_column}\" data-hcd-merge=\"{range}\" colspan=\"{}\" rowspan=\"{}\"></td>",
-                        end_column - start_column + 1, end_row - start_row + 1));
-                }
-            }
-            rebuilt.push_str(&fragment);
-        } else {
-            rebuilt.push_str(&html[start..end]);
-        }
-        cursor = end;
-    }
-    rebuilt.push_str(&html[cursor..]);
-    if old_start <= u64::from(deleted_row) && !removed_row {
-        return Err(HcdError::InvalidBundle(
-            "XLSX deletion row is missing".to_string(),
-        ));
-    }
-    let mut removed = Vec::new();
-    source_map.entries.retain_mut(|entry| {
-        if entry.source.node_kind != "cell" {
-            return true;
-        }
-        let Some(reference) = entry.source.paragraph_id.clone() else {
-            return true;
-        };
-        let Some((row, column)) = xlsx_cell_coordinates(&reference) else {
-            return true;
-        };
-        if row == deleted_row {
-            removed.push(entry.node_id.clone());
-            return false;
-        }
-        if row > deleted_row {
-            if !entry.source.created_in_hcd && entry.source.source_cell_ref.is_none() {
-                entry.source.source_cell_ref = Some(reference);
-            }
-            entry.source.paragraph_id = Some(format!("{}{}", xlsx_column_name(column), row - 1));
-        }
-        true
-    });
-    let (new_start, new_end) = if old_start == old_end && old_start == u64::from(deleted_row) {
-        (None, None)
-    } else {
-        (
-            Some(if old_start > u64::from(deleted_row) {
-                old_start - 1
-            } else {
-                old_start
-            }),
-            Some(old_end - 1),
-        )
-    };
-    for (name, old, new) in [
-        ("data-hcd-row-start", old_start, new_start),
-        ("data-hcd-row-end", old_end, new_end),
-    ] {
-        let before = format!(" {name}=\"{old}\"");
-        if !rebuilt.contains(&before) {
-            return Err(HcdError::InvalidBundle(format!(
-                "XLSX window is missing {name}"
-            )));
-        }
-        rebuilt = rebuilt.replacen(
-            &before,
-            &new.map_or_else(String::new, |value| format!(" {name}=\"{value}\"")),
-            1,
-        );
-    }
-    *html = rebuilt;
-    grid.row_start = new_start;
-    grid.row_end = new_end;
-    descriptor.block_count = descriptor
-        .block_count
-        .saturating_sub(usize::from(removed_row))
-        .max(1);
-    descriptor.node_count = source_map.entries.len();
-    descriptor.first_node_id = source_map
-        .entries
-        .first()
-        .map(|entry| entry.node_id.clone());
-    descriptor.last_node_id = source_map.entries.last().map(|entry| entry.node_id.clone());
-    descriptor.node_bloom = node_bloom(
-        source_map
-            .entries
-            .iter()
-            .map(|entry| entry.node_id.as_str()),
-    );
-    Ok(removed)
-}
-
-fn shift_xlsx_column_window(
-    html: &mut String,
-    source_map: &mut crate::ChunkSourceMap,
-    descriptor: &mut crate::ChunkDescriptor,
-    before_column: u32,
-) -> Result<(), HcdError> {
-    rewrite_xlsx_merge_refs(html, XlsxMergeShift::InsertColumn(before_column))?;
-    let grid = descriptor.grid.as_mut().ok_or_else(|| {
-        HcdError::InvalidBundle("XLSX column window has no grid address".to_string())
-    })?;
-    let old_start = grid
-        .column_start
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX column window has no start".to_string()))?;
-    let old_end = grid
-        .column_end
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX column window has no end".to_string()))?;
-    let cells = xlsx_cells(html)?;
-    let mut first_shifted_column = BTreeMap::new();
-    for cell in cells.iter().filter(|cell| cell.column >= before_column) {
-        first_shifted_column
-            .entry(cell.row)
-            .and_modify(|column: &mut u32| *column = (*column).min(cell.column))
-            .or_insert(cell.column);
-    }
-    let mut rewritten = String::with_capacity(html.len() + first_shifted_column.len() * 80);
-    let mut cursor = 0usize;
-    for cell in cells.iter().filter(|cell| cell.column >= before_column) {
-        if cell.start < cursor {
-            return Err(HcdError::InvalidBundle(
-                "XLSX cell spans overlap".to_string(),
-            ));
-        }
-        rewritten.push_str(&html[cursor..cell.start]);
-        let original = &html[cell.start..cell.end];
-        let old_column = format!(" data-hcd-column=\"{}\"", cell.column);
-        let new_column = format!(" data-hcd-column=\"{}\"", cell.column + 1);
-        if !original.contains(&old_column) {
-            return Err(HcdError::InvalidBundle(
-                "XLSX cell column differs from its address".to_string(),
-            ));
-        }
-        let mut updated = original.replacen(&old_column, &new_column, 1);
-        let old_ref = format!(
-            " data-hcd-cell=\"{}{}\"",
-            xlsx_column_name(cell.column),
-            cell.row
-        );
-        let new_ref = format!(
-            " data-hcd-cell=\"{}{}\"",
-            xlsx_column_name(cell.column + 1),
-            cell.row
-        );
-        updated = updated.replacen(&old_ref, &new_ref, 1);
-        if first_shifted_column.get(&cell.row) == Some(&cell.column) {
-            rewritten.push_str(&format!(
-                "<td class=\"hcd-cell hcd-empty\" data-hcd-column=\"{before_column}\"></td>"
-            ));
-        }
-        rewritten.push_str(&updated);
-        cursor = cell.end;
-    }
-    rewritten.push_str(&html[cursor..]);
-    *html = rewritten;
-    for entry in &mut source_map.entries {
-        if entry.source.node_kind != "cell" {
-            continue;
-        }
-        let Some(reference) = entry.source.paragraph_id.clone() else {
-            continue;
-        };
-        let Some((row, column)) = xlsx_cell_coordinates(&reference) else {
-            return Err(HcdError::InvalidBundle(
-                "XLSX mapped cell has invalid address".to_string(),
-            ));
-        };
-        if column < before_column {
-            continue;
-        }
-        if !entry.source.created_in_hcd && entry.source.source_cell_ref.is_none() {
-            entry.source.source_cell_ref = Some(reference);
-        }
-        entry.source.paragraph_id = Some(format!("{}{}", xlsx_column_name(column + 1), row));
-    }
-    grid.column_start = Some(if old_start >= before_column {
-        old_start + 1
-    } else {
-        old_start
-    });
-    grid.column_end = Some(old_end + 1);
-    Ok(())
-}
-
-fn delete_xlsx_column_window(
-    html: &mut String,
-    source_map: &mut crate::ChunkSourceMap,
-    descriptor: &mut crate::ChunkDescriptor,
-    deleted_column: u32,
-) -> Result<Vec<String>, HcdError> {
-    rewrite_xlsx_formula_references(html, crate::FormulaDeletion::Column(deleted_column))?;
-    rewrite_xlsx_merge_refs(html, XlsxMergeShift::DeleteColumn(deleted_column))?;
-    delete_xlsx_column_widths(html, deleted_column)?;
-    let grid = descriptor.grid.as_mut().ok_or_else(|| {
-        HcdError::InvalidBundle("XLSX column window has no grid address".to_string())
-    })?;
-    let old_start = grid
-        .column_start
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX column window has no start".to_string()))?;
-    let old_end = grid
-        .column_end
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX column window has no end".to_string()))?;
-    if old_start > old_end || old_end < deleted_column {
-        return Err(HcdError::InvalidBundle(
-            "XLSX column window range is invalid".to_string(),
-        ));
-    }
-    let mut rewritten = String::with_capacity(html.len());
-    let mut cursor = 0usize;
-    for cell in xlsx_cells(html)? {
-        if cell.start < cursor {
-            return Err(HcdError::InvalidBundle(
-                "XLSX cell spans overlap".to_string(),
-            ));
-        }
-        rewritten.push_str(&html[cursor..cell.start]);
-        if cell.column < deleted_column {
-            rewritten.push_str(&html[cell.start..cell.end]);
-        } else if cell.column == deleted_column {
-            if let Some((start_row, start_column, end_row, end_column)) = cell.merged_range {
-                if start_column == deleted_column {
-                    let range = format!(
-                        "{}{}:{}{}",
-                        xlsx_column_name(start_column),
-                        start_row,
-                        xlsx_column_name(end_column),
-                        end_row
-                    );
-                    let colspan = end_column - start_column + 1;
-                    let rowspan = end_row - start_row + 1;
-                    rewritten.push_str(&format!(
-                        "<td class=\"hcd-cell hcd-empty\" data-hcd-column=\"{start_column}\" data-hcd-merge=\"{range}\" colspan=\"{colspan}\" rowspan=\"{rowspan}\"></td>"
-                    ));
-                }
-            }
-        } else if cell.column > deleted_column {
-            let original = &html[cell.start..cell.end];
-            let old_column = format!(" data-hcd-column=\"{}\"", cell.column);
-            if !original.contains(&old_column) {
-                return Err(HcdError::InvalidBundle(
-                    "XLSX cell column differs from its address".to_string(),
-                ));
-            }
-            let mut updated = original.replacen(
-                &old_column,
-                &format!(" data-hcd-column=\"{}\"", cell.column - 1),
-                1,
-            );
-            let old_ref = format!(
-                " data-hcd-cell=\"{}{}\"",
-                xlsx_column_name(cell.column),
-                cell.row
-            );
-            if original.contains(&old_ref) {
-                updated = updated.replacen(
-                    &old_ref,
-                    &format!(
-                        " data-hcd-cell=\"{}{}\"",
-                        xlsx_column_name(cell.column - 1),
-                        cell.row
-                    ),
-                    1,
-                );
-            }
-            rewritten.push_str(&updated);
-        }
-        cursor = cell.end;
-    }
-    rewritten.push_str(&html[cursor..]);
-    *html = rewritten;
-    let mut removed = Vec::new();
-    source_map.entries.retain_mut(|entry| {
-        if entry.source.node_kind != "cell" {
-            return true;
-        }
-        let Some(reference) = entry.source.paragraph_id.clone() else {
-            return true;
-        };
-        let Some((row, column)) = xlsx_cell_coordinates(&reference) else {
-            return true;
-        };
-        if column == deleted_column {
-            removed.push(entry.node_id.clone());
-            return false;
-        }
-        if column > deleted_column {
-            if !entry.source.created_in_hcd && entry.source.source_cell_ref.is_none() {
-                entry.source.source_cell_ref = Some(reference);
-            }
-            entry.source.paragraph_id = Some(format!("{}{}", xlsx_column_name(column - 1), row));
-        }
-        true
-    });
-    let remaining = xlsx_cells(html)?;
-    grid.column_start = remaining.iter().map(|cell| cell.column).min();
-    grid.column_end = remaining.iter().map(|cell| cell.column).max();
-    descriptor.node_count = source_map.entries.len();
-    descriptor.first_node_id = source_map
-        .entries
-        .first()
-        .map(|entry| entry.node_id.clone());
-    descriptor.last_node_id = source_map.entries.last().map(|entry| entry.node_id.clone());
-    descriptor.node_bloom = node_bloom(
-        source_map
-            .entries
-            .iter()
-            .map(|entry| entry.node_id.as_str()),
-    );
-    Ok(removed)
-}
-
-fn shift_xlsx_column_widths(html: &mut String, before_column: u32) -> Result<(), HcdError> {
-    let mut spans = Vec::new();
-    let mut cursor = 0;
-    while let Some(relative) = html[cursor..].find("<col ") {
-        let start = cursor + relative;
-        let end = html[start..]
-            .find("/>")
-            .map(|offset| start + offset + 2)
-            .ok_or_else(|| {
-                HcdError::InvalidBundle("XLSX column width tag is not closed".to_string())
-            })?;
-        let tag = &html[start..end];
-        let first = xlsx_attribute(tag, "data-hcd-column-start")
-            .and_then(|value| value.parse::<u32>().ok())
-            .ok_or_else(|| {
-                HcdError::InvalidBundle("XLSX column width start is invalid".to_string())
-            })?;
-        let last = xlsx_attribute(tag, "data-hcd-column-end")
-            .and_then(|value| value.parse::<u32>().ok())
-            .ok_or_else(|| {
-                HcdError::InvalidBundle("XLSX column width end is invalid".to_string())
-            })?;
-        if first == 0 || first > last || last > 16_384 {
-            return Err(HcdError::InvalidBundle(
-                "XLSX column width range is invalid".to_string(),
-            ));
-        }
-        if xlsx_attribute(tag, "data-hcd-hidden") == Some("true") {
-            return Err(HcdError::Unsupported(
-                "column insertion with hidden worksheet columns is not supported".to_string(),
-            ));
-        }
-        if last >= before_column {
-            if last == 16_384 {
-                return Err(HcdError::ResourceLimit(
-                    "XLSX column width range exceeds the worksheet".to_string(),
-                ));
-            }
-            let width = xlsx_attribute(tag, "data-hcd-width")
-                .map(str::parse::<f64>)
-                .transpose()
-                .map_err(|_| HcdError::InvalidBundle("XLSX column width is invalid".to_string()))?;
-            let hidden = xlsx_attribute(tag, "data-hcd-hidden") == Some("true");
-            let edited = xlsx_attribute(tag, "data-hcd-width-edited") == Some("true");
-            let replacement = if first >= before_column {
-                hcd_column_tag(first + 1, last + 1, width, hidden, edited)
-            } else {
-                format!(
-                    "{}{}",
-                    hcd_column_tag(first, before_column - 1, width, hidden, edited),
-                    hcd_column_tag(before_column + 1, last + 1, width, hidden, edited)
-                )
-            };
-            spans.push((start, end, replacement));
-        }
-        cursor = end;
-    }
-    for (start, end, replacement) in spans.into_iter().rev() {
-        html.replace_range(start..end, &replacement);
-    }
-    Ok(())
-}
-
-fn delete_xlsx_column_widths(html: &mut String, deleted_column: u32) -> Result<(), HcdError> {
-    let mut spans = Vec::new();
-    let mut cursor = 0;
-    while let Some(relative) = html[cursor..].find("<col ") {
-        let start = cursor + relative;
-        let end = html[start..]
-            .find('>')
-            .map(|offset| start + offset + 1)
-            .ok_or_else(|| {
-                HcdError::InvalidBundle("XLSX column width tag is not closed".to_string())
-            })?;
-        let tag = &html[start..end];
-        let first = xlsx_attribute(tag, "data-hcd-column-start")
-            .and_then(|value| value.parse::<u32>().ok());
-        let last =
-            xlsx_attribute(tag, "data-hcd-column-end").and_then(|value| value.parse::<u32>().ok());
-        if let (Some(first), Some(last)) = (first, last) {
-            if first > last {
-                return Err(HcdError::InvalidBundle(
-                    "XLSX column width range is reversed".to_string(),
-                ));
-            }
-            let shifted = if deleted_column < first {
-                Some((first - 1, last - 1))
-            } else if deleted_column > last {
-                Some((first, last))
-            } else if first == last {
-                None
-            } else {
-                Some((first, last - 1))
-            };
-            let mut replacement = tag.to_string();
-            if let Some((next_first, next_last)) = shifted {
-                for (name, old, new) in [
-                    ("data-hcd-column-start", first, next_first),
-                    ("data-hcd-column-end", last, next_last),
-                    ("span", last - first + 1, next_last - next_first + 1),
-                ] {
-                    replacement = replacement.replacen(
-                        &format!(" {name}=\"{old}\""),
-                        &format!(" {name}=\"{new}\""),
-                        1,
-                    );
-                }
-            } else {
-                replacement.clear();
-            }
-            spans.push((start, end, replacement));
-        }
-        cursor = end;
-    }
-    for (start, end, replacement) in spans.into_iter().rev() {
-        html.replace_range(start..end, &replacement);
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum XlsxVisualShift {
-    InsertRow(u32),
-    InsertColumn(u32),
-    DeleteRow(u32),
-    DeleteColumn(u32),
-}
-
-fn shift_xlsx_visual_anchor(
-    html: &mut String,
-    descriptor: &mut crate::ChunkDescriptor,
-    shift: XlsxVisualShift,
-) -> Result<(), HcdError> {
-    let marker = " data-hcd-anchor-from=\"";
-    let offset = html.find(marker).ok_or_else(|| {
-        HcdError::Unsupported("XLSX drawing has no editable cell anchor".to_string())
-    })?;
-    let start = html[..offset]
-        .rfind('<')
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX drawing anchor has no element".to_string()))?;
-    let end = html[offset..]
-        .find('>')
-        .map(|relative| offset + relative)
-        .ok_or_else(|| {
-            HcdError::InvalidBundle("XLSX drawing anchor tag is not closed".to_string())
-        })?;
-    let tag = &html[start..=end];
-    let mut shifted = Vec::new();
-    for name in ["data-hcd-anchor-from", "data-hcd-anchor-to"] {
-        let reference = xlsx_attribute(tag, name).ok_or_else(|| {
-            HcdError::Unsupported(
-                "XLSX drawing requires two cell markers for structural deletion".to_string(),
-            )
-        })?;
-        let (row, column) = xlsx_cell_coordinates(reference).ok_or_else(|| {
-            HcdError::InvalidBundle("XLSX drawing has an invalid cell marker".to_string())
-        })?;
-        let next = match shift {
-            XlsxVisualShift::InsertRow(at) => (
-                if row >= at {
-                    row.checked_add(1)
-                        .filter(|value| *value <= 1_048_576)
-                        .ok_or_else(|| {
-                            HcdError::ResourceLimit(
-                                "XLSX drawing row exceeds worksheet".to_string(),
-                            )
-                        })?
-                } else {
-                    row
-                },
-                column,
-            ),
-            XlsxVisualShift::InsertColumn(at) => (
-                row,
-                if column >= at {
-                    column
-                        .checked_add(1)
-                        .filter(|value| *value <= 16_384)
-                        .ok_or_else(|| {
-                            HcdError::ResourceLimit(
-                                "XLSX drawing column exceeds worksheet".to_string(),
-                            )
-                        })?
-                } else {
-                    column
-                },
-            ),
-            XlsxVisualShift::DeleteRow(at) => (if row > at { row - 1 } else { row }, column),
-            XlsxVisualShift::DeleteColumn(at) => {
-                (row, if column > at { column - 1 } else { column })
-            }
-        };
-        shifted.push((
-            name,
-            format!("{}{}", xlsx_column_name(next.1), next.0),
-            next,
-        ));
-    }
-    for (name, value, _) in &shifted {
-        let end = html[start..]
-            .find('>')
-            .map(|relative| start + relative)
-            .ok_or_else(|| {
-                HcdError::InvalidBundle("XLSX drawing anchor tag is not closed".to_string())
-            })?;
-        set_attribute_in_range(html, start, end, name, value)?;
-    }
-    let grid = descriptor
-        .grid
-        .as_mut()
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX drawing has no grid address".to_string()))?;
-    grid.row_start = Some(u64::from(shifted[0].2 .0));
-    grid.row_end = Some(u64::from(shifted[1].2 .0));
-    grid.column_start = Some(shifted[0].2 .1);
-    grid.column_end = Some(shifted[1].2 .1);
-    Ok(())
-}
-
-fn remove_empty_xlsx_tail_row(html: &mut String, row: u32) -> Result<(), HcdError> {
-    let old_end = format!(" data-hcd-row-end=\"{row}\"");
-    let section_end = html
-        .find('>')
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX sheet section is not closed".to_string()))?;
-    let marker = html[..section_end].find(&old_end).ok_or_else(|| {
-        HcdError::InvalidBundle("XLSX sheet row end disagrees with its descriptor".to_string())
-    })?;
-    let body_end = html
-        .find("</tbody>")
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX sheet has no table body".to_string()))?;
-    let last_row_start = html[..body_end]
-        .rfind("<tr ")
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX sheet has no last row".to_string()))?;
-    if html[last_row_start..body_end] != format!("<tr data-hcd-row=\"{row}\"></tr>") {
-        return Err(HcdError::PreconditionFailed(
-            "XLSX last row contains cells or formatting; only an empty appended row can be removed"
-                .to_string(),
-        ));
-    }
-    html.replace_range(last_row_start..body_end, "");
-    html.replace_range(
-        marker..marker + old_end.len(),
-        &format!(" data-hcd-row-end=\"{}\"", row - 1),
-    );
-    Ok(())
-}
-
-#[derive(Clone)]
-struct XlsxCellSpan {
-    start: usize,
-    end: usize,
-    tag_end: usize,
-    row: u32,
-    column: u32,
-    has_node: bool,
-    merged_range: Option<(u32, u32, u32, u32)>,
-}
-
-fn xlsx_column_name(mut column: u32) -> String {
-    let mut output = Vec::new();
-    while column > 0 {
-        column -= 1;
-        output.push(b'A' + (column % 26) as u8);
-        column /= 26;
-    }
-    output.reverse();
-    String::from_utf8(output).expect("ASCII column name")
-}
-
-fn xlsx_cell_coordinates(reference: &str) -> Option<(u32, u32)> {
-    let mut row = 0u32;
-    let mut column = 0u32;
-    let mut saw_row = false;
-    for byte in reference.bytes() {
-        if byte.is_ascii_uppercase() && !saw_row {
-            column = column
-                .checked_mul(26)?
-                .checked_add(u32::from(byte - b'A' + 1))?;
-        } else if byte.is_ascii_digit() && column > 0 {
-            saw_row = true;
-            row = row.checked_mul(10)?.checked_add(u32::from(byte - b'0'))?;
-        } else {
-            return None;
-        }
-    }
-    (saw_row && (1..=1_048_576).contains(&row) && (1..=16_384).contains(&column))
-        .then_some((row, column))
-}
-
-fn xlsx_merge_coordinates(reference: &str) -> Option<(u32, u32, u32, u32)> {
-    let (first, last) = reference.split_once(':')?;
-    let (start_row, start_column) = xlsx_cell_coordinates(first)?;
-    let (end_row, end_column) = xlsx_cell_coordinates(last)?;
-    (start_row <= end_row && start_column <= end_column).then_some((
-        start_row,
-        start_column,
-        end_row,
-        end_column,
-    ))
-}
-
-#[derive(Clone, Copy)]
-enum XlsxMergeShift {
-    InsertRow(u32),
-    DeleteRow(u32),
-    InsertColumn(u32),
-    DeleteColumn(u32),
-}
-
-fn shifted_xlsx_merge(
-    (start_row, start_column, end_row, end_column): (u32, u32, u32, u32),
-    shift: XlsxMergeShift,
-) -> Result<Option<(u32, u32, u32, u32)>, HcdError> {
-    let crossing = || {
-        HcdError::Unsupported(
-            "XLSX grid shift intersects a merged range; split that merge first".to_string(),
-        )
-    };
-    let overflow =
-        || HcdError::ResourceLimit("XLSX merged range exceeds the worksheet limit".to_string());
-    match shift {
-        XlsxMergeShift::InsertRow(before) if before > start_row && before <= end_row => {
-            Err(crossing())
-        }
-        XlsxMergeShift::InsertRow(before) if before <= start_row => Ok(Some((
-            start_row
-                .checked_add(1)
-                .filter(|row| *row <= 1_048_576)
-                .ok_or_else(overflow)?,
-            start_column,
-            end_row
-                .checked_add(1)
-                .filter(|row| *row <= 1_048_576)
-                .ok_or_else(overflow)?,
-            end_column,
-        ))),
-        XlsxMergeShift::DeleteRow(row) if (start_row..=end_row).contains(&row) => Ok((end_row
-            > start_row
-            && (end_row > start_row + 1 || start_column < end_column))
-            .then_some((start_row, start_column, end_row - 1, end_column))),
-        XlsxMergeShift::DeleteRow(row) if row < start_row => {
-            Ok(Some((start_row - 1, start_column, end_row - 1, end_column)))
-        }
-        XlsxMergeShift::InsertColumn(before) if before > start_column && before <= end_column => {
-            Ok(Some((
-                start_row,
-                start_column,
-                end_row,
-                end_column
-                    .checked_add(1)
-                    .filter(|col| *col <= 16_384)
-                    .ok_or_else(overflow)?,
-            )))
-        }
-        XlsxMergeShift::InsertColumn(before) if before <= start_column => Ok(Some((
-            start_row,
-            start_column
-                .checked_add(1)
-                .filter(|col| *col <= 16_384)
-                .ok_or_else(overflow)?,
-            end_row,
-            end_column
-                .checked_add(1)
-                .filter(|col| *col <= 16_384)
-                .ok_or_else(overflow)?,
-        ))),
-        XlsxMergeShift::DeleteColumn(column) if (start_column..=end_column).contains(&column) => {
-            Ok((end_column > start_column
-                && (end_column > start_column + 1 || start_row < end_row))
-                .then_some((start_row, start_column, end_row, end_column - 1)))
-        }
-        XlsxMergeShift::DeleteColumn(column) if column < start_column => {
-            Ok(Some((start_row, start_column - 1, end_row, end_column - 1)))
-        }
-        _ => Ok(Some((start_row, start_column, end_row, end_column))),
-    }
-}
-
-fn check_xlsx_merge_shift(html: &str, shift: XlsxMergeShift) -> Result<(), HcdError> {
-    for range in xlsx_cells(html)?
-        .into_iter()
-        .filter_map(|cell| cell.merged_range)
-    {
-        shifted_xlsx_merge(range, shift)?;
-    }
-    Ok(())
-}
-
-fn rewrite_xlsx_merge_refs(html: &mut String, shift: XlsxMergeShift) -> Result<(), HcdError> {
-    for cell in xlsx_cells(html)?.into_iter().rev() {
-        let Some(range) = cell.merged_range else {
-            continue;
-        };
-        let shifted = shifted_xlsx_merge(range, shift)?;
-        if shifted == Some(range) {
-            continue;
-        }
-        let old = format!(
-            "{}{}:{}{}",
-            xlsx_column_name(range.1),
-            range.0,
-            xlsx_column_name(range.3),
-            range.2
-        );
-        let mut tag = html[cell.start..=cell.tag_end].to_string();
-        let needle = format!(" data-hcd-merge=\"{old}\"");
-        if !tag.contains(&needle) {
-            return Err(HcdError::InvalidBundle(
-                "XLSX merged cell lost its range attribute".to_string(),
-            ));
-        }
-        if let Some(shifted) = shifted {
-            let new = format!(
-                "{}{}:{}{}",
-                xlsx_column_name(shifted.1),
-                shifted.0,
-                xlsx_column_name(shifted.3),
-                shifted.2
-            );
-            tag = tag.replacen(&needle, &format!(" data-hcd-merge=\"{new}\""), 1);
-            for (name, value) in [
-                ("colspan", shifted.3 - shifted.1 + 1),
-                ("rowspan", shifted.2 - shifted.0 + 1),
-            ] {
-                if let Some(old_value) = xlsx_attribute(&tag, name).map(str::to_string) {
-                    tag = tag.replacen(
-                        &format!(" {name}=\"{old_value}\""),
-                        &format!(" {name}=\"{value}\""),
-                        1,
-                    );
-                }
-            }
-        } else {
-            tag = tag.replacen(&needle, "", 1);
-            for name in ["colspan", "rowspan"] {
-                if let Some(value) = xlsx_attribute(&tag, name).map(str::to_string) {
-                    tag = tag.replacen(&format!(" {name}=\"{value}\""), "", 1);
-                }
-            }
-        }
-        html.replace_range(cell.start..=cell.tag_end, &tag);
-    }
-    Ok(())
-}
-
-fn rewrite_xlsx_formula_references(
-    html: &mut String,
-    deletion: crate::FormulaDeletion,
-) -> Result<(), HcdError> {
-    for cell in xlsx_cells(html)?.into_iter().rev() {
-        let tag = &html[cell.start..=cell.tag_end];
-        if xlsx_attribute(tag, "data-hcd-formula") != Some("true") {
-            continue;
-        }
-        let expression = xlsx_attribute(tag, "data-hcd-formula-expression")
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                HcdError::Unsupported(
-                    "XLSX structural deletion requires a safely parsed formula expression"
-                        .to_string(),
-                )
-            })?;
-        let decoded = quick_xml::escape::unescape(expression).map_err(|error| {
-            HcdError::InvalidBundle(format!("XLSX formula HTML entity: {error}"))
-        })?;
-        let shifted = crate::delete_formula_references(&decoded, deletion)?;
-        if shifted != decoded {
-            set_attribute_in_range(
-                html,
-                cell.start,
-                cell.tag_end,
-                "data-hcd-formula-expression",
-                &shifted,
-            )?;
-            let new_end = html[cell.start..]
-                .find('>')
-                .map(|offset| cell.start + offset)
-                .ok_or_else(|| {
-                    HcdError::InvalidBundle("XLSX formula cell is not closed".to_string())
-                })?;
-            set_attribute_in_range(html, cell.start, new_end, "data-hcd-formula-edited", "true")?;
-        }
-    }
-    Ok(())
-}
-
-fn rewrite_xlsx_inserted_formula_references(
-    html: &mut String,
-    insertion: crate::FormulaInsertion,
-) -> Result<(), HcdError> {
-    for cell in xlsx_cells(html)?.into_iter().rev() {
-        let tag = &html[cell.start..=cell.tag_end];
-        if xlsx_attribute(tag, "data-hcd-formula") != Some("true") {
-            continue;
-        }
-        let expression = xlsx_attribute(tag, "data-hcd-formula-expression")
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                HcdError::Unsupported(
-                    "XLSX structural insertion requires a safely parsed formula expression"
-                        .to_string(),
-                )
-            })?;
-        let decoded = quick_xml::escape::unescape(expression).map_err(|error| {
-            HcdError::InvalidBundle(format!("XLSX formula HTML entity: {error}"))
-        })?;
-        let shifted = crate::insert_formula_references(&decoded, insertion)?;
-        if shifted != decoded {
-            set_attribute_in_range(
-                html,
-                cell.start,
-                cell.tag_end,
-                "data-hcd-formula-expression",
-                &shifted,
-            )?;
-            let new_end = html[cell.start..]
-                .find('>')
-                .map(|offset| cell.start + offset)
-                .ok_or_else(|| {
-                    HcdError::InvalidBundle("XLSX formula cell is not closed".to_string())
-                })?;
-            set_attribute_in_range(html, cell.start, new_end, "data-hcd-formula-edited", "true")?;
-        }
-    }
-    Ok(())
-}
-
-fn xlsx_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+fn drop_tag_attribute(tag: &mut String, name: &str) -> Result<(), HcdError> {
     let marker = format!(" {name}=\"");
-    let start = tag.find(&marker)? + marker.len();
-    let end = tag[start..].find('"')? + start;
-    Some(&tag[start..end])
-}
-
-fn set_xlsx_formula(
-    html: &mut String,
-    node_id: &str,
-    formula: &str,
-    literal_editable: bool,
-) -> Result<(), HcdError> {
-    let marker = format!("data-hcd-id=\"{node_id}\"");
-    let node_start = html.find(&marker).ok_or_else(|| {
-        HcdError::InvalidBundle(format!("XLSX formula node {node_id} is missing"))
-    })?;
-    let cell_start = html[..node_start].rfind("<td ").ok_or_else(|| {
-        HcdError::InvalidBundle("XLSX formula node has no containing cell".to_string())
-    })?;
-    let cell_end = html[cell_start..]
-        .find('>')
-        .map(|offset| cell_start + offset)
-        .ok_or_else(|| {
-            HcdError::InvalidBundle("XLSX formula cell tag is not closed".to_string())
-        })?;
-    let tag = &html[cell_start..=cell_end];
-    let existing_formula = xlsx_attribute(tag, "data-hcd-formula") == Some("true");
-    if cell_end > node_start
-        || (existing_formula && xlsx_attribute(tag, "data-hcd-formula-editable") != Some("true"))
-        || (!existing_formula && !literal_editable)
-    {
-        return Err(HcdError::Unsupported(
-            "XLSX cell is shared, array based, or otherwise read-only".to_string(),
-        ));
-    }
-    if !existing_formula {
-        for (name, value) in [
-            ("data-hcd-formula", "true"),
-            ("data-hcd-formula-editable", "true"),
-            ("data-hcd-raw-value", ""),
-        ] {
-            let cell_end = html[cell_start..]
-                .find('>')
-                .map(|offset| cell_start + offset)
-                .ok_or_else(|| {
-                    HcdError::InvalidBundle("XLSX formula cell tag is not closed".to_string())
-                })?;
-            set_attribute_in_range(html, cell_start, cell_end, name, value)?;
-        }
-    }
-    let cell_end = html[cell_start..]
-        .find('>')
-        .map(|offset| cell_start + offset)
-        .ok_or_else(|| {
-            HcdError::InvalidBundle("XLSX formula cell tag is not closed".to_string())
-        })?;
-    set_attribute_in_range(
-        html,
-        cell_start,
-        cell_end,
-        "data-hcd-formula-expression",
-        formula,
-    )?;
-    let cell_end = html[cell_start..]
-        .find('>')
-        .map(|offset| cell_start + offset)
-        .ok_or_else(|| {
-            HcdError::InvalidBundle("XLSX formula cell tag is not closed".to_string())
-        })?;
-    set_attribute_in_range(
-        html,
-        cell_start,
-        cell_end,
-        "data-hcd-formula-edited",
-        "true",
-    )?;
+    let Some(start) = tag.find(&marker) else {
+        return Ok(());
+    };
+    let value_start = start + marker.len();
+    let value_end = tag[value_start..]
+        .find('"')
+        .ok_or_else(|| HcdError::InvalidBundle(format!("attribute {name} is not closed")))?;
+    tag.replace_range(start..value_start + value_end + 1, "");
     Ok(())
 }
 
-fn set_xlsx_formula_value(html: &mut String, node_id: &str) -> Result<(), HcdError> {
-    let marker = format!("data-hcd-id=\"{node_id}\"");
-    let node_start = html.find(&marker).ok_or_else(|| {
-        HcdError::InvalidBundle(format!("XLSX formula node {node_id} is missing"))
-    })?;
-    let cell_start = html[..node_start].rfind("<td ").ok_or_else(|| {
-        HcdError::InvalidBundle("XLSX formula node has no containing cell".to_string())
-    })?;
-    let cell_end = html[cell_start..]
-        .find('>')
-        .map(|offset| cell_start + offset)
-        .ok_or_else(|| {
-            HcdError::InvalidBundle("XLSX formula cell tag is not closed".to_string())
-        })?;
-    let tag = &html[cell_start..=cell_end];
-    if cell_end > node_start
-        || xlsx_attribute(tag, "data-hcd-formula") != Some("true")
-        || xlsx_attribute(tag, "data-hcd-formula-editable") != Some("true")
-    {
-        return Err(HcdError::Unsupported(
-            "XLSX formula is shared, array based, or otherwise read-only".to_string(),
-        ));
-    }
-    for (name, value) in [
-        ("data-hcd-formula", "false"),
-        ("data-hcd-formula-editable", "false"),
-        ("data-hcd-formula-expression", ""),
-        ("data-hcd-formula-edited", "false"),
-        ("data-hcd-raw-value", ""),
-    ] {
-        let cell_end = html[cell_start..]
-            .find('>')
-            .map(|offset| cell_start + offset)
-            .ok_or_else(|| {
-                HcdError::InvalidBundle("XLSX formula cell tag is not closed".to_string())
-            })?;
-        set_attribute_in_range(html, cell_start, cell_end, name, value)?;
-    }
-    Ok(())
+/// One character of the lowercase hex a node id is made of.
+fn is_node_id_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
 }
 
-fn valid_xlsx_number(value: &str) -> bool {
-    let Some(number) = value
-        .parse::<f64>()
-        .ok()
-        .filter(|number| number.is_finite())
-    else {
-        return false;
-    };
-    !value.is_empty()
-        && value.len() <= 64
-        && value.bytes().any(|byte| byte.is_ascii_digit())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.' | b'e' | b'E'))
-        && (number.fract() != 0.0 || number.abs() <= 9_007_199_254_740_991.0)
+fn unescape_attribute(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
-fn set_xlsx_raw_value(html: &mut String, node_id: &str, value: &str) -> Result<(), HcdError> {
-    let marker = format!("data-hcd-id=\"{node_id}\"");
-    let node_start = html
-        .find(&marker)
-        .ok_or_else(|| HcdError::InvalidBundle(format!("XLSX cell node {node_id} is missing")))?;
-    let cell_start = html[..node_start].rfind("<td ").ok_or_else(|| {
-        HcdError::InvalidBundle("XLSX cell node has no containing cell".to_string())
-    })?;
-    let cell_end = html[cell_start..]
-        .find('>')
-        .map(|offset| cell_start + offset)
-        .ok_or_else(|| HcdError::InvalidBundle("XLSX cell tag is not closed".to_string()))?;
-    if cell_end > node_start {
-        return Err(HcdError::InvalidBundle(
-            "XLSX cell tag overlaps node".to_string(),
-        ));
-    }
-    if xlsx_attribute(&html[cell_start..=cell_end], "data-hcd-formula") == Some("true") {
-        return Err(HcdError::Unsupported(
-            "XLSX formula must use a formula conversion operation".to_string(),
-        ));
-    }
-    set_attribute_in_range(html, cell_start, cell_end, "data-hcd-raw-value", value)
-}
-
-fn xlsx_cells(html: &str) -> Result<Vec<XlsxCellSpan>, HcdError> {
-    let mut result = Vec::new();
-    let mut cursor = 0usize;
-    while let Some(relative) = html[cursor..].find("<tr ") {
-        let row_start = cursor + relative;
-        let tag_end = html[row_start..]
-            .find('>')
-            .map(|offset| row_start + offset)
-            .ok_or_else(|| HcdError::InvalidBundle("XLSX row tag is not closed".to_string()))?;
-        let row = xlsx_attribute(&html[row_start..=tag_end], "data-hcd-row")
-            .and_then(|value| value.parse::<u32>().ok())
-            .ok_or_else(|| HcdError::InvalidBundle("XLSX row has no row number".to_string()))?;
-        let row_end = html[tag_end + 1..]
-            .find("</tr>")
-            .map(|offset| tag_end + 1 + offset)
-            .ok_or_else(|| HcdError::InvalidBundle("XLSX row is not closed".to_string()))?;
-        let mut cell_cursor = tag_end + 1;
-        while let Some(relative) = html[cell_cursor..row_end].find("<td ") {
-            let start = cell_cursor + relative;
-            let tag_end = html[start..row_end]
-                .find('>')
-                .map(|offset| start + offset)
-                .ok_or_else(|| {
-                    HcdError::InvalidBundle("XLSX cell tag is not closed".to_string())
-                })?;
-            let end = html[tag_end + 1..row_end]
-                .find("</td>")
-                .map(|offset| tag_end + 1 + offset + "</td>".len())
-                .ok_or_else(|| HcdError::InvalidBundle("XLSX cell is not closed".to_string()))?;
-            let tag = &html[start..=tag_end];
-            let column = xlsx_attribute(tag, "data-hcd-column")
-                .and_then(|value| value.parse::<u32>().ok())
-                .ok_or_else(|| HcdError::InvalidBundle("XLSX cell has no column".to_string()))?;
-            let merged_range = xlsx_attribute(tag, "data-hcd-merge")
-                .map(|value| {
-                    xlsx_merge_coordinates(value).ok_or_else(|| {
-                        HcdError::InvalidBundle(format!("invalid XLSX merge range {value}"))
-                    })
-                })
-                .transpose()?;
-            result.push(XlsxCellSpan {
-                start,
-                end,
-                tag_end,
-                row,
-                column,
-                has_node: html[start..end].contains("data-hcd-id=\""),
-                merged_range,
-            });
-            cell_cursor = end;
-        }
-        cursor = row_end + "</tr>".len();
-    }
-    Ok(result)
-}
-
-fn insert_xlsx_cell(
-    html: &mut String,
-    source_map: &mut crate::ChunkSourceMap,
-    document_id: &str,
-    insertion: &XlsxCellInsertion,
-    grid_generation: Option<u64>,
-) -> Result<(String, String), HcdError> {
-    let cells = xlsx_cells(html)?;
-    let cell = cells
-        .iter()
-        .find(|cell| cell.row == insertion.row && cell.column == insertion.column);
-    if cells
-        .iter()
-        .filter_map(|cell| cell.merged_range)
-        .any(|range| {
-            range.0 <= insertion.row
-                && range.2 >= insertion.row
-                && range.1 <= insertion.column
-                && range.3 >= insertion.column
-        })
-    {
-        return Err(HcdError::PreconditionFailed(
-            "XLSX cell is inside a merged range".to_string(),
-        ));
-    }
-    if let Some(cell) = cell {
-        if cell.has_node || !html[cell.tag_end + 1..cell.end - 5].trim().is_empty() {
-            return Err(HcdError::PreconditionFailed(
-                "XLSX cell is no longer empty".to_string(),
-            ));
+fn set_tag_attribute(tag: &mut String, name: &str, value: &str) {
+    let marker = format!(" {name}=\"");
+    let escaped = escape_attribute(value);
+    if let Some(start) = tag.find(&marker) {
+        let value_start = start + marker.len();
+        if let Some(end) = tag[value_start..].find('"') {
+            tag.replace_range(value_start..value_start + end, &escaped);
+            return;
         }
     }
-    let reference = format!("{}{}", xlsx_column_name(insertion.column), insertion.row);
-    if source_map
-        .entries
-        .iter()
-        .any(|entry| entry.source.paragraph_id.as_deref() == Some(reference.as_str()))
-    {
-        return Err(HcdError::PreconditionFailed(format!(
-            "XLSX cell {reference} is already mapped"
-        )));
-    }
-    let part = source_map
-        .entries
-        .first()
-        .map(|entry| entry.source.part.clone())
-        .ok_or_else(|| {
-            HcdError::Unsupported(
-                "XLSX blank cell creation requires a window with mapped cells".to_string(),
-            )
-        })?;
-    let node_id = if let Some(generation) = grid_generation {
-        stable_node_id(&[
-            document_id,
-            &part,
-            "cell-created",
-            &reference,
-            &generation.to_string(),
-        ])
-    } else {
-        stable_node_id(&[document_id, &part, "cell", &reference])
-    };
-    if source_map
-        .entries
-        .iter()
-        .any(|entry| entry.node_id == node_id)
-    {
-        return Err(HcdError::PreconditionFailed(format!(
-            "XLSX node {node_id} already exists"
-        )));
-    }
-    let node_hash = hash_bytes(insertion.text.as_bytes());
-    let formula_attrs = if insertion.formula {
-        format!(" data-hcd-formula=\"true\" data-hcd-formula-editable=\"true\" data-hcd-formula-expression=\"{}\" data-hcd-formula-edited=\"true\"", escape_attribute(&insertion.text))
-    } else {
-        String::new()
-    };
-    let replacement = format!(
-        "<td class=\"hcd-cell\" data-hcd-cell=\"{reference}\" data-hcd-column=\"{}\"{formula_attrs}><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{}</span></td>",
-        insertion.column, escape_text(&insertion.text)
-    );
-    if let Some(cell) = cell {
-        html.replace_range(cell.start..cell.end, &replacement);
-    } else {
-        let row_marker = format!("data-hcd-row=\"{}\"", insertion.row);
-        let row_tag = html.find(&row_marker).ok_or_else(|| {
-            HcdError::Unsupported("XLSX cell requires an existing HCD row".to_string())
-        })?;
-        let row_start = html[..row_tag].rfind("<tr ").ok_or_else(|| {
-            HcdError::InvalidBundle("XLSX row opening tag is missing".to_string())
-        })?;
-        let row_end = html[row_tag..]
-            .find("</tr>")
-            .map(|offset| row_tag + offset)
-            .ok_or_else(|| {
-                HcdError::InvalidBundle("XLSX row closing tag is missing".to_string())
-            })?;
-        let last_column = cells
-            .iter()
-            .filter(|cell| cell.row == insertion.row)
-            .map(|cell| {
-                let tag = &html[cell.start..=cell.tag_end];
-                let span = xlsx_attribute(tag, "colspan")
-                    .and_then(|value| value.parse::<u32>().ok())
-                    .unwrap_or(1);
-                cell.column.saturating_add(span.saturating_sub(1))
-            })
-            .max()
-            .unwrap_or(0);
-        if insertion.column <= last_column || insertion.column - last_column > 256 {
-            return Err(HcdError::Unsupported(
-                "XLSX first edit outside the bounded row tail".to_string(),
-            ));
-        }
-        if row_start > row_tag
-            || cells
-                .iter()
-                .any(|cell| cell.row == insertion.row && cell.end > row_end)
-        {
-            return Err(HcdError::InvalidBundle(
-                "XLSX row has invalid cell bounds".to_string(),
-            ));
-        }
-        let mut appended = String::new();
-        for column in last_column + 1..insertion.column {
-            appended.push_str(&format!(
-                "<td class=\"hcd-cell hcd-empty\" data-hcd-column=\"{column}\"></td>"
-            ));
-        }
-        appended.push_str(&replacement);
-        html.insert_str(row_end, &appended);
-    }
-    let ordinal = source_map
-        .entries
-        .iter()
-        .map(|entry| entry.source.text_ordinal)
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or_else(|| HcdError::ResourceLimit("XLSX source ordinal overflow".to_string()))?;
-    let position = source_map.entries.iter().position(|entry| {
-        entry
-            .source
-            .paragraph_id
-            .as_deref()
-            .and_then(xlsx_cell_coordinates)
-            .is_some_and(|(row, column)| (row, column) > (insertion.row, insertion.column))
-    });
-    source_map.entries.insert(
-        position.unwrap_or(source_map.entries.len()),
-        NodeMapEntry {
-            node_id: node_id.clone(),
-            node_hash,
-            source: SourceAnchor {
-                source_cell_ref: None,
-                created_in_hcd: true,
-                part: part.clone(),
-                text_ordinal: ordinal,
-                paragraph_id: Some(reference),
-                text_id: None,
-                node_kind: "cell".to_string(),
-                editable: !insertion.formula,
-            },
-        },
-    );
-    Ok((node_id, part))
+    let insertion = tag.len().saturating_sub(1);
+    tag.insert_str(insertion, &format!(" {name}=\"{escaped}\""));
 }
 
-fn merge_xlsx_cells(html: &mut String, merge: &XlsxMerge) -> Result<(), HcdError> {
-    let cells = xlsx_cells(html)?;
-    let intersects = |range: (u32, u32, u32, u32)| {
-        range.0 <= merge.end_row
-            && range.2 >= merge.start_row
-            && range.1 <= merge.end_column
-            && range.3 >= merge.start_column
-    };
-    if cells
-        .iter()
-        .filter_map(|cell| cell.merged_range)
-        .any(intersects)
-    {
-        return Err(HcdError::PreconditionFailed(
-            "XLSX merge overlaps an existing merged range".to_string(),
-        ));
-    }
-    let mut replacements = Vec::new();
-    for row in merge.start_row..=merge.end_row {
-        for column in merge.start_column..=merge.end_column {
-            let cell = cells
-                .iter()
-                .find(|cell| cell.row == row && cell.column == column);
-            // Sparse worksheets omit empty td elements. A covered coordinate
-            // without a cell is still empty and can be represented by the span.
-            let Some(cell) = cell else {
-                if row == merge.start_row && column == merge.start_column {
-                    return Err(HcdError::InvalidBundle(
-                        "XLSX merge anchor was not materialized".to_string(),
-                    ));
-                }
-                continue;
-            };
-            if row == merge.start_row && column == merge.start_column {
-                if !cell.has_node {
-                    return Err(HcdError::Unsupported(
-                        "XLSX merge anchor must be an existing mapped cell".to_string(),
-                    ));
-                }
-                let reference = format!(
-                    "{}{}:{}{}",
-                    xlsx_column_name(merge.start_column),
-                    merge.start_row,
-                    xlsx_column_name(merge.end_column),
-                    merge.end_row
-                );
-                let mut replacement = html[cell.start..cell.end].to_string();
-                replacement.insert_str(
-                    cell.tag_end - cell.start,
-                    &format!(
-                        " data-hcd-merge=\"{reference}\" rowspan=\"{}\" colspan=\"{}\"",
-                        merge.end_row - merge.start_row + 1,
-                        merge.end_column - merge.start_column + 1
-                    ),
-                );
-                replacements.push((cell.start, cell.end, replacement));
-            } else {
-                if cell.has_node || !html[cell.tag_end + 1..cell.end - 5].trim().is_empty() {
-                    return Err(HcdError::Unsupported(format!(
-                        "XLSX merge would discard the mapped or nonempty cell {}{row}",
-                        xlsx_column_name(column)
-                    )));
-                }
-                replacements.push((cell.start, cell.end, String::new()));
-            }
-        }
-    }
-    replacements.sort_unstable_by_key(|(start, _, _)| std::cmp::Reverse(*start));
-    for (start, end, replacement) in replacements {
-        html.replace_range(start..end, &replacement);
-    }
-    Ok(())
-}
-
-fn unmerge_xlsx_cells(
-    html: &mut String,
-    initial_html: &str,
-    merge: &XlsxMerge,
-) -> Result<(), HcdError> {
-    let cells = xlsx_cells(html)?;
-    let original_cells = xlsx_cells(initial_html)?;
-    let anchor = cells
-        .iter()
-        .find(|cell| {
-            cell.row == merge.start_row && cell.column == merge.start_column && cell.has_node
-        })
-        .ok_or_else(|| HcdError::PreconditionFailed("XLSX merge anchor is missing".to_string()))?;
-    let range = (
-        merge.start_row,
-        merge.start_column,
-        merge.end_row,
-        merge.end_column,
-    );
-    if anchor.merged_range != Some(range) {
-        return Err(HcdError::PreconditionFailed(
-            "XLSX anchor is not merged across the requested range".to_string(),
-        ));
-    }
-    let count = (merge.end_row - merge.start_row + 1)
-        .saturating_mul(merge.end_column - merge.start_column + 1);
-    if count > 10_000 {
-        return Err(HcdError::ResourceLimit(
-            "XLSX unmerge exceeds 10000 cells".to_string(),
-        ));
-    }
-    let reference = format!(
-        "{}{}:{}{}",
-        xlsx_column_name(merge.start_column),
-        merge.start_row,
-        xlsx_column_name(merge.end_column),
-        merge.end_row
-    );
-    let mut restored_anchor = html[anchor.start..anchor.end].to_string();
-    for attribute in [
-        format!(" data-hcd-merge=\"{reference}\""),
-        format!(" rowspan=\"{}\"", merge.end_row - merge.start_row + 1),
-        format!(" colspan=\"{}\"", merge.end_column - merge.start_column + 1),
-    ] {
-        if !restored_anchor.contains(&attribute) {
-            return Err(HcdError::InvalidBundle(
-                "XLSX merge anchor has inconsistent span attributes".to_string(),
-            ));
-        }
-        restored_anchor = restored_anchor.replacen(&attribute, "", 1);
-    }
-    let mut changes = vec![(anchor.start, anchor.end, restored_anchor, 0u32)];
-    for row in merge.start_row..=merge.end_row {
-        let marker = format!("<tr data-hcd-row=\"{row}\"");
-        let row_start = html.find(&marker).ok_or_else(|| {
-            HcdError::Unsupported(format!(
-                "XLSX merged row {row} is not present in the HCD window"
-            ))
-        })?;
-        let row_end = html[row_start..]
-            .find("</tr>")
-            .map(|offset| row_start + offset)
-            .ok_or_else(|| HcdError::InvalidBundle("XLSX merged row is not closed".to_string()))?;
-        for column in merge.start_column..=merge.end_column {
-            if row == merge.start_row && column == merge.start_column {
-                continue;
-            }
-            if cells
-                .iter()
-                .any(|cell| cell.row == row && cell.column == column)
-            {
-                return Err(HcdError::PreconditionFailed(
-                    "XLSX covered cell already exists".to_string(),
-                ));
-            }
-            let insertion = cells
-                .iter()
-                .filter(|cell| cell.row == row && cell.column > column)
-                .map(|cell| cell.start)
-                .min()
-                .unwrap_or(row_end);
-            let empty = original_cells
-                .iter()
-                .find(|cell| cell.row == row && cell.column == column)
-                .filter(|cell| {
-                    !cell.has_node
-                        && cell.merged_range.is_none()
-                        && initial_html[cell.tag_end + 1..cell.end - 5]
-                            .trim()
-                            .is_empty()
-                })
-                .map(|cell| initial_html[cell.start..cell.end].to_string())
-                .unwrap_or_else(|| {
-                    format!("<td class=\"hcd-cell hcd-empty\" data-hcd-column=\"{column}\"></td>")
-                });
-            changes.push((insertion, insertion, empty, column));
-        }
-    }
-    changes.sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| right.3.cmp(&left.3)));
-    for (start, end, replacement, _) in changes {
-        html.replace_range(start..end, &replacement);
-    }
-    Ok(())
-}
-
-fn pdf_page_dimensions(html: &str, page: usize) -> Result<(f32, f32), HcdError> {
-    let tag_end = html
-        .find('>')
-        .ok_or_else(|| HcdError::InvalidBundle("PDF page tag is missing".to_string()))?;
-    let tag = &html[..tag_end];
-    if !tag.starts_with("<section class=\"hcd-pdf-page\"")
-        || !tag.contains(&format!("data-hcd-page=\"{page}\""))
-        || !tag.contains("data-hcd-continuation=\"false\"")
-        || !tag.contains("data-hcd-source-raster=\"true\"")
-    {
-        return Err(HcdError::InvalidBundle(format!(
-            "PDF page {page} has no primary raster chunk"
-        )));
-    }
-    let style = tag
-        .split_once("style=\"")
-        .and_then(|(_, rest)| rest.split_once('"'))
-        .map(|(value, _)| value)
-        .ok_or_else(|| HcdError::InvalidBundle("PDF page style is missing".to_string()))?;
-    let dimension = |name: &str| -> Result<f32, HcdError> {
-        let value = style
-            .split(';')
-            .find_map(|property| property.trim().strip_prefix(name))
-            .and_then(|value| value.strip_suffix("pt"))
-            .ok_or_else(|| HcdError::InvalidBundle(format!("PDF page {name} is missing")))?;
-        let parsed: f32 = value
-            .parse()
-            .map_err(|_| HcdError::InvalidBundle(format!("PDF page {name} is invalid")))?;
-        if !parsed.is_finite() || parsed <= 0.0 || parsed > 14_400.0 {
-            return Err(HcdError::InvalidBundle(format!(
-                "PDF page {name} exceeds safe limits"
-            )));
-        }
-        Ok(parsed)
-    };
-    Ok((dimension("width:")?, dimension("height:")?))
-}
-
-fn insert_pdf_text(
-    html: &mut String,
-    source_map: &mut crate::ChunkSourceMap,
-    insertion: &PdfTextInsertion,
-) -> Result<(), HcdError> {
-    let (page_width, page_height) = pdf_page_dimensions(html, insertion.page)?;
-    if insertion.x_pt + insertion.width_pt > page_width
-        || insertion.y_pt + insertion.height_pt > page_height
-    {
-        return Err(HcdError::InvalidPatch(format!(
-            "PDF text box is outside page {}",
-            insertion.page
-        )));
-    }
-    if source_map
-        .entries
-        .iter()
-        .any(|entry| entry.node_id == insertion.node_id)
-    {
-        return Err(HcdError::InvalidPatch(
-            "PDF text node ID already exists".to_string(),
-        ));
-    }
-    let ordinal = source_map
-        .entries
-        .iter()
-        .map(|entry| entry.source.text_ordinal)
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or_else(|| HcdError::ResourceLimit("PDF text ordinal overflowed".to_string()))?;
-    let source_path = format!("/page[{}]/hcd-text[{}]", insertion.page, insertion.node_id);
-    let node_hash = hash_bytes(insertion.text.as_bytes());
-    let top = page_height - insertion.y_pt - insertion.height_pt;
-    let block = format!(
-        "<p class=\"hcd-pdf-text\" data-hcd-text-node=\"{}\" data-hcd-source-path=\"{source_path}\" data-hcd-source-order=\"{ordinal}\" data-hcd-mapping=\"hcd-overlay\" data-hcd-bbox=\"{},{},{},{}\" data-hcd-x=\"{}\" data-hcd-y=\"{}\" data-hcd-width=\"{}\" data-hcd-height=\"{}\" style=\"position:absolute;left:{}pt;top:{top}pt;width:{}pt;height:{}pt;font-family:Arial, Helvetica, sans-serif;font-size:{}pt;font-weight:normal;font-style:normal;color:black;line-height:{}pt\"><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{node_hash}\" data-hcd-patched=\"true\">{}</span></p>",
-        insertion.node_id,
-        insertion.x_pt, insertion.y_pt, insertion.width_pt, insertion.height_pt,
-        insertion.x_pt, insertion.y_pt, insertion.width_pt, insertion.height_pt,
-        insertion.x_pt, insertion.width_pt, insertion.height_pt,
-        insertion.font_size_pt, insertion.font_size_pt,
-        insertion.node_id, escape_text(&insertion.text),
-    );
-    let end = html
-        .rfind("</section>")
-        .ok_or_else(|| HcdError::InvalidBundle("PDF page closing tag is missing".to_string()))?;
-    html.insert_str(end, &block);
-    source_map.entries.push(NodeMapEntry {
-        node_id: insertion.node_id.clone(),
-        node_hash,
-        source: SourceAnchor {
-            source_cell_ref: None,
-            created_in_hcd: false,
-            part: format!("pdf/pages/{}", insertion.page),
-            text_ordinal: ordinal,
-            paragraph_id: Some(source_path),
-            text_id: None,
-            node_kind: "pdf-text".to_string(),
-            editable: true,
-        },
-    });
-    Ok(())
-}
-
-fn update_pdf_text_geometry(
-    html: &mut String,
-    entry: &NodeMapEntry,
-    change: &PdfGeometryChange,
-) -> Result<(), HcdError> {
-    let page = entry
-        .source
-        .part
-        .strip_prefix("pdf/pages/")
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|page| *page > 0)
-        .ok_or_else(|| {
-            HcdError::InvalidBundle("PDF text box page locator is invalid".to_string())
-        })?;
-    let source_path = format!("/page[{page}]/hcd-text[{}]", entry.node_id);
-    if entry.source.paragraph_id.as_deref() != Some(source_path.as_str()) {
-        return Err(HcdError::Unsupported(
-            "PDF geometry is available only for HCD-created text boxes".to_string(),
-        ));
-    }
-    let (page_width, page_height) = pdf_page_dimensions(html, page)?;
-    let geometry = change.geometry;
-    if geometry.x_pt + geometry.width_pt > page_width
-        || geometry.y_pt + geometry.height_pt > page_height
-    {
-        return Err(HcdError::InvalidPatch(
-            "PDF text box must stay inside its page".to_string(),
-        ));
-    }
-    let marker = format!("data-hcd-text-node=\"{}\"", entry.node_id);
-    let location = html.find(&marker).ok_or_else(|| {
-        HcdError::InvalidBundle("PDF text box is missing from the page".to_string())
-    })?;
-    let start = html[..location]
-        .rfind("<p class=\"hcd-pdf-text\"")
-        .ok_or_else(|| {
-            HcdError::Unsupported("PDF text is not inside an editable text box".to_string())
-        })?;
-    let end = html[location..]
-        .find('>')
-        .map(|offset| location + offset)
-        .ok_or_else(|| HcdError::InvalidBundle("PDF text box tag is not closed".to_string()))?;
-    if html[start..location].contains('>') {
-        return Err(HcdError::InvalidBundle(
-            "PDF text box tag is invalid".to_string(),
-        ));
-    }
-    let tag = &html[start..=end];
-    if xlsx_attribute(tag, "data-hcd-mapping") != Some("hcd-overlay")
-        || xlsx_attribute(tag, "data-hcd-source-path") != Some(source_path.as_str())
-    {
-        return Err(HcdError::Unsupported(
-            "PDF text is not an HCD overlay".to_string(),
-        ));
-    }
-    let number = |name: &str| -> Result<f32, HcdError> {
-        xlsx_attribute(tag, name)
-            .and_then(|value| value.parse::<f32>().ok())
-            .filter(|value| value.is_finite())
-            .ok_or_else(|| HcdError::InvalidBundle(format!("PDF text box {name} is invalid")))
-    };
-    let current = PdfTextGeometry {
-        x_pt: number("data-hcd-x")?,
-        y_pt: number("data-hcd-y")?,
-        width_pt: number("data-hcd-width")?,
-        height_pt: number("data-hcd-height")?,
-    };
-    if current != change.expected {
-        return Err(HcdError::PreconditionFailed(
-            "PDF text box moved since it was selected".to_string(),
-        ));
-    }
-    let style = xlsx_attribute(tag, "style")
-        .ok_or_else(|| HcdError::InvalidBundle("PDF text box style is missing".to_string()))?;
-    let left = format!("{}pt", geometry.x_pt);
-    let top = format!("{}pt", page_height - geometry.y_pt - geometry.height_pt);
-    let width = format!("{}pt", geometry.width_pt);
-    let height = format!("{}pt", geometry.height_pt);
-    let mut found = HashSet::new();
-    let updated_style = style
-        .split(';')
-        .map(|property| {
-            let (name, _) = property.split_once(':').unwrap_or((property, ""));
-            let name = name.trim();
-            let replacement = match name {
-                "left" => Some(&left),
-                "top" => Some(&top),
-                "width" => Some(&width),
-                "height" => Some(&height),
-                _ => None,
-            };
-            if let Some(value) = replacement {
-                found.insert(name);
-                format!("{name}:{value}")
-            } else {
-                property.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(";");
-    if found.len() != 4 {
-        return Err(HcdError::InvalidBundle(
-            "PDF text box lacks positioned style properties".to_string(),
-        ));
-    }
-    let bbox = format!(
-        "{},{},{},{}",
-        geometry.x_pt, geometry.y_pt, geometry.width_pt, geometry.height_pt
-    );
-    for (name, value) in [
-        ("data-hcd-x", geometry.x_pt.to_string()),
-        ("data-hcd-y", geometry.y_pt.to_string()),
-        ("data-hcd-width", geometry.width_pt.to_string()),
-        ("data-hcd-height", geometry.height_pt.to_string()),
-        ("data-hcd-bbox", bbox),
-        ("style", updated_style),
-    ] {
-        let tag_end = html[start..]
-            .find('>')
-            .map(|offset| start + offset)
-            .ok_or_else(|| HcdError::InvalidBundle("PDF text box tag is not closed".to_string()))?;
-        set_attribute_in_range(html, start, tag_end, name, &value)?;
-    }
-    Ok(())
-}
-
-fn delete_pdf_text(html: &mut String, entry: &NodeMapEntry) -> Result<(), HcdError> {
-    let page = entry
-        .source
-        .part
-        .strip_prefix("pdf/pages/")
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|page| *page > 0)
-        .ok_or_else(|| {
-            HcdError::InvalidBundle("PDF text box page locator is invalid".to_string())
-        })?;
-    let source_path = format!("/page[{page}]/hcd-text[{}]", entry.node_id);
-    if entry.source.paragraph_id.as_deref() != Some(source_path.as_str()) {
-        return Err(HcdError::Unsupported(
-            "PDF deletion is available only for HCD-created text boxes".to_string(),
-        ));
-    }
-    let marker = format!("data-hcd-text-node=\"{}\"", entry.node_id);
-    let location = html.find(&marker).ok_or_else(|| {
-        HcdError::InvalidBundle("PDF text box is missing from the page".to_string())
-    })?;
-    let start = html[..location]
-        .rfind("<p class=\"hcd-pdf-text\"")
-        .ok_or_else(|| HcdError::InvalidBundle("PDF text box tag is missing".to_string()))?;
-    let tag_end = html[location..]
-        .find('>')
-        .map(|offset| location + offset)
-        .ok_or_else(|| HcdError::InvalidBundle("PDF text box tag is not closed".to_string()))?;
-    if html[start..location].contains('>') {
-        return Err(HcdError::InvalidBundle(
-            "PDF text box tag is invalid".to_string(),
-        ));
-    }
-    let tag = &html[start..=tag_end];
-    if xlsx_attribute(tag, "data-hcd-mapping") != Some("hcd-overlay")
-        || xlsx_attribute(tag, "data-hcd-source-path") != Some(source_path.as_str())
-    {
-        return Err(HcdError::Unsupported(
-            "PDF text is not an HCD overlay".to_string(),
-        ));
-    }
-    let close = html[tag_end + 1..]
-        .find("</p>")
-        .map(|offset| tag_end + 1 + offset + "</p>".len())
-        .ok_or_else(|| {
-            HcdError::InvalidBundle("PDF text box closing tag is missing".to_string())
-        })?;
-    if !html[tag_end + 1..close].contains(&format!("data-hcd-id=\"{}\"", entry.node_id)) {
-        return Err(HcdError::InvalidBundle(
-            "PDF text box does not contain its mapped text node".to_string(),
-        ));
-    }
-    html.replace_range(start..close, "");
-    Ok(())
-}
-
-fn delete_pptx_text(html: &mut String, entry: &NodeMapEntry) -> Result<(), HcdError> {
-    if !entry.source.created_in_hcd || entry.source.node_kind != "slide-text" {
-        return Err(HcdError::Unsupported(
-            "PPTX deletion is available only for HCD-created text boxes".to_string(),
-        ));
-    }
-    let locator = entry
-        .source
-        .text_id
-        .as_deref()
-        .and_then(|value| value.strip_prefix("hcd-pptx-box:"))
-        .ok_or_else(|| HcdError::InvalidBundle("PPTX text box locator is missing".to_string()))?;
-    let values = locator
-        .split(',')
-        .map(str::parse::<u64>)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| HcdError::InvalidBundle("PPTX text box locator is invalid".to_string()))?;
-    if values.len() != 5 || !(100..=25_600).contains(&values[4]) {
-        return Err(HcdError::InvalidBundle(
-            "PPTX text box locator is invalid".to_string(),
-        ));
-    }
-    let slide_part = format!("data-hcd-source-part=\"{}\"", entry.source.part);
-    if !html.starts_with("<section class=\"hcd-slide\"") || !html.contains(&slide_part) {
-        return Err(HcdError::InvalidBundle(
-            "PPTX text box is not in its source slide".to_string(),
-        ));
-    }
-    let marker = format!("data-hcd-id=\"{}\"", entry.node_id);
-    let location = html.find(&marker).ok_or_else(|| {
-        HcdError::InvalidBundle("PPTX text box is missing from its slide".to_string())
-    })?;
-    let start = html[..location]
-        .rfind("<div class=\"hcd-slide-shape\"")
-        .ok_or_else(|| HcdError::InvalidBundle("PPTX text box shape is missing".to_string()))?;
-    let tag_end = html[start..]
-        .find('>')
-        .map(|offset| start + offset)
-        .ok_or_else(|| HcdError::InvalidBundle("PPTX text box tag is not closed".to_string()))?;
-    let tag = &html[start..=tag_end];
-    if xlsx_attribute(tag, "data-hcd-shape-id").is_some()
-        || [
-            "data-hcd-x-emu",
-            "data-hcd-y-emu",
-            "data-hcd-width-emu",
-            "data-hcd-height-emu",
-        ]
-        .iter()
-        .enumerate()
-        .any(|(index, name)| {
-            xlsx_attribute(tag, name).and_then(|value| value.parse::<u64>().ok())
-                != Some(values[index])
-        })
-    {
-        return Err(HcdError::InvalidBundle(
-            "PPTX created text box differs from its source locator".to_string(),
-        ));
-    }
-    let close = html[tag_end + 1..]
-        .find("</div>")
-        .map(|offset| tag_end + 1 + offset + "</div>".len())
-        .ok_or_else(|| {
-            HcdError::InvalidBundle("PPTX text box closing tag is missing".to_string())
-        })?;
-    let contents = &html[tag_end + 1..close];
-    if contents.contains("<div")
-        || contents.matches("data-hcd-id=\"").count() != 1
-        || !contents.contains(&marker)
-    {
-        return Err(HcdError::InvalidBundle(
-            "PPTX text box contains unexpected nested content".to_string(),
-        ));
-    }
-    html.replace_range(start..close, "");
-    Ok(())
-}
-
-fn insert_pptx_text(
-    html: &mut String,
-    source_map: &mut crate::ChunkSourceMap,
-    insertion: &PptxTextInsertion,
-) -> Result<(), HcdError> {
-    let source_tag = format!("data-hcd-source-part=\"{}\"", insertion.slide_part);
-    if !html.starts_with("<section class=\"hcd-slide\"") || !html.contains(&source_tag) {
-        return Err(HcdError::InvalidPatch(
-            "PPTX chunk does not match the requested slide".to_string(),
-        ));
-    }
-    let dimension = |key: &str| -> Result<u64, HcdError> {
-        let marker = format!("{key}=\"");
-        html.split_once(&marker)
-            .and_then(|(_, suffix)| suffix.split_once('"'))
-            .and_then(|(number, _)| number.parse::<u64>().ok())
-            .ok_or_else(|| HcdError::InvalidBundle(format!("PPTX slide {key} is missing")))
-    };
-    let slide_width = dimension("data-hcd-width-emu")?;
-    let slide_height = dimension("data-hcd-height-emu")?;
-    if insertion
-        .x_emu
-        .checked_add(insertion.width_emu)
-        .is_none_or(|end| end > slide_width)
-        || insertion
-            .y_emu
-            .checked_add(insertion.height_emu)
-            .is_none_or(|end| end > slide_height)
-    {
-        return Err(HcdError::InvalidPatch(
-            "PPTX text box is outside the slide".to_string(),
-        ));
-    }
-    if source_map
-        .entries
-        .iter()
-        .any(|entry| entry.node_id == insertion.node_id)
-    {
-        return Err(HcdError::InvalidPatch(
-            "PPTX text node ID already exists".to_string(),
-        ));
-    }
-    let ordinal = source_map
-        .entries
-        .iter()
-        .map(|entry| entry.source.text_ordinal)
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or_else(|| HcdError::ResourceLimit("PPTX text ordinal overflowed".to_string()))?;
-    let node_hash = hash_bytes(insertion.text.as_bytes());
-    let emu_px = |value: u64| value as f64 * 96.0 / 914_400.0;
-    let font_pt = insertion.font_size_hundredths as f64 / 100.0;
-    let block = format!(
-        "<div class=\"hcd-slide-shape\" data-hcd-x-emu=\"{}\" data-hcd-y-emu=\"{}\" data-hcd-width-emu=\"{}\" data-hcd-height-emu=\"{}\" style=\"position:absolute;left:{:.2}px;top:{:.2}px;width:{:.2}px;height:{:.2}px;overflow:hidden\"><p class=\"hcd-slide-text\" style=\"font-family:Arial,sans-serif;font-size:{font_pt:.2}pt;margin-top:0;margin-bottom:0;margin-left:0;margin-right:0\"><span data-hcd-id=\"{}\" data-hcd-node-hash=\"{node_hash}\">{}</span></p></div>",
-        insertion.x_emu, insertion.y_emu, insertion.width_emu, insertion.height_emu,
-        emu_px(insertion.x_emu), emu_px(insertion.y_emu), emu_px(insertion.width_emu), emu_px(insertion.height_emu),
-        insertion.node_id, escape_text(&insertion.text),
-    );
-    let end = html
-        .rfind("</section>")
-        .ok_or_else(|| HcdError::InvalidBundle("PPTX slide closing tag is missing".to_string()))?;
-    html.insert_str(end, &block);
-    source_map.entries.push(NodeMapEntry {
-        node_id: insertion.node_id.clone(),
-        node_hash,
-        source: SourceAnchor {
-            source_cell_ref: None,
-            created_in_hcd: true,
-            part: insertion.slide_part.clone(),
-            text_ordinal: ordinal,
-            paragraph_id: None,
-            // The native shape locator is immutable across text edits.
-            text_id: Some(format!(
-                "hcd-pptx-box:{},{},{},{},{}",
-                insertion.x_emu,
-                insertion.y_emu,
-                insertion.width_emu,
-                insertion.height_emu,
-                insertion.font_size_hundredths
-            )),
-            node_kind: "slide-text".to_string(),
-            editable: true,
-        },
-    });
-    Ok(())
-}
-
-fn update_pptx_shape_geometry(
-    html: &mut String,
-    entry: &mut NodeMapEntry,
-    change: &PptxGeometryChange,
-) -> Result<(), HcdError> {
-    let slide_end = html
-        .find('>')
-        .ok_or_else(|| HcdError::InvalidBundle("PPTX slide section is not closed".to_string()))?;
-    let slide_tag = &html[..=slide_end];
-    if !slide_tag.starts_with("<section class=\"hcd-slide\"")
-        || xlsx_attribute(slide_tag, "data-hcd-source-part") != Some(entry.source.part.as_str())
-    {
-        return Err(HcdError::InvalidBundle(
-            "PPTX slide section does not match the source map".to_string(),
-        ));
-    }
-    let slide_dimension = |name: &str| -> Result<u64, HcdError> {
-        xlsx_attribute(slide_tag, name)
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| HcdError::InvalidBundle(format!("PPTX slide {name} is missing")))
-    };
-    let slide_width = slide_dimension("data-hcd-width-emu")?;
-    let slide_height = slide_dimension("data-hcd-height-emu")?;
-    if change
-        .geometry
-        .x_emu
-        .checked_add(change.geometry.width_emu)
-        .is_none_or(|end| end > slide_width)
-        || change
-            .geometry
-            .y_emu
-            .checked_add(change.geometry.height_emu)
-            .is_none_or(|end| end > slide_height)
-    {
-        return Err(HcdError::InvalidPatch(
-            "PPTX text shape must stay inside the slide".to_string(),
-        ));
-    }
-
-    let marker = format!("data-hcd-id=\"{}\"", entry.node_id);
-    let node_offset = html.find(&marker).ok_or_else(|| {
-        HcdError::InvalidBundle(format!("PPTX text node {} is missing", entry.node_id))
-    })?;
-    let mut open_divs = Vec::new();
-    let mut cursor = slide_end + 1;
-    while cursor < node_offset {
-        let opening = html[cursor..node_offset]
-            .find("<div")
+fn matching_html_close(html: &str, open_end: usize, name: &str) -> Result<usize, HcdError> {
+    let open_token = format!("<{name}");
+    let close_token = format!("</{name}>");
+    let mut depth = 1usize;
+    let mut cursor = open_end + 1;
+    while cursor < html.len() {
+        let next_open = html[cursor..]
+            .find(&open_token)
             .map(|offset| cursor + offset);
-        let closing = html[cursor..node_offset]
-            .find("</div>")
+        let next_close = html[cursor..]
+            .find(&close_token)
             .map(|offset| cursor + offset);
-        if closing.is_some_and(|close| opening.is_none_or(|open| close < open)) {
-            cursor = closing.expect("checked above") + "</div>".len();
-            open_divs.pop().ok_or_else(|| {
-                HcdError::InvalidBundle("PPTX slide has an unmatched closing div".to_string())
-            })?;
-            continue;
-        }
-        let Some(opening) = opening else { break };
-        let end = html[opening..]
-            .find('>')
-            .map(|offset| opening + offset)
-            .ok_or_else(|| HcdError::InvalidBundle("PPTX shape tag is not closed".to_string()))?;
-        open_divs.push((opening, end));
-        cursor = end + 1;
-    }
-    let (start, end) = open_divs
-        .into_iter()
-        .rev()
-        .find(|(start, end)| html[*start..=*end].starts_with("<div class=\"hcd-slide-shape\""))
-        .ok_or_else(|| {
-            HcdError::Unsupported("PPTX text is not inside a positioned shape".to_string())
-        })?;
-    let mut tag = html[start..=end].to_string();
-    let number = |name: &str| -> Result<u64, HcdError> {
-        xlsx_attribute(&tag, name)
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| HcdError::Unsupported(format!("PPTX shape has no {name}")))
-    };
-    let current = PptxShapeGeometry {
-        x_emu: number("data-hcd-x-emu")?,
-        y_emu: number("data-hcd-y-emu")?,
-        width_emu: number("data-hcd-width-emu")?,
-        height_emu: number("data-hcd-height-emu")?,
-    };
-    if current != change.expected {
-        return Err(HcdError::PreconditionFailed(
-            "PPTX shape geometry changed since it was selected".to_string(),
-        ));
-    }
-    if entry.source.created_in_hcd {
-        if xlsx_attribute(&tag, "data-hcd-shape-id").is_some() {
-            return Err(HcdError::InvalidBundle(
-                "created PPTX text box has a source shape ID".to_string(),
-            ));
-        }
-        let locator = entry.source.text_id.as_deref().ok_or_else(|| {
-            HcdError::InvalidBundle("created PPTX text box locator is missing".to_string())
-        })?;
-        let values = locator
-            .strip_prefix("hcd-pptx-box:")
-            .and_then(|values| {
-                values
-                    .split(',')
-                    .map(str::parse::<u64>)
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()
-            })
-            .ok_or_else(|| {
-                HcdError::InvalidBundle("PPTX text box locator is invalid".to_string())
-            })?;
-        if values.len() != 5
-            || values[..4]
-                != [
-                    current.x_emu,
-                    current.y_emu,
-                    current.width_emu,
-                    current.height_emu,
-                ]
-            || !(100..=25_600).contains(&values[4])
-        {
-            return Err(HcdError::InvalidBundle(
-                "PPTX text box locator differs from its page geometry".to_string(),
-            ));
-        }
-        entry.source.text_id = Some(format!(
-            "hcd-pptx-box:{},{},{},{},{}",
-            change.geometry.x_emu,
-            change.geometry.y_emu,
-            change.geometry.width_emu,
-            change.geometry.height_emu,
-            values[4]
-        ));
-    } else {
-        let shape_id = xlsx_attribute(&tag, "data-hcd-shape-id")
-            .and_then(|value| value.parse::<u32>().ok())
-            .filter(|value| *value > 0)
-            .ok_or_else(|| HcdError::Unsupported("PPTX source shape ID is missing".to_string()))?;
-        let shape_id = shape_id.to_string();
-        if entry.source.paragraph_id.as_deref() != Some(shape_id.as_str()) {
-            return Err(HcdError::InvalidBundle(
-                "PPTX text node does not belong to its shape".to_string(),
-            ));
+        match (next_open, next_close) {
+            (Some(open), Some(close)) if open < close => {
+                depth += 1;
+                cursor = open + open_token.len();
+            }
+            (_, Some(close)) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(close);
+                }
+                cursor = close + close_token.len();
+            }
+            _ => break,
         }
     }
-    let emu_px = |value: u64| format!("{:.2}px", value as f64 * 96.0 / 914_400.0);
-    let updates = BTreeMap::from([
-        ("left".to_string(), emu_px(change.geometry.x_emu)),
-        ("top".to_string(), emu_px(change.geometry.y_emu)),
-        ("width".to_string(), emu_px(change.geometry.width_emu)),
-        ("height".to_string(), emu_px(change.geometry.height_emu)),
-    ]);
-    update_start_tag_style(&mut tag, "data-hcd-x-emu=", &updates, false)?;
-    for (name, value) in [
-        ("data-hcd-x-emu", change.geometry.x_emu),
-        ("data-hcd-y-emu", change.geometry.y_emu),
-        ("data-hcd-width-emu", change.geometry.width_emu),
-        ("data-hcd-height-emu", change.geometry.height_emu),
-    ] {
-        let tag_end = tag.len() - 1;
-        set_attribute_in_range(&mut tag, 0, tag_end, name, &value.to_string())?;
-    }
-    let tag_end = tag.len() - 1;
-    set_attribute_in_range(&mut tag, 0, tag_end, "data-hcd-geometry-edited", "true")?;
-    html.replace_range(start..=end, &tag);
-    Ok(())
+    Err(HcdError::InvalidBundle(
+        "PPTX run element is not closed".to_string(),
+    ))
 }
 
 fn collect_styles(patch: &PatchBatch) -> Result<BTreeMap<String, StyleChange>, HcdError> {
@@ -6663,6 +3717,260 @@ fn collect_styles(patch: &PatchBatch) -> Result<BTreeMap<String, StyleChange>, H
     Ok(styles)
 }
 
+fn collect_fonts(patch: &PatchBatch) -> Result<BTreeMap<String, FontChange>, HcdError> {
+    let mut fonts = BTreeMap::new();
+    for operation in &patch.operations {
+        // One node gets one font outcome per patch: pinning and clearing the same
+        // node in a single revision would leave the last write to decide.
+        let (node_id, font, node_hash) = match operation {
+            PatchOperation::TextFont {
+                node_id,
+                font,
+                precondition,
+            } => (node_id, Some(font.clone()), precondition.node_hash.clone()),
+            PatchOperation::TextFontClear {
+                node_id,
+                precondition,
+            } => (node_id, None, precondition.node_hash.clone()),
+            _ => continue,
+        };
+        if fonts
+            .insert(node_id.clone(), FontChange { font, node_hash })
+            .is_some()
+        {
+            return Err(HcdError::InvalidPatch(format!(
+                "patch contains more than one text.font operation for {node_id}"
+            )));
+        }
+    }
+    Ok(fonts)
+}
+
+/// A font family token written into an inline style or a `data-hcd-font*`
+/// attribute. It must be non-empty, bounded, and free of the characters that
+/// would break the surrounding HTML attribute or CSS declaration (quotes,
+/// semicolons, colons, angle brackets, ampersands, and control characters), so a
+/// malicious family name cannot inject markup or extra CSS.
+fn safe_font_family(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return None;
+    }
+    if trimmed.contains(['<', '>', '"', '\'', ';', ':', '&'])
+        || trimmed.chars().any(|character| character.is_control())
+    {
+        return None;
+    }
+    Some(trimmed)
+}
+
+pub(crate) fn validate_font_patch(font: &crate::FontPatch) -> Result<(), HcdError> {
+    let mut provided = 0;
+    for (slot, value) in [
+        ("latin", font.latin.as_deref()),
+        ("eastAsia", font.east_asia.as_deref()),
+        ("bidi", font.bidi.as_deref()),
+    ] {
+        let Some(value) = value else { continue };
+        provided += 1;
+        if safe_font_family(value).is_none() {
+            return Err(HcdError::InvalidPatch(format!(
+                "text.font {slot} family is empty, too long, or contains a forbidden character"
+            )));
+        }
+    }
+    if provided == 0 {
+        return Err(HcdError::InvalidPatch(
+            "text.font must set at least one of latin, eastAsia, or bidi".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// The presentation a pinned face writes onto an element: the inline CSS and the
+/// `data-hcd-font*` attributes, in a fixed order.
+///
+/// `text.font` uses it to rewrite an existing node, and the editor block model
+/// uses it when it renders a block that carries a face, so the two cannot drift
+/// apart. The export paths read these attributes, so a face set in the model is
+/// indistinguishable from one set by a patch.
+pub(crate) struct FontPresentation {
+    pub(crate) css: BTreeMap<String, String>,
+    pub(crate) attributes: Vec<(&'static str, String)>,
+}
+
+pub(crate) fn font_presentation(font: &crate::FontPatch) -> Result<FontPresentation, HcdError> {
+    // latin (falling back to eastAsia then bidi) is the primary face for the
+    // node's inline style; every provided slot is also recorded in its
+    // data-hcd-font* attribute so source and semantic round-trips can recover
+    // script-specific faces.
+    let primary = [
+        font.latin.as_deref(),
+        font.east_asia.as_deref(),
+        font.bidi.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(safe_font_family);
+    let Some(primary) = primary else {
+        return Err(HcdError::InvalidPatch(
+            "text.font has no usable family".to_string(),
+        ));
+    };
+
+    let mut css = BTreeMap::new();
+    css.insert("font-family".to_string(), format!("'{primary}'"));
+    let mut attributes = vec![("data-hcd-font", primary.to_string())];
+    if let Some(latin) = font.latin.as_deref().and_then(safe_font_family) {
+        attributes.push(("data-hcd-font-latin", latin.to_string()));
+    }
+    if let Some(east_asia) = font.east_asia.as_deref().and_then(safe_font_family) {
+        attributes.push(("data-hcd-font-east-asia", east_asia.to_string()));
+    }
+    if let Some(bidi) = font.bidi.as_deref().and_then(safe_font_family) {
+        attributes.push(("data-hcd-font-bidi", bidi.to_string()));
+    }
+    attributes.push(("data-hcd-font-patched", "true".to_string()));
+    let presentation = FontPresentation { css, attributes };
+    // The check `update_start_tag_style` runs before it writes a style, so the
+    // block renderer cannot write a declaration the patch layer would refuse.
+    crate::html::validate_inline_style(&presentation.style_value())?;
+    Ok(presentation)
+}
+
+impl FontPresentation {
+    /// The inline `style` value this presentation writes, serialized exactly as
+    /// `update_start_tag_style` would for an element with no other declarations,
+    /// so a rendered block and a patched node carry the same CSS.
+    pub(crate) fn style_value(&self) -> String {
+        self.css
+            .iter()
+            .map(|(property, value)| format!("{property}:{value}"))
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
+    /// The attributes of this presentation as they would appear inside a fresh
+    /// start tag: the style first, then each `data-hcd-font*`, in the order
+    /// `apply_node_font` leaves them on a patched node, with the same escaping.
+    /// The editor block renderer uses this so a block font and a pinned run font
+    /// are written identically.
+    pub(crate) fn attribute_text(&self) -> String {
+        let mut text = String::new();
+        if !self.css.is_empty() {
+            text.push_str(&format!(" style=\"{}\"", self.style_value()));
+        }
+        for (name, value) in &self.attributes {
+            text.push_str(&format!(" {name}=\"{}\"", escape_attribute(value)));
+        }
+        text
+    }
+}
+
+fn apply_node_font(
+    html: &mut String,
+    node_id: &str,
+    font: &crate::FontPatch,
+) -> Result<(), HcdError> {
+    let canonical_marker = format!("data-hcd-id=\"{}\"", escape_attribute(node_id));
+    let presentation = font_presentation(font)?;
+    // mark_patched is false so a font change is distinguishable from a
+    // node.style presentation change (which sets data-hcd-style-patched).
+    update_start_tag_style(html, &canonical_marker, &presentation.css, false)?;
+    // set_element_attribute escapes internally and inserts the attribute when it
+    // is absent, so re-applying the same font is idempotent.
+    for (name, value) in presentation.attributes {
+        set_element_attribute(html, node_id, name, &value)?;
+    }
+    Ok(())
+}
+
+/// Removes the pin a `text.font` operation wrote: the `font-family` declaration it
+/// put in the style, the `data-hcd-font*` slots, and the `data-hcd-font-patched`
+/// marker, so preview, read-back, and every export stop seeing a pin at all.
+/// Declarations the node owned before the pin stay, except a `font-family` the
+/// imported HTML carried and this pin replaced: the patch keeps no journal of the
+/// value it overwrote, so clearing drops it too and the node falls back to the
+/// style sheet or theme, which is what a clear is for. A node without the marker is
+/// refused, which is what keeps a face that came from the source document (it
+/// carries `data-hcd-font*` without the marker) out of reach.
+fn clear_node_font(html: &mut String, node_id: &str) -> Result<(), HcdError> {
+    let (start, end) = element_start_tag_range(html, node_id)?;
+    let tag = &html[start..=end];
+    if !tag.contains(" data-hcd-font-patched=\"true\"") {
+        return Err(HcdError::InvalidPatch(format!(
+            "node {node_id} carries no text.font pin to clear"
+        )));
+    }
+    let mut replacement = tag.to_string();
+    drop_style_property(&mut replacement, "font-family")?;
+    for name in [
+        "data-hcd-font",
+        "data-hcd-font-latin",
+        "data-hcd-font-east-asia",
+        "data-hcd-font-bidi",
+        "data-hcd-font-patched",
+    ] {
+        remove_attribute(&mut replacement, name);
+    }
+    html.replace_range(start..=end, &replacement);
+    Ok(())
+}
+
+/// Drops one attribute from a start tag, leaving the tag itself alone.
+fn remove_attribute(tag: &mut String, name: &str) {
+    let marker = format!(" {name}=\"");
+    let Some(start) = tag.find(&marker) else {
+        return;
+    };
+    let value_start = start + marker.len();
+    let Some(offset) = tag[value_start..].find('"') else {
+        return;
+    };
+    tag.replace_range(start..value_start + offset + 1, "");
+}
+
+/// Drops one declaration from the tag's `style` attribute, taking the attribute
+/// with it once nothing is left. The rest is rebuilt the way
+/// `update_start_tag_style` writes it — sorted, lower-cased properties — so
+/// clearing a font cannot restyle or reorder the declarations that stay.
+fn drop_style_property(tag: &mut String, property: &str) -> Result<(), HcdError> {
+    let marker = " style=\"";
+    let Some(start) = tag.find(marker) else {
+        return Ok(());
+    };
+    let value_start = start + marker.len();
+    let Some(offset) = tag[value_start..].find('"') else {
+        return Err(HcdError::InvalidBundle(
+            "style attribute is not closed".to_string(),
+        ));
+    };
+    let value_end = value_start + offset;
+    let mut declarations = BTreeMap::new();
+    for declaration in tag[value_start..value_end].split(';') {
+        let Some((name, value)) = declaration.split_once(':') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        if name == property {
+            continue;
+        }
+        declarations.insert(name, value.trim().to_string());
+    }
+    let style_value = declarations
+        .iter()
+        .map(|(name, value)| format!("{name}:{value}"))
+        .collect::<Vec<_>>()
+        .join(";");
+    crate::html::validate_inline_style(&style_value)?;
+    if style_value.is_empty() {
+        tag.replace_range(start..value_end + 1, "");
+    } else {
+        tag.replace_range(value_start..value_end, &style_value);
+    }
+    Ok(())
+}
+
 fn collect_image_changes(patch: &PatchBatch) -> Result<BTreeMap<String, ImageChange>, HcdError> {
     let mut images: BTreeMap<String, ImageChange> = BTreeMap::new();
     for operation in &patch.operations {
@@ -6673,6 +3981,11 @@ fn collect_image_changes(patch: &PatchBatch) -> Result<BTreeMap<String, ImageCha
                 ..
             }
             | PatchOperation::ImageGeometry {
+                node_id,
+                precondition,
+                ..
+            }
+            | PatchOperation::ImageLayersSet {
                 node_id,
                 precondition,
                 ..
@@ -6691,6 +4004,10 @@ fn collect_image_changes(patch: &PatchBatch) -> Result<BTreeMap<String, ImageCha
             )));
         }
         match operation {
+            PatchOperation::ImageLayersSet { stack, .. } => {
+                change.geometry = Some(stack.geometry());
+                change.layers = Some(stack.clone());
+            }
             PatchOperation::ImageReplace { asset_hash, .. } => {
                 if change.asset_hash.replace(asset_hash.clone()).is_some() {
                     return Err(HcdError::InvalidPatch(format!(
@@ -6698,12 +4015,12 @@ fn collect_image_changes(patch: &PatchBatch) -> Result<BTreeMap<String, ImageCha
                     )));
                 }
             }
-            PatchOperation::ImageGeometry { geometry, .. } => {
-                if change.geometry.replace(geometry.clone()).is_some() {
-                    return Err(HcdError::InvalidPatch(format!(
-                        "patch contains more than one image.geometry for {node_id}"
-                    )));
-                }
+            PatchOperation::ImageGeometry { geometry, .. }
+                if change.geometry.replace(geometry.clone()).is_some() =>
+            {
+                return Err(HcdError::InvalidPatch(format!(
+                    "patch contains more than one image.geometry for {node_id}"
+                )));
             }
             _ => {}
         }
@@ -6745,30 +4062,120 @@ fn splice_text(text: &str, splices: &[Splice]) -> Result<String, HcdError> {
     Ok(chars.into_iter().collect())
 }
 
-fn replace_node_text(
+pub(crate) fn replace_node_text(
     html: &mut String,
     node_id: &str,
     text: &str,
     node_hash: &str,
 ) -> Result<(), HcdError> {
-    let needle = format!("data-hcd-id=\"{}\"", escape_attribute(node_id));
-    let attribute = html
-        .find(&needle)
-        .ok_or_else(|| HcdError::InvalidBundle(format!("node {node_id} missing from HTML")))?;
-    let content_start = html[attribute + needle.len()..]
-        .find('>')
-        .map(|offset| attribute + needle.len() + offset + 1)
-        .ok_or_else(|| HcdError::InvalidBundle(format!("node {node_id} has no start tag end")))?;
-    let content_end = html[content_start..]
-        .find("</span>")
-        .map(|offset| content_start + offset)
-        .ok_or_else(|| HcdError::InvalidBundle(format!("node {node_id} has no closing span")))?;
-    html.replace_range(content_start..content_end, &escape_text(text));
-    let tag_start = html[..attribute].rfind('<').unwrap_or(attribute);
-    let tag_end = html[attribute..]
-        .find('>')
-        .map(|offset| attribute + offset)
-        .ok_or_else(|| HcdError::InvalidBundle(format!("node {node_id} has no start tag")))?;
+    if let Some(runs) = crate::extract_xlsx_inline_runs(html)?.get(node_id) {
+        let old: Vec<char> = runs.iter().flat_map(|r| r.text.chars()).collect();
+        let new: Vec<char> = text.chars().collect();
+        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(new[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let inserted: String = new[prefix..new.len() - suffix].iter().collect();
+        let adjusted =
+            crate::splice_xlsx_inline_runs(runs, prefix, old.len() - prefix - suffix, &inserted);
+        return replace_node_content(
+            html,
+            node_id,
+            &crate::render_xlsx_inline_runs(&adjusted)?,
+            node_hash,
+        );
+    }
+    let rich = crate::extract_docx_inline_runs(html)?;
+    let content = if let Some(runs) = rich.get(node_id) {
+        // A text-only splice inherits the adjoining mark, without discarding
+        // earlier rich edits or leaving stale native export metadata behind.
+        let old: String = runs.iter().map(|run| run.text.as_str()).collect();
+        let a: Vec<char> = old.chars().collect();
+        let b: Vec<char> = text.chars().collect();
+        let prefix = a.iter().zip(&b).take_while(|(a, b)| a == b).count();
+        let suffix = a[prefix..]
+            .iter()
+            .rev()
+            .zip(b[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let inserted: String = b[prefix..b.len() - suffix].iter().collect();
+        let adjusted = crate::docx_inline::splice_docx_inline_runs(
+            runs,
+            prefix,
+            a.len() - prefix - suffix,
+            &inserted,
+        );
+        crate::docx_inline::render_docx_inline_runs(&adjusted)
+    } else {
+        escape_text(text)
+    };
+    replace_node_content(html, node_id, &content, node_hash)
+}
+
+pub(crate) fn replace_node_content(
+    html: &mut String,
+    node_id: &str,
+    content: &str,
+    node_hash: &str,
+) -> Result<(), HcdError> {
+    // Structural blocks can intentionally share their first text anchor's ID.
+    // Select the element carrying a node hash, and match its actual end rather
+    // than the first literal </span> or an attribute's quoted '>'.
+    let (tag_start, content_start, content_end) = {
+        let mut reader = quick_xml::Reader::from_str(html);
+        reader.config_mut().check_end_names = true;
+        let mut target = None;
+        let mut depth = 0usize;
+        loop {
+            let before = reader.buffer_position() as usize;
+            let event = reader.read_event().map_err(|error| {
+                HcdError::InvalidBundle(format!("text anchor parse error: {error}"))
+            })?;
+            match event {
+                quick_xml::events::Event::Start(start) => {
+                    if target.is_some() {
+                        depth += 1;
+                        continue;
+                    }
+                    let mut matching_id = false;
+                    let mut has_hash = false;
+                    for attribute in start.attributes() {
+                        let attribute = attribute
+                            .map_err(|error| HcdError::InvalidBundle(error.to_string()))?;
+                        if attribute.key.as_ref() == b"data-hcd-id" {
+                            matching_id = attribute
+                                .unescape_value()
+                                .map_err(|error| HcdError::InvalidBundle(error.to_string()))?
+                                == node_id;
+                        }
+                        has_hash |= attribute.key.as_ref() == b"data-hcd-node-hash";
+                    }
+                    if matching_id && has_hash {
+                        target = Some((before, reader.buffer_position() as usize));
+                        depth = 1;
+                    }
+                }
+                quick_xml::events::Event::End(_) if target.is_some() => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let (start, content) = target.expect("matched text anchor");
+                        break (start, content, before);
+                    }
+                }
+                quick_xml::events::Event::Eof => {
+                    return Err(HcdError::InvalidBundle(format!(
+                        "canonical text node {node_id} missing or unclosed"
+                    )))
+                }
+                _ => {}
+            }
+        }
+    };
+    let tag_end = content_start - 1;
     let hash_marker = "data-hcd-node-hash=\"";
     let hash_start = html[tag_start..tag_end]
         .find(hash_marker)
@@ -6780,6 +4187,7 @@ fn replace_node_text(
         .find('"')
         .map(|offset| hash_start + offset)
         .ok_or_else(|| HcdError::InvalidBundle(format!("node {node_id} has invalid node hash")))?;
+    html.replace_range(content_start..content_end, content);
     html.replace_range(hash_start..hash_end, node_hash);
     Ok(())
 }
@@ -6915,6 +4323,8 @@ fn replace_image_geometry(
     geometry: &ImageGeometry,
 ) -> Result<(), HcdError> {
     crate::html::validate_image_geometry(geometry)?;
+    let (start, end) = element_start_tag_range(html, node_id)?;
+    let flow = html[start..=end].contains("data-hcd-image-flow=\"true\"");
     set_element_attribute(html, node_id, "data-hcd-image-geometry-patched", "true")?;
     for (name, value) in [
         ("data-hcd-x", canonical_f64(geometry.x)),
@@ -6942,6 +4352,15 @@ fn replace_image_geometry(
         ] {
             set_element_attribute(html, node_id, name, &value)?;
         }
+        // Absolute spreadsheet drawing anchors must follow edited geometry too.
+        for (name, value) in [
+            ("data-hcd-absolute-x-emu", geometry.x),
+            ("data-hcd-absolute-y-emu", geometry.y),
+            ("data-hcd-extent-width-emu", geometry.width),
+            ("data-hcd-extent-height-emu", geometry.height),
+        ] {
+            set_element_attribute(html, node_id, name, &canonical_f64(value))?;
+        }
     } else {
         set_element_attribute(
             html,
@@ -6965,15 +4384,20 @@ fn replace_image_geometry(
         ImageGeometryUnit::Pt => "pt",
     };
     let mut properties = BTreeMap::new();
-    properties.insert("position".to_string(), "absolute".to_string());
     properties.insert(
-        "left".to_string(),
-        format!("{}{suffix}", canonical_f64(geometry.x * scale)),
+        "position".to_string(),
+        if flow { "relative" } else { "absolute" }.to_string(),
     );
-    properties.insert(
-        "top".to_string(),
-        format!("{}{suffix}", canonical_f64(geometry.y * scale)),
-    );
+    if !flow {
+        properties.insert(
+            "left".to_string(),
+            format!("{}{suffix}", canonical_f64(geometry.x * scale)),
+        );
+        properties.insert(
+            "top".to_string(),
+            format!("{}{suffix}", canonical_f64(geometry.y * scale)),
+        );
+    }
     properties.insert(
         "width".to_string(),
         format!("{}{suffix}", canonical_f64(geometry.width * scale)),
@@ -7149,6 +4573,8 @@ fn apply_annotations(
         AnnotationSet {
             schema_version: manifest.schema_version.clone(),
             annotations: Vec::new(),
+            docx_review: Default::default(),
+            office_features: Default::default(),
         }
     };
     let previous_count = set.annotations.len();
@@ -7178,15 +4604,37 @@ fn apply_annotations(
                     .retain(|annotation| annotation.annotation_id != *annotation_id);
             }
             PatchOperation::TextSplice { .. }
+            | PatchOperation::TextFont { .. }
+            | PatchOperation::TextFontClear { .. }
             | PatchOperation::PdfTextInsert { .. }
             | PatchOperation::PptxTextInsert { .. }
+            | PatchOperation::PptxShapeInsert { .. }
+            | PatchOperation::PptxObjectsTransform { .. }
+            | PatchOperation::PptxGroupCreate { .. }
+            | PatchOperation::PptxGroupUngroup { .. }
+            | PatchOperation::PptxAnimationsSet { .. }
+            | PatchOperation::PptxMasterBackgroundSet { .. }
+            | PatchOperation::PptxMasterTextStyleSet { .. }
+            | PatchOperation::XlsxChartSet { .. }
+            | PatchOperation::XlsxConditionSet { .. }
+            | PatchOperation::XlsxPivotSet { .. }
             | PatchOperation::PptxShapeGeometry { .. }
             | PatchOperation::PptxTextDelete { .. }
+            | PatchOperation::PptxRunFormat { .. }
+            | PatchOperation::PptxShapeAlign { .. }
+            | PatchOperation::XlsxCellFormat { .. }
+            | PatchOperation::XlsxRichTextSet { .. }
+            | PatchOperation::XlsxRichTextCreate { .. }
+            | PatchOperation::XlsxCellLayout { .. }
+            | PatchOperation::XlsxCellNumberFormat { .. }
             | PatchOperation::PdfTextGeometry { .. }
             | PatchOperation::PdfTextDelete { .. }
+            | PatchOperation::PdfPageLayoutSet { .. }
+            | PatchOperation::PdfOcrApply { .. }
             | PatchOperation::XlsxMerge { .. }
             | PatchOperation::XlsxUnmerge { .. }
             | PatchOperation::XlsxCellSet { .. }
+            | PatchOperation::XlsxCellClear { .. }
             | PatchOperation::XlsxFormulaSet { .. }
             | PatchOperation::XlsxFormulaToValue { .. }
             | PatchOperation::XlsxFormulaToNumber { .. }
@@ -7198,12 +4646,24 @@ fn apply_annotations(
             | PatchOperation::XlsxColumnInsert { .. }
             | PatchOperation::XlsxColumnDelete { .. }
             | PatchOperation::XlsxGridRange { .. }
+            | PatchOperation::XlsxAutoFilterSet { .. }
             | PatchOperation::XlsxMergeBlank { .. }
             | PatchOperation::XlsxRowRemoveLast { .. }
             | PatchOperation::XlsxColumnWidth { .. }
             | PatchOperation::XlsxRowHeight { .. }
+            | PatchOperation::XlsxSheetRename { .. }
+            | PatchOperation::XlsxSheetAdd { .. }
+            | PatchOperation::XlsxSheetDelete { .. }
+            | PatchOperation::XlsxSheetFreeze { .. }
+            | PatchOperation::PptxSlideAdd { .. }
+            | PatchOperation::PptxSlideDelete { .. }
+            | PatchOperation::PptxSlideReorder { .. }
+            | PatchOperation::PptxSlideCopy { .. }
             | PatchOperation::NodeStyle { .. }
+            | PatchOperation::ImageInsert { .. }
             | PatchOperation::ImageReplace { .. }
+            | PatchOperation::ImageLayersSet { .. }
+            | PatchOperation::DocxPictureLayoutSet { .. }
             | PatchOperation::ImageGeometry { .. } => {}
         }
     }
@@ -7240,7 +4700,7 @@ fn validate_annotation_ranges(
     Ok(())
 }
 
-fn find_idempotent_result(
+pub(crate) fn find_idempotent_result(
     bundle: &Bundle,
     manifest: &crate::HcdManifest,
     patch_id: &str,
@@ -7289,18 +4749,6 @@ fn parse_cursor(cursor: Option<&str>) -> Result<(usize, usize), HcdError> {
     ))
 }
 
-fn escape_text(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-fn escape_attribute(text: &str) -> String {
-    escape_text(text)
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
 fn is_forbidden_xml_character(ch: char) -> bool {
     matches!(ch as u32, 0x0..=0x8 | 0xB | 0xC | 0xE..=0x1F | 0xFFFE | 0xFFFF)
 }
@@ -7308,6 +4756,27 @@ fn is_forbidden_xml_character(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_replacement_targets_the_hashed_anchor_and_preserves_structural_ids() {
+        let id = "n_00000000000000000000000000000001";
+        let old_hash = hash_bytes(b"old");
+        let new_hash = hash_bytes("新😀".as_bytes());
+        let before = format!("<p data-hcd-id=\"{id}\"><span title=\"a > b\" data-hcd-id=\"{id}\" data-hcd-node-hash=\"{old_hash}\"><span>old</span><em> content</em></span><i>untouched</i></p>");
+        let mut html = before.clone();
+        replace_node_content(&mut html, id, "新😀", &new_hash).unwrap();
+        assert_eq!(
+            html,
+            before
+                .replace("<span>old</span><em> content</em>", "新😀")
+                .replace(&old_hash, &new_hash)
+        );
+        assert_eq!(extract_html_text_nodes(&html).unwrap()[id], "新😀");
+        let missing = "n_00000000000000000000000000000002";
+        let unchanged = html.clone();
+        assert!(replace_node_content(&mut html, missing, "bad", &new_hash).is_err());
+        assert_eq!(html, unchanged);
+    }
 
     #[test]
     fn pdf_overlay_geometry_moves_and_resizes_without_changing_text_identity() {
@@ -7532,6 +5001,400 @@ mod tests {
         assert!(validate_node_style(&unsafe_color).is_err());
     }
 
+    fn single_node_bundle(temp: &tempfile::TempDir) -> std::path::PathBuf {
+        let bundle_path = temp.path().join("bundle");
+        let mut writer = crate::BundleWriter::create(&bundle_path).unwrap();
+        writer.write_styles("").unwrap();
+        let node_id = "n_00000000000000000000000000000000".to_string();
+        let chunk_id = "c_00000000000000000000000000000000".to_string();
+        let text = "hello world".to_string();
+        let node_hash = hash_bytes(text.as_bytes());
+        let html = format!(
+            "<p><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{text}</span></p>"
+        );
+        writer
+            .write_chunk(
+                chunk_id.clone(),
+                "body".to_string(),
+                html,
+                crate::ChunkSourceMap {
+                    schema_version: HCD_SCHEMA_VERSION.to_string(),
+                    chunk_id,
+                    entries: vec![crate::NodeMapEntry {
+                        node_id,
+                        node_hash,
+                        source: crate::SourceAnchor {
+                            source_cell_ref: None,
+                            created_in_hcd: false,
+                            part: "text/document".to_string(),
+                            text_ordinal: 1,
+                            paragraph_id: None,
+                            text_id: Some("bytes:0:11".to_string()),
+                            node_kind: "line".to_string(),
+                            editable: true,
+                        },
+                    }],
+                },
+                1,
+                false,
+            )
+            .unwrap();
+        writer
+            .finish(crate::HcdManifest {
+                schema_version: HCD_SCHEMA_VERSION.to_string(),
+                storage_codec: crate::StorageCodec::None,
+                document_id: "font-doc".to_string(),
+                profile: "semantic-flow".to_string(),
+                revision: 0,
+                source: crate::SourceDescriptor {
+                    format: "docx".to_string(),
+                    sha256: "0".repeat(64),
+                    size_bytes: 10,
+                },
+                root_hash: String::new(),
+                annotation_root_hash: String::new(),
+                annotation_href: None,
+                index_prefix: String::new(),
+                index_root_href: None,
+                index_page_count: 0,
+                chunk_count: 0,
+                styles_href: String::new(),
+                theme_revision_id: None,
+                capabilities: crate::HcdCapabilities::default(),
+                fidelity: None,
+                state: "IMPORTING".to_string(),
+                warnings: Vec::new(),
+            })
+            .unwrap();
+        bundle_path
+    }
+
+    #[test]
+    fn text_font_applies_inline_style_and_data_attributes_and_bumps_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = single_node_bundle(&temp);
+        let bundle = crate::Bundle::open(&bundle_path).unwrap();
+        let before = bundle.manifest().unwrap();
+        let node = get_text_node(&bundle, "n_00000000000000000000000000000000").unwrap();
+        let result = apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: "font-doc".to_string(),
+                patch_id: "font-1".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::TextFont {
+                    node_id: node.node.node_id.clone(),
+                    font: crate::FontPatch {
+                        latin: Some("Demo Serif".to_string()),
+                        east_asia: Some("Demo Sans".to_string()),
+                        bidi: None,
+                    },
+                    precondition: crate::NodePrecondition {
+                        node_hash: node.node.node_hash.clone(),
+                    },
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(result.revision, 1);
+        let manifest = bundle.manifest().unwrap();
+        assert_ne!(manifest.root_hash, before.root_hash);
+
+        // the pinned HTML carries the inline face, the round-trip attributes, and
+        // the font-patched marker, but not the node.style presentation marker.
+        let descriptor = bundle.read_index_page(&manifest, 0).unwrap().chunks[0].clone();
+        let html = bundle.read_chunk(&descriptor).unwrap();
+        assert!(html.contains("font-family:'Demo Serif'"), "{html}");
+        assert!(html.contains("data-hcd-font=\"Demo Serif\""), "{html}");
+        assert!(
+            html.contains("data-hcd-font-east-asia=\"Demo Sans\""),
+            "{html}"
+        );
+        assert!(html.contains("data-hcd-font-patched=\"true\""), "{html}");
+        assert!(!html.contains("data-hcd-style-patched"), "{html}");
+
+        // the extracted text and its hash are untouched, so the precondition hash
+        // still matches the node's text.
+        let after = get_text_node(&bundle, "n_00000000000000000000000000000000").unwrap();
+        assert_eq!(after.node.text, "hello world");
+        assert_eq!(after.node.node_hash, hash_bytes(b"hello world"));
+    }
+
+    #[test]
+    fn a_patched_node_writes_exactly_the_text_the_block_renderer_writes() {
+        // The renderer in structure.rs builds a start tag from `attribute_text`, so
+        // this is the check that the two ways of pinning a face cannot drift: the
+        // tag apply_node_font leaves behind must be the tag attribute_text describes.
+        let font = crate::FontPatch {
+            latin: Some("Brand Serif".to_string()),
+            east_asia: Some("等线".to_string()),
+            bidi: None,
+        };
+        let node_id = "n_00000000000000000000000000000000";
+        let mut html =
+            format!("<p><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"h\">Text</span></p>");
+        apply_node_font(&mut html, node_id, &font).unwrap();
+        let expected = format!(
+            "<span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"h\"{}>",
+            font_presentation(&font).unwrap().attribute_text()
+        );
+        assert!(html.contains(&expected), "{html}\nexpected {expected}");
+        assert!(
+            expected.contains("style=\"font-family:'Brand Serif'\""),
+            "{expected}"
+        );
+        assert!(
+            expected.contains("data-hcd-font-east-asia=\"等线\""),
+            "{expected}"
+        );
+    }
+
+    #[test]
+    fn text_font_requires_v37_and_rejects_empty_or_unsafe_families() {
+        // rejected on a non-v37 schema version
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = single_node_bundle(&temp);
+        let bundle = crate::Bundle::open(&bundle_path).unwrap();
+        let node = get_text_node(&bundle, "n_00000000000000000000000000000000").unwrap();
+        let wrong_version = apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION.to_string(),
+                document_id: "font-doc".to_string(),
+                patch_id: "font-bad".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::TextFont {
+                    node_id: node.node.node_id.clone(),
+                    font: crate::FontPatch {
+                        latin: Some("Demo Serif".to_string()),
+                        east_asia: None,
+                        bidi: None,
+                    },
+                    precondition: crate::NodePrecondition {
+                        node_hash: node.node.node_hash.clone(),
+                    },
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        );
+        assert!(wrong_version.is_err());
+
+        // no slot provided
+        assert!(validate_font_patch(&crate::FontPatch {
+            latin: None,
+            east_asia: None,
+            bidi: None,
+        })
+        .is_err());
+        // injection-laden family
+        assert!(validate_font_patch(&crate::FontPatch {
+            latin: Some("X';color:red;url(evil)".to_string()),
+            east_asia: None,
+            bidi: None,
+        })
+        .is_err());
+    }
+
+    /// Pin in one revision, clear in the next: the node ends up with the exact tag
+    /// the import wrote, so preview, read-back, and every export stop seeing a pin.
+    #[test]
+    fn text_font_clear_gives_the_node_back_the_tag_the_import_wrote() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = single_node_bundle(&temp);
+        let bundle = crate::Bundle::open(&bundle_path).unwrap();
+        let node_id = "n_00000000000000000000000000000000";
+        let chunk_at = |bundle: &crate::Bundle| -> String {
+            let manifest = bundle.manifest().unwrap();
+            let descriptor = bundle.read_index_page(&manifest, 0).unwrap().chunks[0].clone();
+            bundle.read_chunk(&descriptor).unwrap()
+        };
+        let imported = chunk_at(&bundle);
+        let node = get_text_node(&bundle, node_id).unwrap();
+        let pin = crate::PatchOperation::TextFont {
+            node_id: node_id.to_string(),
+            font: crate::FontPatch {
+                latin: Some("Demo Serif".to_string()),
+                east_asia: None,
+                bidi: None,
+            },
+            precondition: crate::NodePrecondition {
+                node_hash: node.node.node_hash.clone(),
+            },
+        };
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: "font-doc".to_string(),
+                patch_id: "font-pin".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![pin],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .unwrap();
+        let pinned = chunk_at(&bundle);
+        assert!(
+            pinned != imported && pinned.contains("data-hcd-font-patched"),
+            "{pinned}"
+        );
+
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: "font-doc".to_string(),
+                patch_id: "font-clear".to_string(),
+                base_revision: 1,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::TextFontClear {
+                    node_id: node_id.to_string(),
+                    // The pin did not change the text, so the same hash still guards it.
+                    precondition: crate::NodePrecondition {
+                        node_hash: node.node.node_hash,
+                    },
+                }],
+                metadata: BTreeMap::new(),
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(bundle.manifest().unwrap().revision, 2);
+        assert_eq!(chunk_at(&bundle), imported);
+    }
+
+    /// A clear is not a no-op: a node that carries no pin is refused, so a revision
+    /// cannot be spent erasing a face the document never pinned.
+    #[test]
+    fn text_font_clear_refuses_a_node_that_carries_no_pin() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = single_node_bundle(&temp);
+        let bundle = crate::Bundle::open(&bundle_path).unwrap();
+        let node = get_text_node(&bundle, "n_00000000000000000000000000000000").unwrap();
+        let rejected = apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: "font-doc".to_string(),
+                patch_id: "font-clear-none".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::TextFontClear {
+                    node_id: node.node.node_id.clone(),
+                    precondition: crate::NodePrecondition {
+                        node_hash: node.node.node_hash.clone(),
+                    },
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        );
+        assert!(
+            matches!(&rejected, Err(HcdError::InvalidPatch(message)) if message.contains("no text.font pin")),
+            "{rejected:?}"
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+    }
+
+    /// A face that arrived with the source carries `data-hcd-font*` without the
+    /// patch marker, and is left alone.
+    #[test]
+    fn clearing_a_font_leaves_a_source_face_alone() {
+        let node_id = "n_00000000000000000000000000000000";
+        let html = format!(
+            "<p><span data-hcd-id=\"{node_id}\" data-hcd-font=\"Source Serif\">Text</span></p>"
+        );
+        let mut target = html.clone();
+        assert!(matches!(
+            clear_node_font(&mut target, node_id),
+            Err(HcdError::InvalidPatch(_))
+        ));
+        assert_eq!(target, html);
+    }
+
+    /// Only the pin goes: the declarations the node already had stay, in the form
+    /// the pin wrote them, and a `font-family` the import brought is not restored.
+    #[test]
+    fn clearing_a_font_keeps_the_rest_of_the_style() {
+        let node_id = "n_00000000000000000000000000000000";
+        let font = crate::FontPatch {
+            latin: Some("Demo Serif".to_string()),
+            east_asia: Some("Demo Sans".to_string()),
+            bidi: None,
+        };
+        let mut html = format!(
+            "<p><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"h\" style=\"color:#ff0000;font-family:'Imported Serif'\">Text</span></p>"
+        );
+        apply_node_font(&mut html, node_id, &font).unwrap();
+        assert!(
+            html.contains("style=\"color:#ff0000;font-family:'Demo Serif'\""),
+            "{html}"
+        );
+        clear_node_font(&mut html, node_id).unwrap();
+        assert!(html.contains("style=\"color:#ff0000\""), "{html}");
+        assert!(!html.contains("font-family"), "{html}");
+        assert!(!html.contains("data-hcd-font"), "{html}");
+        assert!(html.contains("data-hcd-node-hash=\"h\""), "{html}");
+        assert!(
+            !html.contains("Imported Serif"),
+            "the overwritten family is not restored, and is not left behind either"
+        );
+    }
+
+    /// Pinning and clearing the same node in one batch would let the last write
+    /// decide, so the batch is refused before anything is rewritten.
+    #[test]
+    fn one_patch_may_not_both_pin_and_clear_a_node() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle_path = single_node_bundle(&temp);
+        let bundle = crate::Bundle::open(&bundle_path).unwrap();
+        let node_id = "n_00000000000000000000000000000000";
+        let node = get_text_node(&bundle, node_id).unwrap();
+        let precondition = crate::NodePrecondition {
+            node_hash: node.node.node_hash.clone(),
+        };
+        let rejected = apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+                document_id: "font-doc".to_string(),
+                patch_id: "font-both".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![
+                    crate::PatchOperation::TextFont {
+                        node_id: node_id.to_string(),
+                        font: crate::FontPatch {
+                            latin: Some("Demo Serif".to_string()),
+                            east_asia: None,
+                            bidi: None,
+                        },
+                        precondition: precondition.clone(),
+                    },
+                    crate::PatchOperation::TextFontClear {
+                        node_id: node_id.to_string(),
+                        precondition,
+                    },
+                ],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        );
+        assert!(
+            matches!(&rejected, Err(HcdError::InvalidPatch(message)) if message.contains("more than one text.font operation")),
+            "{rejected:?}"
+        );
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+    }
+
     #[test]
     fn patch_revisions_every_bounded_index_page() {
         let temp = tempfile::tempdir().unwrap();
@@ -7596,6 +5459,7 @@ mod tests {
                 index_page_count: 0,
                 chunk_count: 0,
                 styles_href: String::new(),
+                theme_revision_id: None,
                 capabilities: crate::HcdCapabilities::default(),
                 fidelity: None,
                 state: "IMPORTING".to_string(),
@@ -7679,6 +5543,1068 @@ mod tests {
         assert!(String::from_utf8(rendered).unwrap().contains("changed"));
     }
 
+    /// Write a deck of `slides` pages, one chunk each, the way the importer
+    /// writes them: a slide section naming its part, carrying one text node.
+    fn slide_deck(path: &std::path::Path, slides: usize) -> crate::Bundle {
+        let parts: Vec<String> = (1..=slides)
+            .map(|number| format!("ppt/slides/slide{number}.xml"))
+            .collect();
+        slide_deck_chunks(path, &parts)
+    }
+
+    /// The same deck written from the list of parts its chunks name, one chunk
+    /// per entry. A part listed twice is one page spread over two chunks, which
+    /// is how a slide whose table the importer had to split arrives.
+    fn slide_deck_chunks(path: &std::path::Path, parts: &[String]) -> crate::Bundle {
+        let mut writer =
+            crate::BundleWriter::create_with_codec(path, crate::StorageCodec::Gzip).unwrap();
+        writer.write_styles("").unwrap();
+        for (index, part) in parts.iter().enumerate() {
+            let node_id = format!("n_{index:032x}");
+            let chunk_id = format!("c_{index:032x}");
+            let text = format!("page-{index}");
+            let node_hash = hash_bytes(text.as_bytes());
+            let html = format!(
+                "<section class=\"hcd-slide\" data-hcd-source-part=\"{part}\" data-hcd-width-emu=\"9144000\" data-hcd-height-emu=\"5143500\" style=\"position:relative;width:960.00px;height:540.00px\"><p class=\"hcd-slide-text\"><span data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\">{text}</span></p></section>"
+            );
+            writer
+                .write_chunk(
+                    chunk_id.clone(),
+                    "slide".to_string(),
+                    html,
+                    crate::ChunkSourceMap {
+                        schema_version: HCD_SCHEMA_VERSION.to_string(),
+                        chunk_id,
+                        entries: vec![crate::NodeMapEntry {
+                            node_id,
+                            node_hash,
+                            source: crate::SourceAnchor {
+                                source_cell_ref: None,
+                                created_in_hcd: false,
+                                part: part.clone(),
+                                text_ordinal: 1,
+                                paragraph_id: None,
+                                text_id: Some(format!("bytes:{index}:{}", index + 1)),
+                                node_kind: "slide-text".to_string(),
+                                editable: true,
+                            },
+                        }],
+                    },
+                    1,
+                    false,
+                )
+                .unwrap();
+        }
+        writer
+            .finish(crate::HcdManifest {
+                schema_version: HCD_SCHEMA_VERSION.to_string(),
+                storage_codec: crate::StorageCodec::Gzip,
+                document_id: "deck".to_string(),
+                profile: "slide-canvas".to_string(),
+                revision: 0,
+                source: crate::SourceDescriptor {
+                    format: "pptx".to_string(),
+                    sha256: "0".repeat(64),
+                    size_bytes: 1000,
+                },
+                root_hash: String::new(),
+                annotation_root_hash: String::new(),
+                annotation_href: None,
+                index_prefix: String::new(),
+                index_root_href: None,
+                index_page_count: 0,
+                chunk_count: 0,
+                styles_href: String::new(),
+                theme_revision_id: None,
+                capabilities: crate::HcdCapabilities::default(),
+                fidelity: None,
+                state: "IMPORTING".to_string(),
+                warnings: Vec::new(),
+            })
+            .unwrap();
+        crate::Bundle::open(path).unwrap()
+    }
+
+    fn delete_slide(bundle: &crate::Bundle, patch_id: &str, chunk_id: &str) -> crate::HcdError {
+        apply_patch(
+            bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_42.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: patch_id.to_string(),
+                base_revision: bundle.manifest().unwrap().revision,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::PptxSlideDelete {
+                    chunk_id: chunk_id.to_string(),
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .expect_err("slide deletion was expected to be refused")
+    }
+
+    #[test]
+    fn pptx_slide_deletion_drops_the_page_from_the_index_and_records_the_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 3);
+        assert_eq!(bundle.manifest().unwrap().chunk_count, 3);
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_42.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "drop-middle".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::PptxSlideDelete {
+                    chunk_id: "c_00000000000000000000000000000001".to_string(),
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .unwrap();
+        let manifest = bundle.manifest().unwrap();
+        assert_eq!(manifest.chunk_count, 2);
+        let page = bundle.read_index_page(&manifest, 0).unwrap();
+        // The pages behind the hole move up one slot, so the deck still reads in
+        // order and the last page is now the one that was third.
+        assert_eq!(
+            page.chunks
+                .iter()
+                .map(|descriptor| (descriptor.sequence, descriptor.chunk_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "c_00000000000000000000000000000000"),
+                (1, "c_00000000000000000000000000000002"),
+            ]
+        );
+        let record = bundle.revision(1).unwrap();
+        assert_eq!(
+            record.slide_removals,
+            vec![crate::SlideRemoval {
+                slide_part: "ppt/slides/slide2.xml".to_string()
+            }]
+        );
+        assert_eq!(
+            record.dirty_node_ids,
+            vec!["n_00000000000000000000000000000001".to_string()]
+        );
+        assert_eq!(
+            record.removed_node_ids,
+            vec!["n_00000000000000000000000000000001".to_string()]
+        );
+        assert_eq!(
+            record.dirty_source_parts,
+            vec!["ppt/slides/slide2.xml".to_string()]
+        );
+        let report = crate::validate_bundle(&bundle).unwrap();
+        assert!(report.valid, "{:?}", report.issues);
+        let mut rendered = Vec::new();
+        crate::render_standalone_html(
+            &bundle,
+            &crate::HtmlPresentationOptions::default(),
+            &mut rendered,
+        )
+        .unwrap();
+        let html = String::from_utf8(rendered).unwrap();
+        assert!(!html.contains("page-1"));
+        assert!(html.contains("page-0") && html.contains("page-2"));
+    }
+
+    #[test]
+    fn pptx_slide_deletion_empties_the_last_index_page_it_leaves_behind() {
+        let temp = tempfile::tempdir().unwrap();
+        // One chunk past a full page, so the deck starts on two pages and the
+        // removal is what pulls it back to one.
+        let slides = crate::INDEX_PAGE_SIZE + 1;
+        let bundle = slide_deck(&temp.path().join("bundle"), slides);
+        let before = bundle.manifest().unwrap();
+        assert_eq!(before.index_page_count, 2);
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_42.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "drop-first".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::PptxSlideDelete {
+                    chunk_id: "c_00000000000000000000000000000000".to_string(),
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .unwrap();
+        let manifest = bundle.manifest().unwrap();
+        assert_eq!(manifest.chunk_count, crate::INDEX_PAGE_SIZE);
+        assert_eq!(manifest.index_page_count, 1);
+        let page = bundle.read_index_page(&manifest, 0).unwrap();
+        assert_eq!(page.revision, 1);
+        assert_eq!(page.chunks[0].sequence, 0);
+        assert_eq!(
+            page.chunks[0].chunk_id,
+            "c_00000000000000000000000000000001"
+        );
+        assert_eq!(
+            bundle.revision(1).unwrap().slide_removals[0].slide_part,
+            "ppt/slides/slide1.xml"
+        );
+        let report = crate::validate_bundle(&bundle).unwrap();
+        assert!(report.valid, "{:?}", report.issues);
+    }
+
+    #[test]
+    fn pptx_slide_deletion_refuses_to_empty_a_deck_or_name_a_page_it_cannot_find() {
+        let temp = tempfile::tempdir().unwrap();
+        // A deck of one is the deck a deletion cannot touch: PowerPoint does not
+        // open a presentation with no slides.
+        let only = slide_deck(&temp.path().join("one"), 1);
+        assert!(matches!(
+            delete_slide(&only, "drop-only", "c_00000000000000000000000000000000"),
+            HcdError::InvalidPatch(_)
+        ));
+        assert_eq!(only.manifest().unwrap().revision, 0);
+
+        let deck = slide_deck(&temp.path().join("three"), 3);
+        // A chunk the index does not hold, and a chunk that is not a page.
+        let error = delete_slide(&deck, "drop-unknown", "c_0000000000000000000000000000ffff");
+        assert!(
+            matches!(error, HcdError::Unsupported(_)),
+            "unexpected: {error:?}"
+        );
+        assert_eq!(deck.manifest().unwrap().revision, 0);
+    }
+
+    #[test]
+    fn an_added_slide_never_takes_a_part_name_the_deck_already_spent() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 3);
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_42.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "drop-last".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::PptxSlideDelete {
+                    chunk_id: "c_00000000000000000000000000000002".to_string(),
+                }],
+                metadata: BTreeMap::new(),
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            bundle.revision(1).unwrap().slide_removals[0].slide_part,
+            "ppt/slides/slide3.xml"
+        );
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "add-after-drop".to_string(),
+                base_revision: 1,
+                actor: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::PptxSlideAdd {}],
+                metadata: BTreeMap::new(),
+            },
+            1,
+        )
+        .unwrap();
+        // The deck is back to three pages and the new one is named past the hole,
+        // not into it: the export could not drop and write the same entry.
+        let manifest = bundle.manifest().unwrap();
+        assert_eq!(manifest.chunk_count, 3);
+        let page = bundle
+            .read_index_page(&manifest, manifest.index_page_count - 1)
+            .unwrap();
+        let added = page.chunks.last().unwrap();
+        assert_eq!(added.region, "slide");
+        assert_eq!(
+            bundle.revision(2).unwrap().slide_additions[0].slide_part,
+            "ppt/slides/slide4.xml"
+        );
+        assert!(bundle
+            .read_chunk(added)
+            .unwrap()
+            .contains("ppt/slides/slide4.xml"));
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn pptx_slide_deletion_needs_the_page_version_it_addresses() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 2);
+        for (patch_id, schema_version, chunk_id) in [
+            (
+                "wrong-version",
+                crate::HCD_PATCH_SCHEMA_VERSION_41,
+                "c_0".to_string(),
+            ),
+            (
+                "short-id",
+                crate::HCD_PATCH_SCHEMA_VERSION_42,
+                "c_0000000000000000000000000000000".to_string(),
+            ),
+            (
+                "uppercase-id",
+                crate::HCD_PATCH_SCHEMA_VERSION_42,
+                "c_0000000000000000000000000000000A".to_string(),
+            ),
+            (
+                "worksheet-chunk",
+                crate::HCD_PATCH_SCHEMA_VERSION_42,
+                "s_00000000000000000000000000000000".to_string(),
+            ),
+        ] {
+            let error = apply_patch(
+                &bundle,
+                &crate::PatchBatch {
+                    schema_version: schema_version.to_string(),
+                    document_id: "deck".to_string(),
+                    patch_id: patch_id.to_string(),
+                    base_revision: bundle.manifest().unwrap().revision,
+                    actor: BTreeMap::new(),
+                    operations: vec![crate::PatchOperation::PptxSlideDelete {
+                        chunk_id: chunk_id.to_string(),
+                    }],
+                    metadata: BTreeMap::new(),
+                },
+                0,
+            )
+            .expect_err("the patch was expected to be refused");
+            assert!(
+                matches!(error, HcdError::Unsupported(_) | HcdError::InvalidPatch(_)),
+                "{patch_id}: unexpected {error:?}"
+            );
+        }
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        assert_eq!(bundle.manifest().unwrap().chunk_count, 2);
+    }
+
+    /// The chunk id a deck written by `slide_deck` gives its `index + 1` page.
+    fn slide_chunk(index: usize) -> String {
+        format!("c_{index:032x}")
+    }
+
+    fn move_slide_patch(chunk_id: &str, direction: &str, base: u64) -> crate::PatchBatch {
+        crate::PatchBatch {
+            schema_version: crate::HCD_PATCH_SCHEMA_VERSION_43.to_string(),
+            document_id: "deck".to_string(),
+            patch_id: format!("move-{direction}-{base}"),
+            base_revision: base,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![crate::PatchOperation::PptxSlideReorder {
+                chunk_id: chunk_id.to_string(),
+                direction: direction.to_string(),
+                target_index: None,
+            }],
+        }
+    }
+
+    /// The chunks the index holds, in the order the deck shows them.
+    fn index_chunk_order(bundle: &crate::Bundle) -> Vec<String> {
+        let manifest = bundle.manifest().unwrap();
+        (0..manifest.index_page_count)
+            .flat_map(|page| bundle.read_index_page(&manifest, page).unwrap().chunks)
+            .map(|descriptor| descriptor.chunk_id)
+            .collect()
+    }
+
+    #[test]
+    fn pptx_slide_reorder_swaps_two_pages_without_rewriting_a_chunk() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 3);
+        let before = bundle.manifest().unwrap();
+        let written: Vec<(String, String)> = bundle
+            .read_index_page(&before, 0)
+            .unwrap()
+            .chunks
+            .iter()
+            .map(|descriptor| {
+                (
+                    descriptor.chunk_id.clone(),
+                    bundle.read_chunk(descriptor).unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            written
+                .iter()
+                .map(|(chunk_id, _)| chunk_id.clone())
+                .collect::<Vec<_>>(),
+            vec![slide_chunk(0), slide_chunk(1), slide_chunk(2)]
+        );
+
+        let result = apply_patch(&bundle, &move_slide_patch(&slide_chunk(1), "up", 0), 0).unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_MOVED"));
+        // Nothing was said differently. Only where the two pages stand changed,
+        // so no node and no source part is dirty and the chunks that moved are
+        // the only ones a reader has to look at again.
+        assert!(result.dirty_node_ids.is_empty());
+        assert!(result.dirty_source_parts.is_empty());
+        assert_eq!(result.dirty_chunk_ids, vec![slide_chunk(0), slide_chunk(1)]);
+
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, before.chunk_count);
+        assert_eq!(head.index_page_count, before.index_page_count);
+        assert_eq!(
+            index_chunk_order(&bundle),
+            vec![slide_chunk(1), slide_chunk(0), slide_chunk(2)]
+        );
+        let page = bundle.read_index_page(&head, 0).unwrap();
+        assert_eq!(page.revision, 1);
+        assert_eq!(
+            page.chunks
+                .iter()
+                .map(|descriptor| descriptor.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        // Each chunk still says exactly what it said before, byte for byte: the
+        // pages swapped places, nothing was rewritten.
+        for descriptor in page.chunks.iter() {
+            let expected = written
+                .iter()
+                .find(|(chunk_id, _)| *chunk_id == descriptor.chunk_id)
+                .unwrap();
+            assert_eq!(
+                bundle.read_chunk(descriptor).unwrap(),
+                expected.1,
+                "{}",
+                descriptor.chunk_id
+            );
+        }
+
+        let record = bundle.revision(1).unwrap();
+        assert_eq!(
+            record.slide_reorders,
+            vec![crate::SlideReorder {
+                slide_part: "ppt/slides/slide2.xml".to_string()
+            }]
+        );
+        assert!(record.dirty_node_ids.is_empty());
+        assert!(record.dirty_source_parts.is_empty());
+        assert_eq!(record.dirty_chunk_ids.len(), 2);
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+
+        // The deck a reader renders puts the moved page in front.
+        let mut rendered = Vec::new();
+        crate::render_standalone_html(
+            &bundle,
+            &crate::HtmlPresentationOptions::default(),
+            &mut rendered,
+        )
+        .unwrap();
+        let html = String::from_utf8(rendered).unwrap();
+        assert!(
+            html.find("page-1") < html.find("page-0"),
+            "the moved page does not render first: {html}"
+        );
+    }
+
+    #[test]
+    fn pptx_slide_drag_reorders_nonadjacent_pages_in_one_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 5);
+        let drag = |source: usize, target: usize, base: u64| {
+            let mut patch = move_slide_patch(&slide_chunk(source), "", base);
+            patch.schema_version = crate::HCD_PATCH_SCHEMA_VERSION_48.to_string();
+            patch.patch_id = format!("drag-{source}-{target}-{base}");
+            patch.operations = vec![crate::PatchOperation::PptxSlideReorder {
+                chunk_id: slide_chunk(source),
+                direction: String::new(),
+                target_index: Some(target),
+            }];
+            patch
+        };
+        assert_eq!(apply_patch(&bundle, &drag(0, 3, 0), 0).unwrap().revision, 1);
+        assert_eq!(index_chunk_order(&bundle), [1, 2, 3, 0, 4].map(slide_chunk));
+        assert_eq!(apply_patch(&bundle, &drag(4, 1, 1), 1).unwrap().revision, 2);
+        assert_eq!(index_chunk_order(&bundle), [1, 4, 2, 3, 0].map(slide_chunk));
+        for patch in [drag(0, 9, 2), drag(0, 4, 2), drag(0, 1, 0)] {
+            assert!(apply_patch(&bundle, &patch, 2).is_err());
+            assert_eq!(bundle.manifest().unwrap().revision, 2);
+            assert_eq!(index_chunk_order(&bundle), [1, 4, 2, 3, 0].map(slide_chunk));
+        }
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn pptx_slide_reorder_moves_every_chunk_of_a_page_that_spans_two() {
+        let temp = tempfile::tempdir().unwrap();
+        // One page spread over two chunks, the way a slide whose table the
+        // importer had to split arrives, with a one-chunk page behind it.
+        let parts: Vec<String> = [
+            "ppt/slides/slide1.xml",
+            "ppt/slides/slide1.xml",
+            "ppt/slides/slide2.xml",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let bundle = slide_deck_chunks(&temp.path().join("bundle"), &parts);
+        let before = bundle.manifest().unwrap();
+
+        apply_patch(&bundle, &move_slide_patch(&slide_chunk(2), "up", 0), 0).unwrap();
+        assert_eq!(
+            index_chunk_order(&bundle),
+            vec![slide_chunk(2), slide_chunk(0), slide_chunk(1)]
+        );
+        assert_eq!(bundle.revision(1).unwrap().dirty_chunk_ids.len(), 3);
+        assert_eq!(
+            bundle.revision(1).unwrap().slide_reorders[0].slide_part,
+            "ppt/slides/slide2.xml"
+        );
+
+        // The two-chunk page comes back as a page, whichever of its chunks the
+        // patch names: this one names the second, standing at the back.
+        apply_patch(&bundle, &move_slide_patch(&slide_chunk(1), "up", 1), 1).unwrap();
+        assert_eq!(
+            index_chunk_order(&bundle),
+            vec![slide_chunk(0), slide_chunk(1), slide_chunk(2)]
+        );
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, before.chunk_count);
+        assert_eq!(head.index_page_count, before.index_page_count);
+        assert_eq!(
+            bundle.revision(2).unwrap().slide_reorders[0].slide_part,
+            "ppt/slides/slide1.xml"
+        );
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn pptx_slide_reorder_refuses_a_page_with_no_neighbour() {
+        let temp = tempfile::tempdir().unwrap();
+        let solo = slide_deck(&temp.path().join("solo"), 1);
+        let error = apply_patch(&solo, &move_slide_patch(&slide_chunk(0), "up", 0), 0)
+            .expect_err("a deck of one page has nothing to swap with");
+        assert!(error.to_string().contains("two slides"), "{error}");
+
+        let bundle = slide_deck(&temp.path().join("deck"), 2);
+        for (chunk_id, direction, expected) in [
+            (slide_chunk(0), "up", "already the first page"),
+            (slide_chunk(1), "down", "already the last page"),
+        ] {
+            let error = apply_patch(&bundle, &move_slide_patch(&chunk_id, direction, 0), 0)
+                .expect_err("the page at this end has no neighbour");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        assert_eq!(
+            index_chunk_order(&bundle),
+            vec![slide_chunk(0), slide_chunk(1)]
+        );
+    }
+
+    #[test]
+    fn pptx_slide_reorder_needs_the_page_direction_and_version_it_addresses() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 2);
+        for (patch_id, schema_version, chunk_id, direction) in [
+            (
+                "old-version",
+                crate::HCD_PATCH_SCHEMA_VERSION,
+                slide_chunk(0),
+                "up",
+            ),
+            (
+                "wrong-version",
+                crate::HCD_PATCH_SCHEMA_VERSION_42,
+                slide_chunk(0),
+                "up",
+            ),
+            (
+                "sideways",
+                crate::HCD_PATCH_SCHEMA_VERSION_43,
+                slide_chunk(0),
+                "left",
+            ),
+            (
+                "short-id",
+                crate::HCD_PATCH_SCHEMA_VERSION_43,
+                "c_0".to_string(),
+                "up",
+            ),
+            (
+                "uppercase-id",
+                crate::HCD_PATCH_SCHEMA_VERSION_43,
+                "c_0000000000000000000000000000000A".to_string(),
+                "up",
+            ),
+            (
+                "other-chunk",
+                crate::HCD_PATCH_SCHEMA_VERSION_43,
+                "s_00000000000000000000000000000000".to_string(),
+                "up",
+            ),
+        ] {
+            let error = apply_patch(
+                &bundle,
+                &crate::PatchBatch {
+                    schema_version: schema_version.to_string(),
+                    document_id: "deck".to_string(),
+                    patch_id: patch_id.to_string(),
+                    base_revision: bundle.manifest().unwrap().revision,
+                    actor: BTreeMap::new(),
+                    metadata: BTreeMap::new(),
+                    operations: vec![crate::PatchOperation::PptxSlideReorder {
+                        chunk_id,
+                        direction: direction.to_string(),
+                        target_index: None,
+                    }],
+                },
+                0,
+            )
+            .expect_err("the patch was expected to be refused");
+            assert!(
+                matches!(error, HcdError::Unsupported(_) | HcdError::InvalidPatch(_)),
+                "{patch_id}: unexpected {error:?}"
+            );
+        }
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        assert_eq!(
+            index_chunk_order(&bundle),
+            vec![slide_chunk(0), slide_chunk(1)]
+        );
+    }
+
+    /// The chunk id the importer would hand a page's chunk: the same formula a
+    /// copy uses, so a test can name the chunk it expects without reading it back.
+    fn copied_chunk_id(document_id: &str, part: &str, ordinal: usize) -> String {
+        stable_node_id(&[document_id, part, "slide-chunk", &ordinal.to_string()])
+            .replacen("n_", "c_", 1)
+    }
+
+    fn copy_slide_patch(chunk_id: &str, base: u64) -> crate::PatchBatch {
+        crate::PatchBatch {
+            schema_version: crate::HCD_PATCH_SCHEMA_VERSION_44.to_string(),
+            document_id: "deck".to_string(),
+            patch_id: format!("copy-{chunk_id}-{base}"),
+            base_revision: base,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![crate::PatchOperation::PptxSlideCopy {
+                chunk_id: chunk_id.to_string(),
+            }],
+        }
+    }
+
+    /// Every node id the index's slide chunks name, in index order.
+    fn index_slide_node_ids(bundle: &crate::Bundle) -> Vec<String> {
+        let manifest = bundle.manifest().unwrap();
+        (0..manifest.index_page_count)
+            .flat_map(|page| bundle.read_index_page(&manifest, page).unwrap().chunks)
+            .filter(|descriptor| descriptor.region == "slide")
+            .flat_map(|descriptor| {
+                bundle
+                    .read_map(&descriptor)
+                    .unwrap()
+                    .entries
+                    .into_iter()
+                    .map(|entry| entry.node_id)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pptx_slide_copy_duplicates_a_page_right_behind_the_original() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 3);
+        let before = bundle.manifest().unwrap();
+        let original = bundle.read_index_page(&before, 0).unwrap().chunks[0].clone();
+        let original_html = bundle.read_chunk(&original).unwrap();
+        let new_part = "ppt/slides/slide4.xml".to_string();
+        let copied = copied_chunk_id("deck", &new_part, 0);
+        let copied_node =
+            pptx_copied_node_id("deck", &new_part, original.first_node_id.as_ref().unwrap());
+
+        let result = apply_patch(&bundle, &copy_slide_patch(&slide_chunk(0), 0), 0).unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_COPIED"));
+        // The page it was copied from is untouched: the copy is what dirtied, and
+        // it dirties no node and no source part, because nothing was said
+        // differently — a new page simply stands there.
+        assert!(result.dirty_node_ids.is_empty());
+        assert!(result.dirty_source_parts.is_empty());
+        assert_eq!(result.dirty_chunk_ids, vec![copied.clone()]);
+
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, before.chunk_count + 1);
+        assert_eq!(
+            index_chunk_order(&bundle),
+            vec![
+                slide_chunk(0),
+                copied.clone(),
+                slide_chunk(1),
+                slide_chunk(2)
+            ]
+        );
+
+        let page = bundle.read_index_page(&head, 0).unwrap();
+        let descriptor = page
+            .chunks
+            .iter()
+            .find(|descriptor| descriptor.chunk_id == copied)
+            .expect("the copy is in the index");
+        assert_eq!(descriptor.region, "slide");
+        assert!(!descriptor.continuation);
+        assert_eq!(descriptor.node_count, 1);
+        assert_eq!(
+            descriptor.first_node_id.as_deref(),
+            Some(copied_node.as_str())
+        );
+        assert_eq!(descriptor.block_count, original.block_count);
+        assert_eq!(descriptor.text_chars, original.text_chars);
+        assert_eq!(page.chunks.len(), head.chunk_count);
+
+        // The copy says the same thing about a page of its own.
+        let copied_html = bundle.read_chunk(descriptor).unwrap();
+        assert!(copied_html.contains(&format!("data-hcd-source-part=\"{new_part}\"")));
+        assert!(!copied_html.contains("ppt/slides/slide1.xml"));
+        assert!(copied_html.contains(&copied_node));
+        assert!(!copied_html.contains("n_00000000000000000000000000000000"));
+        assert!(copied_html.contains(">page-0<"));
+        assert_eq!(copied_html.len() as u64, descriptor.byte_length);
+        let copied_map = bundle.read_map(descriptor).unwrap();
+        assert_eq!(copied_map.chunk_id, copied);
+        assert_eq!(copied_map.entries.len(), 1);
+        assert_eq!(copied_map.entries[0].node_id, copied_node);
+        assert_eq!(copied_map.entries[0].node_hash, hash_bytes(b"page-0"));
+        assert_eq!(copied_map.entries[0].source.part, new_part);
+        assert!(!copied_map.entries[0].source.created_in_hcd);
+        assert_eq!(
+            copied_map.entries[0].source.text_id.as_deref(),
+            Some("bytes:0:1")
+        );
+        assert_eq!(bundle.read_chunk(&original).unwrap(), original_html);
+
+        let record = bundle.revision(1).unwrap();
+        assert_eq!(
+            record.slide_copies,
+            vec![crate::SlideCopy {
+                slide_part: new_part.clone(),
+                source_slide_part: "ppt/slides/slide1.xml".to_string(),
+            }]
+        );
+        assert_eq!(record.chunk_count.unwrap(), head.chunk_count);
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+
+        // A reader renders the page twice.
+        let mut rendered = Vec::new();
+        crate::render_standalone_html(
+            &bundle,
+            &crate::HtmlPresentationOptions::default(),
+            &mut rendered,
+        )
+        .unwrap();
+        let html = String::from_utf8(rendered).unwrap();
+        assert_eq!(html.matches("page-0").count(), 2, "{html}");
+
+        // Editing the copy reaches the copy and not the page it was made from:
+        // the ids are the copy's own, and so is the part they name.
+        let splice = crate::PatchBatch {
+            schema_version: crate::HCD_PATCH_SCHEMA_VERSION.to_string(),
+            document_id: "deck".to_string(),
+            patch_id: "edit-the-copy".to_string(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![crate::PatchOperation::TextSplice {
+                node_id: copied_node.clone(),
+                start: 0,
+                delete_count: 6,
+                insert_text: "second".to_string(),
+                precondition: crate::NodePrecondition {
+                    node_hash: hash_bytes(b"page-0"),
+                },
+            }],
+        };
+        let result = apply_patch(&bundle, &splice, 1).unwrap();
+        assert_eq!(result.dirty_node_ids, vec![copied_node.clone()]);
+        assert_eq!(result.dirty_source_parts, vec![new_part.clone()]);
+        assert_eq!(bundle.read_chunk(&original).unwrap(), original_html);
+        let head = bundle.manifest().unwrap();
+        let descriptor = (0..head.index_page_count)
+            .flat_map(|page| bundle.read_index_page(&head, page).unwrap().chunks)
+            .find(|descriptor| descriptor.chunk_id == copied)
+            .unwrap();
+        let copied_html = bundle.read_chunk(&descriptor).unwrap();
+        assert!(copied_html.contains(">second<"), "{copied_html}");
+        assert!(copied_html.contains(&new_part));
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn pptx_slide_copy_copies_every_chunk_of_a_page_that_spans_two() {
+        let temp = tempfile::tempdir().unwrap();
+        // One page spread over two chunks, the way a slide whose table the
+        // importer had to split arrives, with a one-chunk page behind it.
+        let parts: Vec<String> = [
+            "ppt/slides/slide1.xml",
+            "ppt/slides/slide1.xml",
+            "ppt/slides/slide2.xml",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let bundle = slide_deck_chunks(&temp.path().join("bundle"), &parts);
+
+        // Naming either chunk of the page copies the whole page.
+        let result = apply_patch(&bundle, &copy_slide_patch(&slide_chunk(1), 0), 0).unwrap();
+        assert_eq!(result.revision, 1);
+        let new_part = "ppt/slides/slide3.xml";
+        let first = copied_chunk_id("deck", new_part, 0);
+        let second = copied_chunk_id("deck", new_part, 1);
+        let mut expected = vec![first.clone(), second.clone()];
+        expected.sort();
+        assert_eq!(result.dirty_chunk_ids, expected);
+
+        assert_eq!(
+            index_chunk_order(&bundle),
+            vec![
+                slide_chunk(0),
+                slide_chunk(1),
+                first.clone(),
+                second.clone(),
+                slide_chunk(2)
+            ]
+        );
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, 5);
+        let page = bundle.read_index_page(&head, 0).unwrap();
+        let cloned_first = page
+            .chunks
+            .iter()
+            .find(|descriptor| descriptor.chunk_id == first)
+            .unwrap();
+        let cloned_second = page
+            .chunks
+            .iter()
+            .find(|descriptor| descriptor.chunk_id == second)
+            .unwrap();
+        // The run the copy reaches over is the run the page it came from spans.
+        assert_eq!(cloned_first.continuation, page.chunks[0].continuation);
+        assert_eq!(cloned_second.continuation, page.chunks[1].continuation);
+        for descriptor in [cloned_first, cloned_second] {
+            assert!(bundle
+                .read_chunk(descriptor)
+                .unwrap()
+                .contains(&format!("data-hcd-source-part=\"{new_part}\"")));
+        }
+        assert_eq!(
+            bundle.revision(1).unwrap().slide_copies[0].source_slide_part,
+            "ppt/slides/slide1.xml"
+        );
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn pptx_slide_copy_twice_names_each_copy_by_its_own_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 2);
+        apply_patch(&bundle, &copy_slide_patch(&slide_chunk(0), 0), 0).unwrap();
+        let result = apply_patch(&bundle, &copy_slide_patch(&slide_chunk(0), 1), 1).unwrap();
+
+        // The second copy stands right behind the page it was made from, ahead of
+        // the copy made before it, and it is named by a part of its own — three
+        // pages, no node id shared by any two of them.
+        let first_copy = copied_chunk_id("deck", "ppt/slides/slide3.xml", 0);
+        let second_copy = copied_chunk_id("deck", "ppt/slides/slide4.xml", 0);
+        assert_eq!(result.dirty_chunk_ids, vec![second_copy.clone()]);
+        assert_eq!(
+            index_chunk_order(&bundle),
+            vec![slide_chunk(0), second_copy, first_copy, slide_chunk(1)]
+        );
+        assert_eq!(bundle.manifest().unwrap().chunk_count, 4);
+        // Two pages copied from one deck of two: four chunks, four node ids, and
+        // no two of them the same.
+        let ids = index_slide_node_ids(&bundle);
+        assert_eq!(ids.len(), 4);
+        let unique: HashSet<String> = ids.iter().cloned().collect();
+        assert_eq!(unique.len(), 4, "{ids:?}");
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn pptx_slide_copy_snapshots_created_and_rewritten_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        // A page HCD created has no page in the source package to copy from.
+        let bundle = slide_deck(&temp.path().join("created"), 2);
+        apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "add-one".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::PptxSlideAdd {}],
+            },
+            0,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        let added = (0..head.index_page_count)
+            .flat_map(|page| bundle.read_index_page(&head, page).unwrap().chunks)
+            .find(|descriptor| {
+                descriptor.region == "slide"
+                    && bundle
+                        .read_chunk(descriptor)
+                        .unwrap()
+                        .contains("ppt/slides/slide3.xml")
+            })
+            .expect("the created page is in the index");
+        apply_patch(&bundle, &copy_slide_patch(&added.chunk_id, 1), 1).unwrap();
+        assert_eq!(bundle.manifest().unwrap().revision, 2);
+        assert!(bundle
+            .revision(2)
+            .unwrap()
+            .dirty_source_parts
+            .contains(&"ppt/slides/slide4.xml".to_string()));
+
+        // A page HCD rewrote would be copied from the words the source package
+        // still holds rather than the ones the bundle shows, so it waits.
+        let other = slide_deck(&temp.path().join("rewrote"), 2);
+        let node = get_text_node(&other, "n_00000000000000000000000000000000").unwrap();
+        apply_patch(
+            &other,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "rewrite-page-0".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![crate::PatchOperation::TextSplice {
+                    node_id: node.node.node_id.clone(),
+                    start: 0,
+                    delete_count: node.node.text.chars().count(),
+                    insert_text: "changed".to_string(),
+                    precondition: crate::NodePrecondition {
+                        node_hash: node.node.node_hash.clone(),
+                    },
+                }],
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            other.revision(1).unwrap().dirty_source_parts,
+            vec!["ppt/slides/slide1.xml".to_string()]
+        );
+        apply_patch(&other, &copy_slide_patch(&slide_chunk(0), 1), 1).unwrap();
+        let copied = pptx_copied_node_id("deck", "ppt/slides/slide3.xml", &node.node.node_id);
+        assert_eq!(get_text_node(&other, &copied).unwrap().node.text, "changed");
+        assert!(other.revision(2).unwrap().dirty_node_ids.contains(&copied));
+        // The page nobody typed into is still there to copy.
+        apply_patch(&other, &copy_slide_patch(&slide_chunk(1), 2), 2).unwrap();
+        assert_eq!(
+            bundle.manifest().unwrap().chunk_count,
+            4,
+            "the created page and its copy both remain"
+        );
+        assert!(crate::validate_bundle(&bundle).unwrap().valid);
+        assert!(crate::validate_bundle(&other).unwrap().valid);
+    }
+
+    #[test]
+    fn pptx_slide_copy_needs_the_page_and_the_version_it_addresses() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = slide_deck(&temp.path().join("bundle"), 2);
+        for (patch_id, schema_version, chunk_id) in [
+            (
+                "old-version",
+                crate::HCD_PATCH_SCHEMA_VERSION,
+                slide_chunk(0),
+            ),
+            (
+                "wrong-version",
+                crate::HCD_PATCH_SCHEMA_VERSION_43,
+                slide_chunk(0),
+            ),
+            (
+                "short-id",
+                crate::HCD_PATCH_SCHEMA_VERSION_44,
+                "c_0".to_string(),
+            ),
+            (
+                "uppercase-id",
+                crate::HCD_PATCH_SCHEMA_VERSION_44,
+                "c_0000000000000000000000000000000A".to_string(),
+            ),
+            (
+                "other-chunk",
+                crate::HCD_PATCH_SCHEMA_VERSION_44,
+                "s_00000000000000000000000000000000".to_string(),
+            ),
+        ] {
+            let error = apply_patch(
+                &bundle,
+                &crate::PatchBatch {
+                    schema_version: schema_version.to_string(),
+                    document_id: "deck".to_string(),
+                    patch_id: patch_id.to_string(),
+                    base_revision: bundle.manifest().unwrap().revision,
+                    actor: BTreeMap::new(),
+                    metadata: BTreeMap::new(),
+                    operations: vec![crate::PatchOperation::PptxSlideCopy { chunk_id }],
+                },
+                0,
+            )
+            .expect_err("the patch was expected to be refused");
+            assert!(
+                matches!(error, HcdError::Unsupported(_) | HcdError::InvalidPatch(_)),
+                "{patch_id}: unexpected {error:?}"
+            );
+        }
+
+        // One operation per patch: a copy that also asks for another copy waits.
+        let error = apply_patch(
+            &bundle,
+            &crate::PatchBatch {
+                schema_version: crate::HCD_PATCH_SCHEMA_VERSION_44.to_string(),
+                document_id: "deck".to_string(),
+                patch_id: "two-copies".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![
+                    crate::PatchOperation::PptxSlideCopy {
+                        chunk_id: slide_chunk(0),
+                    },
+                    crate::PatchOperation::PptxSlideCopy {
+                        chunk_id: slide_chunk(1),
+                    },
+                ],
+            },
+            0,
+        )
+        .expect_err("a patch copies one page at a time");
+        assert!(error.to_string().contains("one PPTX slide copy"), "{error}");
+
+        assert_eq!(bundle.manifest().unwrap().revision, 0);
+        assert_eq!(
+            index_chunk_order(&bundle),
+            vec![slide_chunk(0), slide_chunk(1)]
+        );
+    }
+
     #[test]
     fn runtime_patch_validation_enforces_frozen_ids_hashes_and_annotations() {
         assert!(validate_node_id("n_00000000000000000000000000000000").is_ok());
@@ -7702,5 +6628,340 @@ mod tests {
         annotation.confidence = Some(0.5);
         annotation.annotation_id = "x".repeat(MAX_IDENTIFIER_BYTES + 1);
         assert!(validate_annotation(&annotation).is_err());
+    }
+
+    #[test]
+    fn freezing_a_worksheet_replaces_every_window_pane_and_reports_what_changed() {
+        // Two windows of one worksheet, the first read straight out of a source
+        // workbook that had been split by hand: state, absolute corner, and the
+        // split written in twips, with no marker yet.
+        let mut html = concat!(
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"Overview\" data-hcd-row-start=\"1\" ",
+            "data-hcd-pane-state=\"frozen-split\" data-hcd-pane-top-left-cell=\"$C$4\" ",
+            "data-hcd-active-pane=\"bottom-right\" data-hcd-frozen-rows=\"1\" ",
+            "data-hcd-split-x-twips=\"720\" data-hcd-split-y-twips=\"240\"></section>",
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"Overview\" data-hcd-row-start=\"16\"></section>",
+            "<section class=\"hcd-text\" data-hcd-node=\"n_00000000000000000000000000000001\"></section>",
+        )
+        .to_string();
+        let (rewritten, windows) = freeze_xlsx_sheet_sections(&mut html, 2, 3).unwrap();
+        assert_eq!(
+            (rewritten, windows),
+            (2, 2),
+            "both windows of the sheet speak"
+        );
+        assert!(html.contains("data-hcd-pane-edited=\"true\""));
+        assert!(html.contains("data-hcd-pane-state=\"frozen\""));
+        assert!(html.contains("data-hcd-pane-top-left-cell=\"D3\""));
+        assert!(html.contains("data-hcd-frozen-rows=\"2\""));
+        assert!(html.contains("data-hcd-frozen-columns=\"3\""));
+        assert!(html.contains("data-hcd-active-pane=\"bottom-right\""));
+        // The split the source wrote by hand does not ride along behind a freeze,
+        // and the sheet's own window attributes stay where they were.
+        assert!(!html.contains("data-hcd-split-x-twips"));
+        assert!(!html.contains("data-hcd-split-y-twips"));
+        assert!(!html.contains("$C$4"));
+        assert!(!html.contains("frozen-split"));
+        assert!(html.contains("data-hcd-row-start=\"16\""));
+        // A window of another chunk kind is left completely alone: the marker
+        // lands on the two worksheet windows and nowhere else in the chunk.
+        assert_eq!(html.matches("data-hcd-pane-edited=\"true\"").count(), 2);
+
+        // Asking for the split the sheet already holds changes nothing, which is
+        // what lets the patch refuse it instead of recording an empty revision.
+        assert_eq!(freeze_xlsx_sheet_sections(&mut html, 2, 3).unwrap(), (0, 2));
+
+        // Excel names only the side it splits, so a column-only freeze writes no
+        // row count and the scrolling corner sits in the top right window.
+        let mut column_only =
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"Ledger\"></section>".to_string();
+        assert_eq!(
+            freeze_xlsx_sheet_sections(&mut column_only, 0, 1).unwrap(),
+            (1, 1)
+        );
+        assert!(column_only.contains("data-hcd-pane-top-left-cell=\"B1\""));
+        assert!(column_only.contains("data-hcd-active-pane=\"top-right\""));
+        assert!(column_only.contains("data-hcd-frozen-columns=\"1\""));
+        assert!(!column_only.contains("data-hcd-frozen-rows"));
+
+        // Releasing takes the whole pane vocabulary with it but keeps the marker:
+        // an export has to know this window spoke, not that it was never asked.
+        let (released, windows) = freeze_xlsx_sheet_sections(&mut html, 0, 0).unwrap();
+        assert_eq!((released, windows), (2, 2));
+        assert!(html.contains("data-hcd-pane-edited=\"true\""));
+        assert!(!html.contains("data-hcd-pane-state"));
+        assert!(!html.contains("data-hcd-pane-top-left-cell"));
+        assert!(!html.contains("data-hcd-active-pane"));
+        assert!(!html.contains("data-hcd-frozen-"));
+    }
+
+    #[test]
+    fn a_row_or_column_moved_through_a_frozen_band_moves_the_band_in_every_window() {
+        // Two windows of one worksheet. The first carries a pane the history froze,
+        // so its whole vocabulary is rebuilt from the moved counts; the second was
+        // filled in from a source workbook that froze the sheet itself.
+        let mut html = concat!(
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"Overview\" data-hcd-row-start=\"1\" ",
+            "data-hcd-pane-edited=\"true\" data-hcd-pane-state=\"frozen\" ",
+            "data-hcd-pane-top-left-cell=\"B3\" data-hcd-active-pane=\"bottom-right\" ",
+            "data-hcd-frozen-rows=\"2\" data-hcd-frozen-columns=\"1\"></section>",
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"Overview\" data-hcd-row-start=\"21\" ",
+            "data-hcd-pane-state=\"frozen\" data-hcd-pane-top-left-cell=\"A3\" ",
+            "data-hcd-active-pane=\"bottom-left\" data-hcd-frozen-rows=\"2\"></section>",
+            "<section class=\"hcd-text\" data-hcd-node=\"n_00000000000000000000000000000001\"></section>",
+        )
+        .to_string();
+
+        // A row inserted at the top now stands inside the band, so the band holds
+        // three frozen rows, in every window of the sheet and not only the one the
+        // shift itself worked on.
+        assert!(shift_xlsx_pane_band(&mut html, XlsxPaneBandShift::InsertRow(1)).unwrap());
+        assert_eq!(
+            html.matches("data-hcd-frozen-rows=\"3\"").count(),
+            2,
+            "{html}"
+        );
+        // The window HCD wrote moves its corner along with the band, the way a
+        // freeze writes it.
+        assert!(html.contains("data-hcd-pane-top-left-cell=\"B4\""));
+        assert!(html.contains("data-hcd-pane-state=\"frozen\""));
+        assert!(html.contains("data-hcd-frozen-columns=\"1\""));
+        // The window the importer filled in keeps the corner and the pane the
+        // source workbook named: an export shifts that pane itself, so all this
+        // window has to say is how wide the band became. It also keeps the absence
+        // of a marker, which is what leaves the source part HCD's to copy.
+        assert!(html.contains("data-hcd-pane-top-left-cell=\"A3\""));
+        assert!(html.contains("data-hcd-active-pane=\"bottom-left\""));
+        assert_eq!(html.matches("data-hcd-pane-edited=\"true\"").count(), 1);
+        // A window of another chunk kind is not a worksheet window at all.
+        assert_eq!(html.matches("data-hcd-sheet=").count(), 2);
+
+        // Work below the band says nothing about it.
+        assert!(!shift_xlsx_pane_band(&mut html, XlsxPaneBandShift::InsertRow(9)).unwrap());
+        // A column inserted inside the band widens that side, and the window HCD
+        // wrote moves the corner it derives to the new column.
+        assert!(shift_xlsx_pane_band(&mut html, XlsxPaneBandShift::InsertColumn(1)).unwrap());
+        assert_eq!(html.matches("data-hcd-frozen-columns=\"2\"").count(), 1);
+        assert!(html.contains("data-hcd-pane-top-left-cell=\"C4\""));
+        assert!(html.contains("data-hcd-active-pane=\"bottom-right\""));
+        // A column deleted from inside the band narrows it back, and a row deleted
+        // from inside it narrows the rows the same way.
+        assert!(shift_xlsx_pane_band(&mut html, XlsxPaneBandShift::DeleteColumn(2)).unwrap());
+        assert!(shift_xlsx_pane_band(&mut html, XlsxPaneBandShift::DeleteRow(2)).unwrap());
+        assert_eq!(html.matches("data-hcd-frozen-rows=\"2\"").count(), 2);
+        assert_eq!(html.matches("data-hcd-frozen-columns=\"1\"").count(), 1);
+
+        // Deleting the last frozen row of a one-row band leaves no split at all:
+        // the release vocabulary is what a patch that freezes nothing writes, so
+        // the marker stays and the pane words go.
+        let mut single = concat!(
+            "<section class=\"hcd-sheet\" data-hcd-sheet=\"Ledger\" ",
+            "data-hcd-pane-edited=\"true\" data-hcd-pane-state=\"frozen\" ",
+            "data-hcd-pane-top-left-cell=\"A2\" data-hcd-active-pane=\"bottom-left\" ",
+            "data-hcd-frozen-rows=\"1\"></section>",
+        )
+        .to_string();
+        assert!(shift_xlsx_pane_band(&mut single, XlsxPaneBandShift::DeleteRow(1)).unwrap());
+        assert!(!single.contains("data-hcd-frozen-rows"), "{single}");
+        assert!(!single.contains("data-hcd-pane-state"), "{single}");
+        assert!(!single.contains("data-hcd-pane-top-left-cell"), "{single}");
+        assert!(!single.contains("data-hcd-active-pane"), "{single}");
+        assert!(single.contains("data-hcd-pane-edited=\"true\""), "{single}");
+    }
+
+    #[test]
+    fn a_frozen_band_that_cannot_grow_past_its_sheet_is_refused_untouched() {
+        let frozen_last_row = format!(
+            "<section class=\"hcd-sheet\" data-hcd-frozen-rows=\"{XLSX_FROZEN_ROW_LIMIT}\"></section>"
+        );
+        let mut html = frozen_last_row.clone();
+        let error = shift_xlsx_pane_band(&mut html, XlsxPaneBandShift::InsertRow(1)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("frozen band grows past the worksheet"),
+            "{error}"
+        );
+        // A refusal leaves the window exactly as it arrived, so a chunk whose later
+        // window could be moved is never half-written.
+        assert_eq!(html, frozen_last_row);
+
+        // The same bound on the other axis, and the count the export reads with:
+        // past it a window names a band no worksheet can hold.
+        let mut columns =
+            "<section class=\"hcd-sheet\" data-hcd-frozen-columns=\"16383\"></section>".to_string();
+        assert!(shift_xlsx_pane_band(&mut columns, XlsxPaneBandShift::InsertColumn(1)).is_err());
+        // A count that is not a band — junk, or a number past what a sheet can
+        // hold — is the workbook's own, and a shift applied here leaves it for the
+        // export, which is the one that reads the pane the count came from.
+        for unreadable in [
+            "<section class=\"hcd-sheet\" data-hcd-frozen-rows=\"many\"></section>",
+            "<section class=\"hcd-sheet\" data-hcd-frozen-rows=\"1048576\"></section>",
+            "<section class=\"hcd-sheet\" data-hcd-frozen-rows=\"2\" \
+             data-hcd-frozen-columns=\"max\"></section>",
+        ] {
+            let mut left_alone = unreadable.to_string();
+            assert!(
+                !shift_xlsx_pane_band(&mut left_alone, XlsxPaneBandShift::InsertRow(1)).unwrap(),
+                "{left_alone}"
+            );
+            assert_eq!(left_alone, unreadable);
+        }
+        // A window that names no band has nothing to move.
+        let mut split_only = "<section class=\"hcd-sheet\" data-hcd-pane-state=\"split\" \
+                              data-hcd-split-y-twips=\"4400\"></section>"
+            .to_string();
+        assert!(!shift_xlsx_pane_band(&mut split_only, XlsxPaneBandShift::InsertRow(1)).unwrap());
+    }
+
+    fn pptx_align(horizontal: Option<&str>, vertical: Option<&str>) -> PptxShapeAlignPatch {
+        PptxShapeAlignPatch {
+            horizontal: horizontal.map(str::to_string),
+            vertical: vertical.map(str::to_string),
+        }
+    }
+
+    /// One slide with two text shapes: the first holds two paragraphs, the second
+    /// carries the anchor the source workbook wrote for itself.
+    fn two_shape_slide() -> String {
+        concat!(
+            "<section class=\"hcd-slide\" data-hcd-source-part=\"ppt/slides/slide1.xml\" ",
+            "data-hcd-width-emu=\"9144000\" data-hcd-height-emu=\"6858000\">",
+            "<div class=\"hcd-slide-shape\" data-hcd-id=\"n_9001\" data-hcd-shape-id=\"4\" ",
+            "data-hcd-x-emu=\"914400\" data-hcd-y-emu=\"914400\" data-hcd-width-emu=\"1828800\" ",
+            "data-hcd-height-emu=\"1828800\" style=\"position:absolute;left:9.60px;top:9.60px;",
+            "width:19.20px;height:19.20px;overflow:hidden\">",
+            "<p class=\"hcd-slide-text\"><span data-hcd-id=\"n_0001\" data-hcd-node-hash=\"a\">First",
+            "</span></p>",
+            "<p class=\"hcd-slide-text\" style=\"text-align:right\"><span data-hcd-id=\"n_0002\" ",
+            "data-hcd-node-hash=\"b\">Second</span></p>",
+            "</div>",
+            "<div class=\"hcd-slide-shape\" data-hcd-id=\"n_9002\" data-hcd-shape-id=\"5\" ",
+            "data-hcd-x-emu=\"914400\" data-hcd-y-emu=\"914400\" data-hcd-width-emu=\"1828800\" ",
+            "data-hcd-height-emu=\"1828800\" style=\"position:absolute;left:9.60px;top:9.60px;",
+            "width:19.20px;height:19.20px;overflow:hidden;display:flex;flex-direction:column;",
+            "justify-content:flex-start\"><p class=\"hcd-slide-text\"><span data-hcd-id=\"n_0003\" ",
+            "data-hcd-node-hash=\"c\">Other</span></p></div>",
+            "</section>",
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn aligning_a_slide_text_shape_moves_every_paragraph_and_the_body_anchor() {
+        // The request reaches the shape through one of its text nodes, but what it
+        // restyles is the box: both paragraphs move to the middle and the shape's
+        // own source anchor is replaced by the requested one.
+        let mut html = two_shape_slide();
+        update_pptx_shape_align(
+            &mut html,
+            "n_0002",
+            &pptx_align(Some("center"), Some("center")),
+        )
+        .unwrap();
+        assert_eq!(html.matches("data-hcd-align-edited=\"true\"").count(), 1);
+        assert!(html.contains("data-hcd-horizontal=\"center\""));
+        assert!(html.contains("data-hcd-vertical=\"center\""));
+        assert_eq!(html.matches("text-align:center").count(), 2);
+        assert!(!html.contains("text-align:right"));
+        // The other shape keeps its own anchor and its paragraph keeps no alignment.
+        assert_eq!(html.matches("justify-content:flex-start").count(), 1);
+        assert_eq!(
+            html.matches("<p class=\"hcd-slide-text\">").count(),
+            1,
+            "only the aligned shape's paragraphs speak"
+        );
+        let aligned_shape = html
+            .split("<div class=\"hcd-slide-shape\" data-hcd-id=\"n_9002\"")
+            .next()
+            .expect("both shapes")
+            .to_string();
+        assert!(aligned_shape.contains("display:flex"));
+        assert!(aligned_shape.contains("flex-direction:column"));
+        assert!(aligned_shape.contains("justify-content:center"));
+
+        // A second request naming one axis keeps the other where the shape left it.
+        update_pptx_shape_align(&mut html, "n_0001", &pptx_align(Some("left"), None)).unwrap();
+        assert!(html.contains("data-hcd-horizontal=\"left\""));
+        assert!(html.contains("data-hcd-vertical=\"center\""));
+        assert_eq!(html.matches("text-align:left").count(), 2);
+        assert_eq!(html.matches("data-hcd-align-edited=\"true\"").count(), 1);
+
+        // Asking for what the box already holds would record a revision that says
+        // nothing, so the patch refuses it instead.
+        let error = update_pptx_shape_align(&mut html, "n_0001", &pptx_align(Some("left"), None))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("PPTX shape alignment is unchanged"),
+            "{error}"
+        );
+        assert!(
+            update_pptx_shape_align(&mut html, "n_0001", &pptx_align(None, Some("bottom"))).is_ok()
+        );
+        assert!(html.contains("data-hcd-horizontal=\"left\""));
+        assert!(html.contains("justify-content:flex-end"));
+    }
+
+    #[test]
+    fn a_shape_alignment_that_finds_no_box_or_reads_junk_is_refused() {
+        // Distributed alignment writes the value the package names, even though
+        // the page shows the same block as justified text.
+        let mut html = two_shape_slide();
+        update_pptx_shape_align(&mut html, "n_0001", &pptx_align(Some("distributed"), None))
+            .unwrap();
+        assert!(html.contains("data-hcd-horizontal=\"distributed\""));
+        assert_eq!(html.matches("text-align:justify").count(), 2);
+
+        // A shape whose stored value is not one this op can write is not guessed
+        // at: the bundle is the problem, and saying so beats writing a third value.
+        let mut junk = String::from(
+            "<section class=\"hcd-slide\" data-hcd-source-part=\"ppt/slides/slide1.xml\"><div \
+             class=\"hcd-slide-shape\" data-hcd-id=\"n_9001\" data-hcd-align-edited=\"true\" \
+             data-hcd-horizontal=\"sideways\"><p class=\"hcd-slide-text\"><span \
+             data-hcd-id=\"n_0001\">First</span></p></div></section>",
+        );
+        let error = update_pptx_shape_align(&mut junk, "n_0001", &pptx_align(None, Some("top")))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("PPTX stored data-hcd-horizontal is invalid"),
+            "{error}"
+        );
+
+        // Text that stands outside a positioned shape has no box to align.
+        let mut loose = String::from(
+            "<section class=\"hcd-slide\" data-hcd-source-part=\"ppt/slides/slide1.xml\"><p \
+             class=\"hcd-slide-text\"><span data-hcd-id=\"n_0001\">First</span></p></section>",
+        );
+        let error =
+            update_pptx_shape_align(&mut loose, "n_0001", &pptx_align(Some("center"), None))
+                .unwrap_err();
+        assert!(matches!(error, HcdError::Unsupported(_)), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("PPTX text is not inside a positioned shape"),
+            "{error}"
+        );
+
+        // The request itself has to name an axis, and only the axes it knows.
+        assert!(validate_pptx_shape_align(&pptx_align(None, None)).is_err());
+        let error = validate_pptx_shape_align(&pptx_align(Some("middle"), None)).unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "PPTX horizontal alignment must be left, center, right, justify, or distributed"
+            ),
+            "{error}"
+        );
+        let error = validate_pptx_shape_align(&pptx_align(None, Some("left"))).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("PPTX vertical alignment must be top, center, or bottom"),
+            "{error}"
+        );
     }
 }

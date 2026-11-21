@@ -1,0 +1,27 @@
+   Compiling zstd-sys v2.1.3+zstd.1.5.7
+   Compiling lzma-sys v0.1.20
+   Compiling bzip2-sys v0.1.13+1.0.8
+   Compiling ring v0.17.14
+   Compiling zstd-safe v7.4.1
+   Compiling rustls v0.23.46
+    Checking bzip2 v0.5.2
+    Checking xz2 v0.1.7
+    Checking zstd v0.13.5
+    Checking rustls-webpki v0.103.17
+    Checking jsonwebtoken v9.3.1
+    Checking zip v2.6.1
+    Checking oxml v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/oxml)
+    Checking hcd-core v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/hcd-core)
+    Checking tokio-rustls v0.26.6
+    Checking template-merger v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/template-merger)
+    Checking docx-handler v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/docx-handler)
+    Checking pptx-handler v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/pptx-handler)
+    Checking xlsx-handler v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/xlsx-handler)
+    Checking hcd-docx v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/hcd-docx)
+    Checking hyper-rustls v0.27.10
+    Checking hcd-formats v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/hcd-formats)
+    Checking reqwest v0.12.28
+    Checking object_store v0.12.5
+    Checking office-engine v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/office-engine)
+    Checking officecli v0.1.31 (/Users/will/Project/rainy/projects/OfficeCLI-rust/crates/officecli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.39s

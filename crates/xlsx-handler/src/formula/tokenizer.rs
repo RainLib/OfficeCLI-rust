@@ -24,7 +24,10 @@ pub fn tokenize(formula: &str) -> Result<Vec<Token>, String> {
                 continue;
             } // skip leading =
             if i + 1 < len && (chars[i + 1] == '=' || (ch == '<' && chars[i + 1] == '>')) {
-                tokens.push(Token::new(TokenType::Compare, &formula[i..i + 2]));
+                tokens.push(Token::new(
+                    TokenType::Compare,
+                    chars[i..i + 2].iter().collect::<String>(),
+                ));
                 i += 2;
             } else {
                 tokens.push(Token::new(TokenType::Compare, ch.to_string()));
@@ -109,7 +112,7 @@ pub fn tokenize(formula: &str) -> Result<Vec<Token>, String> {
             }
             tokens.push(Token::new(
                 TokenType::ArrayLit,
-                formula[start..end].to_string(),
+                chars[start..end].iter().collect::<String>(),
             ));
             i = end + 1;
             continue;
@@ -119,6 +122,7 @@ pub fn tokenize(formula: &str) -> Result<Vec<Token>, String> {
         if ch == '"' {
             i += 1;
             let mut s = String::new();
+            let mut closed = false;
             while i < len {
                 if chars[i] == '"' {
                     if i + 1 < len && chars[i + 1] == '"' {
@@ -126,12 +130,16 @@ pub fn tokenize(formula: &str) -> Result<Vec<Token>, String> {
                         i += 2;
                     } else {
                         i += 1;
+                        closed = true;
                         break;
                     }
                 } else {
                     s.push(chars[i]);
                     i += 1;
                 }
+            }
+            if !closed {
+                return Err("Unclosed string literal".into());
             }
             tokens.push(Token::new(TokenType::String, s));
             continue;
@@ -197,10 +205,10 @@ pub fn tokenize(formula: &str) -> Result<Vec<Token>, String> {
         }
 
         // Identifier: cell ref, function, boolean, sheet ref, range
-        if ch.is_ascii_alphabetic() || ch == '_' || ch == '$' {
+        if ch.is_alphabetic() || ch == '_' || ch == '$' {
             let start = i;
             while i < len
-                && (chars[i].is_ascii_alphanumeric()
+                && (chars[i].is_alphanumeric()
                     || chars[i] == '_'
                     || chars[i] == '$'
                     || chars[i] == '.')
@@ -211,11 +219,16 @@ pub fn tokenize(formula: &str) -> Result<Vec<Token>, String> {
             let stripped = strip_dollar(&word);
 
             // Boolean literals
-            if stripped.eq_ignore_ascii_case("TRUE") {
+            let mut next = i;
+            while next < len && chars[next].is_whitespace() {
+                next += 1;
+            }
+            let function_call = next < len && chars[next] == '(';
+            if stripped.eq_ignore_ascii_case("TRUE") && !function_call {
                 tokens.push(Token::new(TokenType::Bool, "TRUE"));
                 continue;
             }
-            if stripped.eq_ignore_ascii_case("FALSE") {
+            if stripped.eq_ignore_ascii_case("FALSE") && !function_call {
                 tokens.push(Token::new(TokenType::Bool, "FALSE"));
                 continue;
             }
@@ -269,9 +282,10 @@ pub fn tokenize(formula: &str) -> Result<Vec<Token>, String> {
             }
 
             // Function call
-            if i < len && chars[i] == '(' && !is_cell_ref(&stripped) {
+            if function_call && !is_cell_ref(&stripped) {
                 let func_name = word.replace('.', "_").to_uppercase();
                 tokens.push(Token::new(TokenType::Func, func_name));
+                i = next;
                 continue;
             }
 
@@ -288,14 +302,16 @@ pub fn tokenize(formula: &str) -> Result<Vec<Token>, String> {
 
         // Error literal like #REF!, #N/A, #VALUE!
         if ch == '#' {
-            let start = i;
-            while i < len && chars[i] != '!' && !chars[i].is_whitespace() && chars[i] != ')' {
-                i += 1;
-            }
-            if i < len && chars[i] == '!' {
-                i += 1;
-            }
-            tokens.push(Token::new(TokenType::Error, formula[start..i].to_string()));
+            let remaining: String = chars[i..].iter().collect();
+            let error = [
+                "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#NULL!", "#SPILL!",
+                "#CALC!",
+            ]
+            .into_iter()
+            .find(|error| remaining.starts_with(error))
+            .ok_or_else(|| "Invalid error literal".to_string())?;
+            i += error.len();
+            tokens.push(Token::new(TokenType::Error, error));
             continue;
         }
 

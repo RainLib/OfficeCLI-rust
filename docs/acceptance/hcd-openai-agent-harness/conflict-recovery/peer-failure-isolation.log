@@ -1,0 +1,14 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test agent-harness.spec.ts --grep one failed member --output /tmp/officecli-agent-rejection-peer-results
+
+
+Running 1 test using 1 worker
+
+(node:73666) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+scripted model tool rejection: hcd_patch 写入超出此 Agent 认领的范围。只可编辑 ["block:n_132ea5bf6f99e826f23ac3c13437a599"]；请按分工重新读取并规划。
+scripted model tool rejection: hcd_patch 写入超出此 Agent 认领的范围。只可编辑 ["block:n_132ea5bf6f99e826f23ac3c13437a599"]；请按分工重新读取并规划。
+  ✓  1 e2e/agent-harness.spec.ts:419:1 › one failed member does not abort independent peers and their completed work stays visible (2.7s)
+
+  1 passed (6.5s)

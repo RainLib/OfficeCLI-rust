@@ -1,0 +1,81 @@
+{
+  "before": [
+    {
+      "id": "observe",
+      "type": "rectangle",
+      "x": 40,
+      "y": 130,
+      "width": 202,
+      "height": 140,
+      "strokeColor": "#766d6c",
+      "backgroundColor": "#e5edf0"
+    },
+    {
+      "id": "observe-title",
+      "type": "text",
+      "x": 58,
+      "y": 156,
+      "width": 150,
+      "height": 28,
+      "text": "观察",
+      "strokeColor": "#3c3c43"
+    },
+    {
+      "id": "observe-note",
+      "type": "text",
+      "x": 58,
+      "y": 204,
+      "width": 175,
+      "height": 24,
+      "text": "记录原话，保留语境",
+      "strokeColor": "#534d56"
+    }
+  ],
+  "edits": [
+    {
+      "id": "observe",
+      "backgroundColor": "#ebe6f3",
+      "strokeColor": "#867894"
+    },
+    {
+      "id": "observe-note",
+      "text": "记录原话，标明来源"
+    }
+  ],
+  "receipt": {
+    "revision": 1,
+    "changed": 2
+  },
+  "after": [
+    {
+      "id": "observe",
+      "type": "rectangle",
+      "x": 40,
+      "y": 130,
+      "width": 202,
+      "height": 140,
+      "strokeColor": "#867894",
+      "backgroundColor": "#ebe6f3"
+    },
+    {
+      "id": "observe-title",
+      "type": "text",
+      "x": 58,
+      "y": 156,
+      "width": 150,
+      "height": 28,
+      "text": "观察",
+      "strokeColor": "#3c3c43"
+    },
+    {
+      "id": "observe-note",
+      "type": "text",
+      "x": 58,
+      "y": 204,
+      "width": 175,
+      "height": 24,
+      "text": "记录原话，标明来源",
+      "strokeColor": "#534d56"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+.hcd-surface .header-actions .sharing-trigger { height:36px;flex:none;border:1px solid var(--line);background:var(--surface);padding:0 12px }
+.sharing-dialog { box-sizing:border-box;width:min(560px,calc(100vw - 32px));max-height:calc(100dvh - 40px);overflow:auto;border:1px solid var(--line,#e7eaf0);border-radius:20px;padding:28px;background:var(--surface,#fff);color:var(--ink,#272d3b);font:14px/1.5 Inter,"Noto Sans SC",sans-serif;box-shadow:0 24px 80px #18203325 }
+.sharing-dialog::backdrop { background:#18203338 }
+.sharing-heading { display:flex;align-items:center;justify-content:space-between;gap:16px }
+.sharing-heading h2 { margin:0;font-size:23px;font-weight:600 }
+.sharing-subtitle { margin:10px 0 24px;font-size:13px;color:var(--muted,#667287) }
+.sharing-options { border:0;padding:0;margin:0 0 20px;display:flex;flex-direction:column;gap:8px;min-width:0 }
+.sharing-options legend { padding:0 0 12px;font-weight:600 }
+.sharing-option { display:flex;align-items:center;gap:12px;padding:14px;border:1px solid var(--line,#e7eaf0);border-radius:12px;cursor:pointer }
+.sharing-option[data-selected=true] { background:var(--accent-soft,#edf0fc);border-color:var(--accent,#5865c7) }
+.sharing-option>svg { flex:none;color:var(--accent,#5865c7) }
+.sharing-option>span { display:flex;flex-direction:column;flex:1;gap:3px;min-width:0 }
+.sharing-option strong { font-size:14px;font-weight:500 }
+.sharing-option small { font-size:12px;color:var(--muted,#667287) }
+.sharing-dialog input[type=radio],.sharing-dialog input[type=checkbox] { width:16px;height:16px;min-width:16px;margin:0;accent-color:var(--accent,#5865c7) }
+.sharing-field { display:flex;justify-content:space-between;align-items:center;gap:16px;margin:16px 0;font-weight:600 }
+.sharing-dialog select { min-width:125px;max-width:65%;padding:9px 12px;background:var(--surface,#fff);border:1px solid var(--line,#e7eaf0);border-radius:9px;font:inherit;font-size:13px;color:inherit }
+.sharing-explanation { color:var(--muted,#667287);font-size:12px;line-height:1.7;margin:0 0 18px }
+.sharing-expiry { color:var(--muted,#667287);font-size:13px;font-weight:400 }
+.sharing-link-label { display:flex;flex-direction:column;gap:7px;color:var(--muted,#667287);font-size:12px }
+.sharing-dialog .sharing-link-label input { box-sizing:border-box;width:100%;min-width:0;padding:13px;border:0;border-radius:9px;background:var(--stage,#f7f8fb);font-size:12px;color:var(--ink,#272d3b) }
+.sharing-reset { display:flex;align-items:center;gap:8px;margin:14px 0;color:var(--muted,#667287);font-size:12px }
+.sharing-actions { display:flex;gap:10px;margin-top:20px;align-items:stretch }
+.sharing-actions>a { display:flex;align-items:center;justify-content:center;padding:10px 14px;border:1px solid var(--line,#e7eaf0);border-radius:10px;color:inherit;text-decoration:none;white-space:nowrap;font-size:13px }
+.hcd-surface .sharing-dialog .share-primary,.sharing-dialog .share-primary { display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;padding:10px 16px;flex:1;border:0;border-radius:10px;color:#fff;background:#292f40;font:inherit;cursor:pointer }
+.sharing-dialog .share-primary:disabled { opacity:.55;cursor:wait }
+.sharing-footnote { margin:16px 0 0;color:var(--muted,#667287);font-size:11px }
+.sharing-error { color:#b55463;font-size:13px }
+.sharing-feedback { color:var(--accent,#5865c7);font-size:12px }
+.shared-access-state { min-height:100dvh;background:#eceff4;color:#272d3b;display:grid;place-items:center;padding:24px;box-sizing:border-box;font:14px/1.7 Inter,"Noto Sans SC",sans-serif }
+.shared-access-state>div { max-width:440px;width:100%;background:#fff;border-radius:20px;padding:32px;box-sizing:border-box }
+.shared-access-state h1 { font-size:22px;margin:14px 0 }
+.shared-access-state p { color:#667287 }
+.shared-access-actions { display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:24px }
+.shared-access-actions a,.shared-access-actions button { border:0;border-radius:10px;padding:10px 16px;font:inherit;text-decoration:none;color:#fff;background:#292f40;cursor:pointer }
+.shared-access-actions a:last-child { background:#edf0fc;color:#5865c7 }
+.shared-session-notice { padding:9px 16px;background:#fff9ed;color:#77521e;font:12px/1.6 sans-serif }
+@media(max-width:700px) { .sharing-dialog { padding:22px;max-height:calc(100dvh - 24px) }.sharing-heading h2 { font-size:21px }.sharing-actions { flex-wrap:wrap }.sharing-actions>a { flex:1 }.sharing-actions .share-primary { flex-basis:100% } }

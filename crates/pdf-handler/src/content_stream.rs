@@ -23,6 +23,104 @@ type ReverseCmapCacheKey = (ObjectId, u64, usize);
 thread_local! {
     static REVERSE_CMAP_CACHE: RefCell<HashMap<ReverseCmapCacheKey, Rc<HashMap<char, u32>>>> =
         RefCell::new(HashMap::new());
+    /// Character maps read off embedded faces, keyed like the CMap cache above.
+    static FACE_CHAR_CACHE: RefCell<HashMap<ReverseCmapCacheKey, Rc<HashMap<char, u32>>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The largest face this crate will decompress to ask what it can draw. A real
+/// full-coverage CJK face is a few megabytes; anything past this is treated as
+/// unreadable rather than as a reason to allocate.
+const MAX_EMBEDDED_FACE_BYTES: usize = 64 * 1024 * 1024;
+
+/// A cache key for an embedded face: which object holds it, how long it is, and
+/// a digest of both ends of its bytes.
+///
+/// Reading a character map off a face is paid once per font, but asking that map
+/// whether it covers a character comes up once per run of text, so the key
+/// cannot afford to hash an eleven-megabyte face on every question. A face that
+/// keeps its object number, its length and its first and last 64 KiB answers the
+/// same questions as before.
+fn face_stream_key(object_id: ObjectId, stream: &lopdf::Stream) -> ReverseCmapCacheKey {
+    const SAMPLE: usize = 64 * 1024;
+    let head = &stream.content[..stream.content.len().min(SAMPLE)];
+    let tail = &stream.content[stream.content.len().saturating_sub(SAMPLE)..];
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    head.hash(&mut hasher);
+    tail.hash(&mut hasher);
+    (object_id, hasher.finish(), stream.content.len())
+}
+
+/// Every character the face embedded in this CID font can draw, mapped to the
+/// code that draws it.
+///
+/// This is not the same question as the font's ToUnicode CMap answers. A CMap
+/// replies to one glyph with one string, so a face that maps both U+0020 and
+/// U+00A0 to the same glyph can only name one of them, and a writer that
+/// believed that map would report a plain space as unprintable. The face's own
+/// character map has room for every character that reaches the same glyph,
+/// which is what "can this font draw this text, and with which code" needs.
+///
+/// Only a CID font whose CIDs *are* glyph ids qualifies. Without
+/// `/CIDToGIDMap /Identity` there is nothing that says a glyph id may be
+/// written as its own code, so the answer is no map rather than a wrong one.
+pub(crate) fn face_char_to_cid(
+    doc: &LopdfDocument,
+    font: &Dictionary,
+) -> Option<Rc<HashMap<char, u32>>> {
+    if font.get(b"Subtype").ok()?.as_name_str().ok()? != "Type0" {
+        return None;
+    }
+    let descendant = font
+        .get(b"DescendantFonts")
+        .ok()?
+        .as_array()
+        .ok()?
+        .first()?
+        .as_reference()
+        .ok()?;
+    let cidfont = doc.get_object(descendant).ok()?.as_dict().ok()?;
+    if cidfont.get(b"CIDToGIDMap").ok()?.as_name_str().ok()? != "Identity" {
+        return None;
+    }
+    let descriptor_id = cidfont.get(b"FontDescriptor").ok()?.as_reference().ok()?;
+    let descriptor = doc.get_object(descriptor_id).ok()?.as_dict().ok()?;
+    let file_id = descriptor
+        .get(b"FontFile2")
+        .or_else(|_| descriptor.get(b"FontFile3"))
+        .ok()?
+        .as_reference()
+        .ok()?;
+    let Object::Stream(stream) = doc.get_object(file_id).ok()? else {
+        return None;
+    };
+
+    let key = face_stream_key(file_id, stream);
+    Some(FACE_CHAR_CACHE.with(|cache| {
+        if let Some(cached) = cache.borrow().get(&key) {
+            return Rc::clone(cached);
+        }
+        let map = Rc::new(
+            decoded_stream_content_with_limit(
+                stream,
+                Some(MAX_EMBEDDED_FACE_BYTES),
+                "embedded font",
+            )
+            .ok()
+            .and_then(|bytes| {
+                ttf_parser::Face::parse(&bytes, 0)
+                    .ok()
+                    .map(|face| crate::font_embedder::face_bmp_char_to_cid(&face))
+            })
+            .unwrap_or_default(),
+        );
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert(key, Rc::clone(&map));
+        map
+    }))
 }
 
 fn decoded_stream_content(stream: &lopdf::Stream) -> Cow<'_, [u8]> {
@@ -129,7 +227,14 @@ pub struct TextStyle {
     pub fill_color: Option<PdfColor>,
     pub char_spacing: f32,
     pub word_spacing: f32,
+    /// `Tz` horizontal scaling in percent, as it stood when this run was
+    /// written. 100 means the glyphs were not squeezed. A caller that swaps the
+    /// font underneath a run has to fold this in, or it fits the width of an
+    /// unsqueezed run and moves the line.
+    pub horizontal_scaling: f32,
     pub bg_color: Option<PdfColor>,
+    #[serde(default)]
+    pub invisible: bool,
 }
 
 impl Default for TextStyle {
@@ -141,7 +246,9 @@ impl Default for TextStyle {
             fill_color: None,
             char_spacing: 0.0,
             word_spacing: 0.0,
+            horizontal_scaling: 100.0,
             bg_color: None,
+            invisible: false,
         }
     }
 }
@@ -950,11 +1057,35 @@ pub fn encode_chunk_with_font(
             }
         }
 
-        if let Some(ref unicode_to_cid) = custom_unicode_to_cid {
+        // A CMap names one character per glyph, so a face that shares one glyph
+        // between, say, U+0020 and U+00A0 can only answer for one of them. The
+        // face itself knows about both. Subsets are excluded here for the same
+        // reason [pick_fonts_for_text] excludes them: their character map still
+        // names characters the surviving glyph list cannot draw.
+        let subset = font
+            .get(b"BaseFont")
+            .ok()
+            .and_then(|value| value.as_name_str().ok())
+            .is_some_and(|base| base.contains('+'));
+        let face_unicode_to_cid = if subset {
+            None
+        } else {
+            face_char_to_cid(doc, font).filter(|map| !map.is_empty())
+        };
+
+        if custom_unicode_to_cid.is_some() || face_unicode_to_cid.is_some() {
             let mut bytes = Vec::with_capacity(text.len() * 2);
             let mut missing = String::new();
             for ch in text.chars() {
-                if let Some(cid) = unicode_to_cid.get(&ch).copied() {
+                let cid = custom_unicode_to_cid
+                    .as_ref()
+                    .and_then(|map| map.get(&ch).copied())
+                    .or_else(|| {
+                        face_unicode_to_cid
+                            .as_ref()
+                            .and_then(|map| map.get(&ch).copied())
+                    });
+                if let Some(cid) = cid {
                     bytes.push((cid >> 8) as u8);
                     bytes.push((cid & 0xFF) as u8);
                 } else {
@@ -1046,6 +1177,10 @@ pub fn pick_fonts_for_text(
     let mut font_original_chars: HashMap<String, HashSet<char>> = HashMap::new();
     let mut is_subset_font: HashMap<String, bool> = HashMap::new();
     let mut page_fonts: HashMap<String, &Dictionary> = HashMap::new();
+    // Whole faces embedded on this page, and what each can draw. A CMap names
+    // one character per glyph, so this is where a character that shares its
+    // glyph with another still has an answer.
+    let mut face_unicode_to_cid: HashMap<String, Rc<HashMap<char, u32>>> = HashMap::new();
 
     // Parse content stream to gather original text characters for each font
     if let Ok(content_bytes) = doc.get_page_content(page_id) {
@@ -1072,6 +1207,17 @@ pub fn pick_fonts_for_text(
                 .unwrap_or(false);
             is_subset_font.insert(font_name.clone(), is_sub);
             page_fonts.insert(font_name.clone(), font);
+
+            // A whole face says what can be drawn, including the characters that
+            // share a glyph with another and so never appear in a CMap. A subset
+            // is excluded: its character map still names glyphs that were cut.
+            if !is_sub {
+                if let Some(map) = face_char_to_cid(doc, font) {
+                    if !map.is_empty() {
+                        face_unicode_to_cid.insert(font_name.clone(), map);
+                    }
+                }
+            }
 
             if let Ok(to_unicode) = font.get(b"ToUnicode") {
                 if let Ok(ref_id) = to_unicode.as_reference() {
@@ -1108,7 +1254,13 @@ pub fn pick_fonts_for_text(
             return false;
         }
 
-        // 3. If not subsetted, check via standard encoding
+        // 3. If not subsetted, ask the embedded face itself, then the encoding.
+        if face_unicode_to_cid
+            .get(font_name)
+            .is_some_and(|map| map.contains_key(&ch))
+        {
+            return true;
+        }
         if let Some(font_dict) = page_fonts.get(font_name) {
             if font_dict.type_is(b"Font") {
                 if let Ok(encoding) = font_dict.get_font_encoding(doc) {
@@ -1199,6 +1351,125 @@ pub fn encode_pdf_text_with_font(
         return encode_chunk_with_font(doc, page_id, name, text);
     }
     Ok(encode_pdf_string(text))
+}
+
+fn page_font_dictionary<'a>(
+    doc: &'a LopdfDocument,
+    page_id: ObjectId,
+    font_name: &str,
+) -> Option<&'a Dictionary> {
+    let fonts = doc.get_page_fonts(page_id).ok()?;
+    fonts
+        .into_iter()
+        .find(|(name, _)| String::from_utf8_lossy(name) == font_name)
+        .map(|(_, dictionary)| dictionary)
+}
+
+fn font_is_cid(dictionary: &Dictionary) -> bool {
+    dictionary
+        .get(b"Subtype")
+        .ok()
+        .and_then(|value| value.as_name_str().ok())
+        == Some("Type0")
+}
+
+/// The font's own answer to "what do your codes spell", if it gives one.
+fn to_unicode_of(doc: &LopdfDocument, dictionary: &Dictionary) -> Option<HashMap<u32, String>> {
+    let reference = dictionary.get(b"ToUnicode").ok()?.as_reference().ok()?;
+    let Object::Stream(stream) = doc.get_object(reference).ok()? else {
+        return None;
+    };
+    let bytes = decoded_stream_content_with_limit(
+        stream,
+        Some(MAX_EMBEDDED_FACE_BYTES),
+        "PDF ToUnicode CMap",
+    )
+    .ok()?;
+    let cmap = parse_to_unicode_cmap(&String::from_utf8_lossy(&bytes));
+    (!cmap.is_empty()).then_some(cmap)
+}
+
+/// Read one `Tj` or `TJ` operand back as text with the font that drew it.
+///
+/// `None` when the operand is not a string or array of strings. A caller that
+/// is about to rewrite a run needs this: the page parser merges adjacent runs
+/// that share a font, size and colour into a single block whose text spans
+/// several operands, so the block's text is more than the operand at its head
+/// and writing the whole block there would print the tail twice.
+pub fn decode_operand_with_font(
+    doc: &LopdfDocument,
+    page_id: ObjectId,
+    font_name: &str,
+    operand: &str,
+) -> Option<String> {
+    let dictionary = page_font_dictionary(doc, page_id, font_name)?;
+    let encoding = dictionary.get_font_encoding(doc).ok();
+    let custom = to_unicode_of(doc, dictionary);
+    let trimmed = operand.trim();
+    if trimmed.starts_with('[') {
+        decode_pdf_array_text(
+            trimmed,
+            encoding.as_ref(),
+            custom.as_ref(),
+            font_is_cid(dictionary),
+        )
+    } else {
+        decode_pdf_string(
+            trimmed,
+            encoding.as_ref(),
+            custom.as_ref(),
+            font_is_cid(dictionary),
+        )
+    }
+}
+
+/// Whether this font's codes can be read back as the characters they spell.
+///
+/// `Tj` bytes are glyph addresses, not text, so re-pointing a run at another
+/// font starts by asking the original font what it meant. Two answers are
+/// reliable:
+///
+/// * the font carries a `ToUnicode` CMap, which is its own statement of what
+///   each code spells;
+/// * the font is a one-byte font whose codes fall in the range every standard
+///   encoding agrees on — printable ASCII — which covers the plain Helvetica
+///   and Times runs that predate `ToUnicode`. A font with `/Differences`, or a
+///   CID font whose codes are glyph ids, gets no such pass: the codes above
+///   0x20 mean something only that font knows.
+///
+/// `text` is the decoded run; the ASCII branch looks at it because that is the
+/// only way to know the codes stayed inside the agreed range.
+pub fn page_font_decodes_trustably(
+    doc: &LopdfDocument,
+    page_id: ObjectId,
+    font_name: &str,
+    text: &str,
+) -> bool {
+    let Some(dictionary) = page_font_dictionary(doc, page_id, font_name) else {
+        return false;
+    };
+    if to_unicode_of(doc, dictionary).is_some() {
+        return true;
+    }
+    if font_is_cid(dictionary) {
+        return false;
+    }
+    if !text
+        .chars()
+        .all(|character| (0x20..=0x7e).contains(&(character as u32)))
+    {
+        return false;
+    }
+    match dictionary.get(b"Encoding") {
+        // No /Encoding on a one-byte font is the PDF default, StandardEncoding.
+        Err(_) => true,
+        Ok(Object::Name(name)) => matches!(
+            name.as_slice(),
+            b"StandardEncoding" | b"WinAnsiEncoding" | b"MacRomanEncoding" | b"PDFDocEncoding"
+        ),
+        // /Differences, or a CID CMap: the codes are this font's own.
+        _ => false,
+    }
 }
 
 /// Parse a numeric value from a PDF content stream operand string.
@@ -1360,6 +1631,7 @@ struct TextState {
     word_spacing: f32,
     leading: f32,
     horizontal_scale: f32,
+    invisible: bool,
     rise: f32,
     fill_color: Option<PdfColor>,
     stroke_color: Option<PdfColor>,
@@ -1391,6 +1663,7 @@ struct SavedGraphicsState {
     fill_color: Option<PdfColor>,
     stroke_color: Option<PdfColor>,
     line_width: f32,
+    invisible: bool,
 }
 
 impl Default for TextState {
@@ -1405,6 +1678,7 @@ impl Default for TextState {
             word_spacing: 0.0,
             leading: 0.0,
             horizontal_scale: 1.0,
+            invisible: false,
             rise: 0.0,
             fill_color: None,
             stroke_color: None,
@@ -1446,6 +1720,7 @@ fn is_pdf_operator(token: &str) -> bool {
             | "Tw"
             | "TL"
             | "Tz"
+            | "Tr"
             | "Ts"
             | "Tj"
             | "TJ"
@@ -1576,7 +1851,13 @@ fn add_or_merge_text_block(
         };
         let same_color = colors_equal(last.style.fill_color.as_ref(), state.fill_color.as_ref());
 
-        if same_y && close_x && same_font && same_size && same_color {
+        if same_y
+            && close_x
+            && same_font
+            && same_size
+            && same_color
+            && last.style.invisible == state.invisible
+        {
             // If there's a small gap, inject a space character between segments
             if gap > 0.15 * effective_font_size
                 && !last.text.ends_with(' ')
@@ -1613,6 +1894,8 @@ fn add_or_merge_text_block(
                 fill_color: state.fill_color.clone(),
                 char_spacing: state.char_spacing,
                 word_spacing: state.word_spacing,
+                horizontal_scaling: state.horizontal_scale * 100.0,
+                invisible: state.invisible,
                 bg_color,
             },
             bt_start_line: state.bt_start_line,
@@ -1736,7 +2019,7 @@ fn convert_to_rgb_png(data: &[u8]) -> Option<Vec<u8>> {
         PixelFormat::RGB24 => encode_png(width, height, &pixels),
         PixelFormat::CMYK32 => {
             let mut rgb = Vec::with_capacity((width * height * 3) as usize);
-            for chunk in pixels.chunks_exact(4) {
+            for chunk in pixels.as_chunks::<4>().0 {
                 // PDF/Photoshop CMYK JPEGs have inverted channels (C_raw = 255 - C_actual, etc.)
                 let c_raw = chunk[0] as f32;
                 let m_raw = chunk[1] as f32;
@@ -1923,7 +2206,7 @@ fn decode_flate_to_png(stream: &lopdf::Stream, doc: &LopdfDocument) -> Option<Ve
                 }
                 "DeviceCMYK" | "CMYK" => {
                     // Normal CMYK to RGB
-                    for chunk in pixels.chunks_exact(4) {
+                    for chunk in pixels.as_chunks::<4>().0 {
                         let c = chunk[0] as f32 / 255.0;
                         let m = chunk[1] as f32 / 255.0;
                         let y = chunk[2] as f32 / 255.0;
@@ -2021,7 +2304,7 @@ fn decode_flate_to_png(stream: &lopdf::Stream, doc: &LopdfDocument) -> Option<Ve
                 if num_channels == 3 {
                     rgb_pixels = pixels;
                 } else if num_channels == 4 {
-                    for chunk in pixels.chunks_exact(4) {
+                    for chunk in pixels.as_chunks::<4>().0 {
                         let c = chunk[0] as f32 / 255.0;
                         let m = chunk[1] as f32 / 255.0;
                         let y = chunk[2] as f32 / 255.0;
@@ -2525,6 +2808,13 @@ fn parse_page_content_stream_inner(
                             state.horizontal_scale = parse_float(value) / 100.0;
                         }
                     }
+                    "Tr" => {
+                        if let Some(value) =
+                            operands.last().and_then(|value| value.parse::<u8>().ok())
+                        {
+                            state.invisible = matches!(value, 3 | 7);
+                        }
+                    }
                     "Ts" => {
                         if let Some(value) = operands.last() {
                             state.rise = parse_float(value);
@@ -2602,6 +2892,7 @@ fn parse_page_content_stream_inner(
                             fill_color: state.fill_color.clone(),
                             stroke_color: state.stroke_color.clone(),
                             line_width: state.line_width,
+                            invisible: state.invisible,
                         });
                         state.last_rect = None;
                     }
@@ -2616,6 +2907,7 @@ fn parse_page_content_stream_inner(
                             state.fill_color = restored.fill_color;
                             state.stroke_color = restored.stroke_color;
                             state.line_width = restored.line_width;
+                            state.invisible = restored.invisible;
                         }
                         state.last_rect = None;
                     }
@@ -3106,6 +3398,43 @@ mod tests {
         assert!((image.bbox.y - 40.0).abs() < 0.01);
         assert!((image.bbox.width - 20.0).abs() < 0.01);
         assert!((image.bbox.height - 30.0).abs() < 0.01);
+
+        // Browser PDF output composes page scaling with a separate image
+        // matrix. Temporary graphics-state changes must not leak past Q.
+        for (content, width, height) in [
+            (
+                "q .23999999 0 0 -.23999999 0 792 cm q 3.125 0 0 3.125 0 0 cm Q q 600 0 0 -300 790.625 600 cm /Im1 Do Q Q",
+                144.0,
+                72.0,
+            ),
+            (
+                "q 144 0 0 72 0 0 cm Q q 72 0 0 36 0 0 cm /Im1 Do Q",
+                72.0,
+                36.0,
+            ),
+            (
+                "q 0 1 -1 0 300 0 cm 144 0 0 72 0 0 cm /Im1 Do Q",
+                72.0,
+                144.0,
+            ),
+        ] {
+            let parsed = parse_page_content_stream_text_only_bounded(
+                content.as_bytes(), page_id, &document, 1024,
+            ).unwrap();
+            assert_eq!(parsed.image_blocks.len(), 1, "{content}");
+            let image = &parsed.image_blocks[0];
+            assert!((image.bbox.width - width).abs() < 0.01, "{image:?}");
+            assert!((image.bbox.height - height).abs() < 0.01, "{image:?}");
+        }
+
+        let unused_matrix = parse_page_content_stream_text_only_bounded(
+            b"q 144 0 0 72 0 0 cm Q",
+            page_id,
+            &document,
+            1024,
+        )
+        .unwrap();
+        assert!(unused_matrix.image_blocks.is_empty());
     }
 
     #[test]
@@ -3241,7 +3570,7 @@ mod tests {
                                                                         println!("  /{}: {:?}", String::from_utf8_lossy(k), v);
                                                                     }
                                                                     println!("First 20 CMYK pixels:");
-                                                                    for (idx, chunk) in pixels.chunks_exact(4).take(20).enumerate() {
+                                                                    for (idx, chunk) in pixels.as_chunks::<4>().0.iter().take(20).enumerate() {
                                                                         let c_raw = chunk[0];
                                                                         let m_raw = chunk[1];
                                                                         let y_raw = chunk[2];
@@ -3316,7 +3645,9 @@ mod tests {
                                                             {
                                                                 println!("First 20 FlateDecode CMYK pixels:");
                                                                 for (idx, chunk) in decompressed
-                                                                    .chunks_exact(4)
+                                                                    .as_chunks::<4>()
+                                                                    .0
+                                                                    .iter()
                                                                     .take(20)
                                                                     .enumerate()
                                                                 {

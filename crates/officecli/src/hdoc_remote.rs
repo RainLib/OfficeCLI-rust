@@ -46,6 +46,7 @@ impl RemoteStore {
             document_id text PRIMARY KEY, state bytea NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
             CREATE TABLE IF NOT EXISTS hcd_collaboration_meta (
             document_id text PRIMARY KEY, epoch bigint NOT NULL DEFAULT 0);
+            ALTER TABLE hcd_collaboration_meta ADD COLUMN IF NOT EXISTS reactions jsonb;
             ALTER TABLE hcd_documents ALTER COLUMN source_key DROP NOT NULL;")
             .await.context("initialize HCD PostgreSQL schema")?;
         let mut builder = AmazonS3Builder::from_env().with_bucket_name(bucket);
@@ -430,13 +431,38 @@ impl RemoteStore {
         Ok(row.map(|value| value.get::<_, i64>(0) as u64).unwrap_or(0))
     }
 
+    pub async fn canvas_reactions(&self, id: &str, epoch: u64) -> Result<Option<String>> {
+        let row = self.db.lock().await.query_opt(
+            "SELECT reactions::text FROM hcd_collaboration_meta WHERE document_id=$1 AND epoch=$2",
+            &[&id, &(epoch as i64)],
+        ).await?;
+        Ok(row.and_then(|record| record.get(0)))
+    }
+
+    pub async fn save_canvas_reactions(
+        &self,
+        id: &str,
+        epoch: u64,
+        previous: u64,
+        json: &str,
+    ) -> Result<bool> {
+        let changed = self.db.lock().await.execute(
+            "INSERT INTO hcd_collaboration_meta(document_id,epoch,reactions) VALUES($1,$2,($3::text)::jsonb)
+             ON CONFLICT(document_id) DO UPDATE SET reactions=EXCLUDED.reactions
+             WHERE hcd_collaboration_meta.epoch=EXCLUDED.epoch
+             AND COALESCE((hcd_collaboration_meta.reactions->>'version')::bigint,0)=$4",
+            &[&id,&(epoch as i64),&json,&(previous as i64)],
+        ).await?;
+        Ok(changed == 1)
+    }
+
     pub async fn collaboration_reset(&self, id: &str) -> Result<u64> {
         let mut db = self.db.lock().await;
         let transaction = db.transaction().await?;
         let row = transaction
             .query_one(
                 "INSERT INTO hcd_collaboration_meta(document_id,epoch) VALUES($1,1)
-             ON CONFLICT(document_id) DO UPDATE SET epoch=hcd_collaboration_meta.epoch+1
+             ON CONFLICT(document_id) DO UPDATE SET epoch=hcd_collaboration_meta.epoch+1,reactions=NULL
              RETURNING epoch",
                 &[&id],
             )

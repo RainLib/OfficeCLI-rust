@@ -732,15 +732,14 @@ async fn handle_redirect_slash(
 async fn get_doc(
     state: &Arc<AppState>,
     id: &str,
-) -> Result<Arc<ActiveDocument>, impl IntoResponse> {
+) -> Result<Arc<ActiveDocument>, (axum::http::StatusCode, Json<ApiResponse>)> {
     let reg = state.registry.lock().await;
     match reg.get(id).cloned() {
         Some(doc) => Ok(doc),
         None => Err((
             axum::http::StatusCode::NOT_FOUND,
             Json(ApiResponse::err(format!("Document '{}' not found", id))),
-        )
-            .into_response()),
+        )),
     }
 }
 

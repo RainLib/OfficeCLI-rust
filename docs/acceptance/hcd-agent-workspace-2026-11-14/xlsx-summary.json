@@ -1,0 +1,440 @@
+{
+  "schemaVersion": "officecli-hdoc-xlsx-suite/1",
+  "total": 20,
+  "passed": 20,
+  "failed": 0,
+  "trackedMissing": [],
+  "synthetic": {
+    "formulaReadonly": true
+  },
+  "aggregate": {
+    "nodeCount": 3229,
+    "editableNodeCount": 2880,
+    "formulaNodeCount": 38,
+    "imageNodeCount": 0,
+    "chartNodeCount": 311,
+    "noEditableNodeCases": 11
+  },
+  "cases": [
+    {
+      "status": "passed",
+      "source": "examples/excel/charts.xlsx",
+      "caseKey": "excel__charts",
+      "artifactDir": "cases/excel__charts",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 12,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 312,
+      "editableNodeCount": 304,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 8,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": "HIGH",
+      "semanticExportFidelity": "SEMANTIC"
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-advanced.xlsx",
+      "caseKey": "excel__charts__charts-advanced",
+      "artifactDir": "cases/excel__charts__charts-advanced",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 16,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 12,
+      "editableNodeCount": 0,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 12,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": null,
+      "semanticExportFidelity": null
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-area.xlsx",
+      "caseKey": "excel__charts__charts-area",
+      "artifactDir": "cases/excel__charts__charts-area",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 26,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 85,
+      "editableNodeCount": 65,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 20,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": "HIGH",
+      "semanticExportFidelity": "SEMANTIC"
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-bar.xlsx",
+      "caseKey": "excel__charts__charts-bar",
+      "artifactDir": "cases/excel__charts__charts-bar",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 31,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 69,
+      "editableNodeCount": 45,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 24,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": "HIGH",
+      "semanticExportFidelity": "SEMANTIC"
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-basic.xlsx",
+      "caseKey": "excel__charts__charts-basic",
+      "artifactDir": "cases/excel__charts__charts-basic",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 36,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 93,
+      "editableNodeCount": 65,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 28,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": "HIGH",
+      "semanticExportFidelity": "SEMANTIC"
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-boxwhisker.xlsx",
+      "caseKey": "excel__charts__charts-boxwhisker",
+      "artifactDir": "cases/excel__charts__charts-boxwhisker",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 10,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 8,
+      "editableNodeCount": 0,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 8,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": null,
+      "semanticExportFidelity": null
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-bubble.xlsx",
+      "caseKey": "excel__charts__charts-bubble",
+      "artifactDir": "cases/excel__charts__charts-bubble",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 15,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 12,
+      "editableNodeCount": 0,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 12,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": null,
+      "semanticExportFidelity": null
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-column.xlsx",
+      "caseKey": "excel__charts__charts-column",
+      "artifactDir": "cases/excel__charts__charts-column",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 36,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 93,
+      "editableNodeCount": 65,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 28,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": "HIGH",
+      "semanticExportFidelity": "SEMANTIC"
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-combo.xlsx",
+      "caseKey": "excel__charts__charts-combo",
+      "artifactDir": "cases/excel__charts__charts-combo",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 20,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 16,
+      "editableNodeCount": 0,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 16,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": null,
+      "semanticExportFidelity": null
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-demo.xlsx",
+      "caseKey": "excel__charts__charts-demo",
+      "artifactDir": "cases/excel__charts__charts-demo",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 7,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 71,
+      "editableNodeCount": 65,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 6,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": "HIGH",
+      "semanticExportFidelity": "SEMANTIC"
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-extended.xlsx",
+      "caseKey": "excel__charts__charts-extended",
+      "artifactDir": "cases/excel__charts__charts-extended",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 20,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 16,
+      "editableNodeCount": 0,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 16,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": null,
+      "semanticExportFidelity": null
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-histogram.xlsx",
+      "caseKey": "excel__charts__charts-histogram",
+      "artifactDir": "cases/excel__charts__charts-histogram",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 35,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 29,
+      "editableNodeCount": 0,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 29,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": null,
+      "semanticExportFidelity": null
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-line.xlsx",
+      "caseKey": "excel__charts__charts-line",
+      "artifactDir": "cases/excel__charts__charts-line",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 36,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 93,
+      "editableNodeCount": 65,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 28,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": "HIGH",
+      "semanticExportFidelity": "SEMANTIC"
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-pie.xlsx",
+      "caseKey": "excel__charts__charts-pie",
+      "artifactDir": "cases/excel__charts__charts-pie",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 10,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 8,
+      "editableNodeCount": 0,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 8,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": null,
+      "semanticExportFidelity": null
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-radar.xlsx",
+      "caseKey": "excel__charts__charts-radar",
+      "artifactDir": "cases/excel__charts__charts-radar",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 20,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 16,
+      "editableNodeCount": 0,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 16,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": null,
+      "semanticExportFidelity": null
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-scatter.xlsx",
+      "caseKey": "excel__charts__charts-scatter",
+      "artifactDir": "cases/excel__charts__charts-scatter",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 30,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 24,
+      "editableNodeCount": 0,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 24,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": null,
+      "semanticExportFidelity": null
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-stock.xlsx",
+      "caseKey": "excel__charts__charts-stock",
+      "artifactDir": "cases/excel__charts__charts-stock",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 15,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 12,
+      "editableNodeCount": 0,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 12,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": null,
+      "semanticExportFidelity": null
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/charts/charts-waterfall.xlsx",
+      "caseKey": "excel__charts__charts-waterfall",
+      "artifactDir": "cases/excel__charts__charts-waterfall",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 20,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 16,
+      "editableNodeCount": 0,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 16,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": null,
+      "semanticExportFidelity": null
+    },
+    {
+      "status": "passed",
+      "source": "examples/excel/pivot-tables.xlsx",
+      "caseKey": "excel__pivot-tables",
+      "artifactDir": "cases/excel__pivot-tables",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 19,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 2107,
+      "editableNodeCount": 2107,
+      "formulaNodeCount": 0,
+      "imageNodeCount": 0,
+      "chartNodeCount": 0,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": "HIGH",
+      "semanticExportFidelity": "SEMANTIC"
+    },
+    {
+      "status": "passed",
+      "source": "examples/word/tables.xlsx",
+      "caseKey": "word__tables",
+      "artifactDir": "cases/word__tables",
+      "failures": [],
+      "profile": "grid",
+      "chunkCount": 3,
+      "importFidelity": "SEMANTIC",
+      "warningCodes": [
+        "XLSX_ADVANCED_VISUALS_EXTERNAL"
+      ],
+      "nodeCount": 137,
+      "editableNodeCount": 99,
+      "formulaNodeCount": 38,
+      "imageNodeCount": 0,
+      "chartNodeCount": 0,
+      "noopExportFidelity": "EXACT",
+      "patchedExportFidelity": "HIGH",
+      "semanticExportFidelity": "SEMANTIC"
+    }
+  ]
+}

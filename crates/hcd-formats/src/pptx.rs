@@ -1,15 +1,28 @@
+pub(crate) mod animations;
+mod copy_resources;
+mod design;
+mod group_import;
+pub(crate) mod groups;
+mod inheritance;
+mod master_text;
+
 use crate::common::{
-    base_manifest, checked_export_state_with_restores, collect_dirty_nodes, emit_failed,
-    emit_started, escape_attribute, escape_text, finish_import, source_identity,
-    write_fidelity_report, ExportOptions, ImportOptions, XmlBudget,
+    append_control_children, attribute, base_manifest, checked_attribute,
+    checked_export_state_with_restores, collect_dirty_fonts, collect_dirty_nodes,
+    current_control_part, drop_control_elements, emit_failed, emit_started, escape_attribute,
+    escape_text, finish_import, highest_control_id, local_name, package_error,
+    reorder_control_children, source_identity, write_fidelity_report, AddedElement, ExportOptions,
+    ImportOptions, RunFontSupport, XmlBudget, MAX_CONTROL_BYTES,
 };
 use hcd_core::{
     hash_bytes, stable_node_id, Bundle, BundleWriter, ChunkSourceMap, FidelityLevel,
-    FidelityReport, FidelityWarning, HcdError, HcdManifest, ImportEvent, NodeMapEntry,
-    PptxShapeGeometry, SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION, MAX_CHUNK_BYTES,
+    FidelityReport, FidelityWarning, HcdError, HcdManifest, HtmlFontNode, ImportEvent,
+    NodeMapEntry, PptxRunFormat, PptxShapeAlignPatch, PptxShapeGeometry, SlideAddition, SlideCopy,
+    SlideRemoval, SlideReorder, SourceAnchor, DEFAULT_CHUNK_BLOCKS, HCD_SCHEMA_VERSION,
+    MAX_CHUNK_BYTES,
 };
 use oxml::{PackageError, StreamingOxmlArchive, StreamingOxmlRewriter};
-use quick_xml::events::{BytesStart, BytesText, Event};
+use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -20,6 +33,36 @@ use std::path::{Component, Path, PathBuf};
 const MAX_PPTX_TABLE_COLUMNS: usize = 16_384;
 const MAX_PPTX_TABLE_CELLS: usize = 1_000_000;
 const PPTX_TABLE_ROWS_PER_FRAGMENT: usize = 128;
+const PPTX_SLIDE_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
+const PPTX_SLIDE_RELATIONSHIP_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
+const PPTX_SLIDE_LAYOUT_RELATIONSHIP_TYPE_SUFFIX: &str = "/slideLayout";
+/// The relationship list for a page that references nothing. A package may hold a
+/// slide with no list of its own, and the copy of such a page needs one: without a
+/// part under its name the page reads as a page that lost what it pointed at.
+const PPTX_EMPTY_RELATIONSHIPS: &str = concat!(
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
+    "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"/>",
+);
+/// Slide an export writes for a page HCD created. It is the empty page a
+/// presentation editor appends: one shape tree with its group properties and no
+/// shapes, and the master colour map every slide carries. `<p:cNvPr id="1"/>`
+/// is the seed `rewrite_text_part` counts shape IDs from, so the first text box
+/// placed on the new slide becomes shape 2.
+const BLANK_PPTX_SLIDE_XML: &str = concat!(
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
+    "<p:sld ",
+    "xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" ",
+    "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" ",
+    "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">",
+    "<p:cSld><p:spTree>",
+    "<p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>",
+    "<p:grpSpPr/>",
+    "</p:spTree></p:cSld>",
+    "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>",
+    "</p:sld>",
+);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +80,8 @@ where
     document_id: &'a str,
     part: &'a str,
     region: &'a str,
+    /// Source relationship between a slide and its own speaker-note page.
+    related_part: Option<&'a str>,
     writer: &'a mut BundleWriter,
     emit: &'a mut F,
     soft_bytes: usize,
@@ -48,6 +93,10 @@ where
     slide_width_emu: u64,
     slide_height_emu: u64,
     background: SlidePaint,
+    animation_attributes: String,
+    design: Option<hcd_core::pptx_design::PptxSlideDesign>,
+    inheritance: Option<std::sync::Arc<inheritance::LayoutInheritance>>,
+    groups: group_import::GroupImport,
 }
 
 #[derive(Default)]
@@ -61,11 +110,18 @@ struct ShapeBuilder {
     source_id: Option<String>,
     name: Option<String>,
     ordinal: usize,
+    grouped: bool,
     x: Option<i64>,
     y: Option<i64>,
     width: Option<u64>,
     height: Option<u64>,
     rotation: Option<i64>,
+    flip_h: bool,
+    flip_v: bool,
+    placeholder: bool,
+    placeholder_kind: Option<String>,
+    placeholder_defaults: Option<std::sync::Arc<inheritance::Placeholder>>,
+    local_styles: [inheritance::TextStyle; 10],
     geometry: Option<String>,
     fill: SlidePaint,
     line: SlideLine,
@@ -112,10 +168,15 @@ struct PictureBuilder {
     source_id: Option<String>,
     name: Option<String>,
     ordinal: usize,
+    grouped: bool,
     x: Option<i64>,
     y: Option<i64>,
     width: Option<u64>,
     height: Option<u64>,
+    rotation: Option<i64>,
+    flip_h: bool,
+    flip_v: bool,
+    placeholder: bool,
     relationship_id: Option<String>,
 }
 
@@ -195,8 +256,9 @@ struct SlideTableBorder {
 
 #[derive(Default)]
 struct SlideParagraphBuilder {
-    alignment: Option<String>,
-    rtl: bool,
+    style: inheritance::TextStyle,
+    master_kind: Option<&'static str>,
+    level: u8,
     html: String,
 }
 
@@ -206,18 +268,59 @@ struct SlideRunBuilder {
     opened: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct SlideRunFormat {
+    master_mask: u16,
+    blocked_master_mask: u16,
     size_hundredth_points: Option<u32>,
     spacing_hundredth_points: Option<i32>,
-    bold: bool,
-    italic: bool,
-    underline: bool,
-    strike: bool,
+    bold: Option<bool>,
+    italic: Option<bool>,
+    underline: Option<bool>,
+    strike: Option<bool>,
     color: Option<String>,
     font: Option<String>,
-    rtl: bool,
+    east_asia_font: Option<String>,
+    complex_script_font: Option<String>,
+    rtl: Option<bool>,
     language: Option<String>,
+}
+
+impl SlideRunFormat {
+    fn overlay(&mut self, other: &Self) {
+        use hcd_core::pptx_design::*;
+        self.master_mask &= !other.blocked_master_mask;
+        self.blocked_master_mask |= other.blocked_master_mask;
+        for (present, bit) in [
+            (other.size_hundredth_points.is_some(), MASTER_SIZE),
+            (other.bold.is_some(), MASTER_BOLD),
+            (other.italic.is_some(), MASTER_ITALIC),
+            (other.underline.is_some(), MASTER_UNDERLINE),
+            (other.color.is_some(), MASTER_COLOR),
+            (other.font.is_some(), MASTER_LATIN),
+            (other.east_asia_font.is_some(), MASTER_EAST_ASIA),
+            (other.complex_script_font.is_some(), MASTER_BIDI),
+        ] {
+            if present {
+                self.master_mask = (self.master_mask & !bit) | (other.master_mask & bit);
+            }
+        }
+        macro_rules! inherit { ($($field:ident),*) => { $(if other.$field.is_some() { self.$field.clone_from(&other.$field); })* } }
+        inherit!(
+            size_hundredth_points,
+            spacing_hundredth_points,
+            bold,
+            italic,
+            underline,
+            strike,
+            color,
+            font,
+            east_asia_font,
+            complex_script_font,
+            rtl,
+            language
+        );
+    }
 }
 
 impl<'a, F> SlideChunkWriter<'a, F>
@@ -271,11 +374,16 @@ where
             )));
         }
         if self.blocks > 0
-            && (self.html.len() + block.html.len() > self.soft_bytes
-                || self.blocks >= self.max_blocks)
+            && (self.html.len() + block.html.len() + self.groups.pending_overhead()
+                > MAX_CHUNK_BYTES - 4096
+                || (!self.groups.is_open()
+                    && (self.html.len() + block.html.len() > self.soft_bytes
+                        || self.blocks >= self.max_blocks)))
         {
             self.flush()?;
         }
+        self.groups
+            .open(&mut self.html, self.document_id, self.part)?;
         self.html.push_str(&block.html);
         self.entries.extend(block.entries);
         self.blocks += 1;
@@ -293,6 +401,7 @@ where
             &self.ordinal.to_string(),
         ])
         .replacen("n_", "c_", 1);
+        self.groups.split(&mut self.html);
         let content = if self.blocks == 0 {
             "<div class=\"hcd-empty-slide\"></div>".to_string()
         } else {
@@ -300,11 +409,41 @@ where
         };
         let width_px = emu_to_px(self.slide_width_emu);
         let height_px = emu_to_px(self.slide_height_emu);
+        let inherited = self
+            .design
+            .as_ref()
+            .and_then(|design| design.inherited_color());
         let background_style = paint_background_css(&self.background)
+            .or_else(|| inherited.map(|color| format!("background-color:{color}")))
             .map(|style| format!(";{style}"))
             .unwrap_or_default();
+        let design = self
+            .design
+            .as_ref()
+            .map(hcd_core::pptx_design::pptx_design_attribute)
+            .transpose()?
+            .unwrap_or_default();
+        let animations = if self.ordinal == 0 {
+            self.animation_attributes.as_str()
+        } else {
+            ""
+        };
+        let related = self
+            .related_part
+            .map(|part| {
+                format!(
+                    " {}=\"{}\"",
+                    if self.region == "note" {
+                        "data-hcd-notes-owner"
+                    } else {
+                        "data-hcd-notes-part"
+                    },
+                    escape_attribute(part)
+                )
+            })
+            .unwrap_or_default();
         let html = format!(
-            "<section class=\"hcd-slide\" data-hcd-source-part=\"{}\" data-hcd-width-emu=\"{}\" data-hcd-height-emu=\"{}\" style=\"position:relative;width:{width_px:.2}px;height:{height_px:.2}px{background_style}\">{}</section>",
+            "<section class=\"hcd-slide\" data-hcd-source-part=\"{}\" data-hcd-width-emu=\"{}\" data-hcd-height-emu=\"{}\"{related}{animations}{design} style=\"position:relative;width:{width_px:.2}px;height:{height_px:.2}px{background_style}\">{}</section>",
             escape_attribute(self.part),
             self.slide_width_emu,
             self.slide_height_emu,
@@ -377,17 +516,59 @@ where
         .iter()
         .map(|asset| (asset.source_part.clone(), asset.clone()))
         .collect();
-    let mut indexed_hashes = HashSet::new();
-    let asset_index = assets
-        .iter()
-        .filter(|asset| indexed_hashes.insert(asset.hash.clone()))
-        .collect::<Vec<_>>();
+    let mut asset_index: Vec<_> = assets.iter().collect();
+    asset_index.sort_by(|a, b| (&a.hash, &a.source_part).cmp(&(&b.hash, &b.source_part)));
+    asset_index.dedup_by(|a, b| a.hash == b.hash);
     std::fs::write(
         writer.root().join("assets/index.json"),
         serde_json::to_vec(&asset_index)?,
     )?;
 
     let mut parts = presentation_slides(&mut archive)?;
+    // The order and file names of notes are independent of the slide list.
+    // Associate them through OPC relationships, never by numeric suffix.
+    let mut note_slides: HashMap<String, Vec<String>> = HashMap::new();
+    let mut slide_notes: HashMap<String, Vec<String>> = HashMap::new();
+    for (slide, _) in &parts {
+        let rels = slide_relationships_part(slide)?;
+        if !archive.contains(&rels) {
+            continue;
+        }
+        let xml = archive
+            .read_control_part(&rels, MAX_CONTROL_BYTES)
+            .map_err(package_error)?;
+        for relationship in read_pptx_relationships(&xml, slide, &rels)? {
+            if !relationship.kind.ends_with("/notesSlide") {
+                continue;
+            }
+            if let Some(note) = relationship
+                .target
+                .filter(|part| part.starts_with("ppt/") && archive.contains(part))
+            {
+                note_slides
+                    .entry(note.clone())
+                    .or_default()
+                    .push(slide.clone());
+                slide_notes.entry(slide.clone()).or_default().push(note);
+            }
+        }
+    }
+    // Ambiguous source relationships stay unassociated and retain the legacy
+    // safe export behavior instead of assigning one user's notes to another.
+    let note_owners: HashMap<String, String> = note_slides
+        .into_iter()
+        .filter_map(|(note, owners)| {
+            (owners.len() == 1
+                && slide_notes
+                    .get(&owners[0])
+                    .is_some_and(|notes| notes.len() == 1))
+            .then(|| (note, owners[0].clone()))
+        })
+        .collect();
+    let associated_notes: HashMap<String, String> = note_owners
+        .iter()
+        .map(|(note, slide)| (slide.clone(), note.clone()))
+        .collect();
     let mut notes: Vec<(String, &'static str)> = archive
         .entries()
         .iter()
@@ -400,15 +581,48 @@ where
             }
         })
         .collect();
+    for note in note_owners.keys() {
+        if !notes.iter().any(|(part, _)| part == note) {
+            notes.push((note.clone(), "note"));
+        }
+    }
     notes.sort_by_key(|(part, _)| numeric_suffix(part));
     parts.extend(notes);
+    let mut design_cache = design::DesignCache::default();
     for (part, region) in parts {
         let part_assets = part_asset_relationships(&mut archive, &part, &asset_records)?;
         let part_charts = part_chart_relationships(&mut archive, &part, &asset_records)?;
+        let animation_attributes = if region == "slide" {
+            hcd_core::pptx_animation::pptx_animation_attributes(&animations::read_slide(
+                &mut archive,
+                &part,
+            )?)?
+        } else {
+            String::new()
+        };
+        let design = if region == "slide" {
+            design_cache.slide(&mut archive, &part)?
+        } else {
+            None
+        };
+        let inheritance = design
+            .as_ref()
+            .map(|design| design_cache.inheritance(&mut archive, design, &part))
+            .transpose()?;
+        let mut effective_colors = theme_colors.clone();
+        if let Some(data) = &inheritance {
+            effective_colors.extend(data.colors().clone());
+        }
         let mut chunks = SlideChunkWriter {
             document_id: &options.document_id,
             part: &part,
             region,
+            related_part: if region == "slide" {
+                associated_notes.get(&part)
+            } else {
+                note_owners.get(&part)
+            }
+            .map(String::as_str),
             writer: &mut writer,
             emit,
             soft_bytes: options.chunk_soft_bytes.min(MAX_CHUNK_BYTES),
@@ -420,6 +634,10 @@ where
             slide_width_emu,
             slide_height_emu,
             background: SlidePaint::default(),
+            animation_attributes,
+            design,
+            inheritance,
+            groups: group_import::GroupImport::default(),
         };
         archive
             .with_part(&part, |source| {
@@ -427,7 +645,7 @@ where
                     source,
                     &part_assets,
                     &part_charts,
-                    &theme_colors,
+                    &effective_colors,
                     &mut chunks,
                 )
                 .map_err(|error| PackageError::ReadPartError(error.to_string()))
@@ -439,7 +657,7 @@ where
     let mut manifest = base_manifest(options, "pptx", "slide-canvas", source_hash, source_size);
     manifest.warnings.push(FidelityWarning {
         code: "PPTX_PARTIAL_VISUAL_LAYOUT".to_string(),
-        message: "HCD materializes direct slide backgrounds, shape geometry/fills/outlines/rotation, text layout and run formatting, relationship-bound embedded pictures, cached-data chart SVG previews and bounded progressive DrawingML table row-group fragments with repeated geometry/grid, merges and direct cell formatting; inherited masters/layouts and table styles, grouped transforms, picture cropping/effects, native chart styling, SmartArt and animations remain authoritative in the immutable source".to_string(),
+        message: "HCD materializes supported backgrounds, shape and group geometry, text layout and run formatting, editable animation tracks, embedded pictures, cached chart previews and DrawingML table fragments; other master/layout graphics and table styles, unsupported group effects, picture effects, native chart styling, SmartArt and advanced animations remain authoritative in the immutable source".to_string(),
         node_id: None,
         source_part: Some("ppt/presentation.xml".to_string()),
     });
@@ -448,14 +666,14 @@ where
         level: FidelityLevel::Visual,
         preserved: vec![
             "slide order, direct solid/gradient backgrounds, editable DrawingML text and direct text-shape geometry/fills/outlines/rotation".to_string(),
-            "direct paragraph alignment, font, size, color and emphasis".to_string(),
+            "direct paragraph alignment, font, size, color and emphasis; layout/master placeholder geometry and text defaults, theme fonts and slide color mappings".to_string(),
             "relationship-bound embedded pictures with direct position and size".to_string(),
             "relationship-bound chart placement with bounded pure-Rust SVG previews generated from cached OOXML series data".to_string(),
             "DrawingML table position, size, row heights, column widths, merged cells, direct cell fill/margins/borders/alignment and editable anchor-cell text in bounded progressive row-group fragments".to_string(),
             "opaque presentation parts and media in the immutable source".to_string(),
         ],
         flattened: vec![
-            "master/layout and table-style inheritance, grouped shape transforms, picture cropping/effects, native chart styling/interactivity, SmartArt and animations are not fully rendered in HCD HTML".to_string(),
+            "master/layout and table-style inheritance, unsupported group effects, picture cropping/effects, native chart styling/interactivity, SmartArt and advanced animations are not fully rendered in HCD HTML".to_string(),
             "text found in merged table continuation cells is preserved as hidden read-only source text; the merge anchor remains the editable visible cell".to_string(),
             "clients reconstruct a large table canvas from repeated-geometry fragments sharing data-hcd-table-node-id and contiguous row ranges".to_string(),
         ],
@@ -489,6 +707,7 @@ where
     let mut paragraph: Option<SlideParagraphBuilder> = None;
     let mut run: Option<SlideRunBuilder> = None;
     let mut xml_depth = 0usize;
+    let mut group_depth = 0usize;
     let mut transform_depth = None;
     let mut background_properties_depth = None;
     let mut shape_properties_depth = None;
@@ -496,6 +715,8 @@ where
     let mut paint_state: Option<(usize, PaintTarget)> = None;
     let mut gradient_stop: Option<(usize, usize)> = None;
     let mut run_properties_depth = None;
+    let mut list_style_depth = None;
+    let mut list_style_level = None;
     let mut table_depth = None;
     let mut table_cell_properties_depth = None;
     let mut table_fill_depth = None;
@@ -511,11 +732,34 @@ where
                 xml_depth += 1;
                 let qualified_name = start.name();
                 let name = local_name(qualified_name.as_ref());
+                block_master_paint(
+                    name,
+                    run_properties_depth.is_some(),
+                    current_text_format(
+                        run.as_mut(),
+                        paragraph.as_mut(),
+                        shape.as_mut(),
+                        list_style_level,
+                    ),
+                );
+                chunks.groups.start(start, name, xml_depth);
+                if name == "ph" {
+                    capture_placeholder(
+                        start,
+                        shape.as_mut(),
+                        picture.as_mut(),
+                        graphic_frame.as_mut(),
+                        chunks.inheritance.as_deref(),
+                    );
+                    chunks.groups.opaque();
+                }
                 match name {
+                    "grpSp" => group_depth += 1,
                     "sp" => {
                         shape_ordinal += 1;
                         shape = Some(ShapeBuilder {
                             ordinal: shape_ordinal,
+                            grouped: group_depth > 0,
                             ..Default::default()
                         });
                     }
@@ -523,6 +767,7 @@ where
                         picture_ordinal += 1;
                         picture = Some(PictureBuilder {
                             ordinal: picture_ordinal,
+                            grouped: group_depth > 0,
                             ..Default::default()
                         });
                     }
@@ -545,6 +790,17 @@ where
                         if let Some(shape) = shape.as_mut() {
                             shape.rotation =
                                 attribute(start, "rot").and_then(|value| value.parse::<i64>().ok());
+                            (shape.flip_h, shape.flip_v) = group_import::flips(start);
+                        }
+                        if let Some(picture) = picture.as_mut() {
+                            picture.rotation =
+                                attribute(start, "rot").and_then(|value| value.parse().ok());
+                            (picture.flip_h, picture.flip_v) = group_import::flips(start);
+                        }
+                    }
+                    "bg" if xml_depth == 3 => {
+                        if let Some(design) = &mut chunks.design {
+                            design.slide_background = true;
                         }
                     }
                     "bgPr" if shape.is_none() => background_properties_depth = Some(xml_depth),
@@ -681,32 +937,125 @@ where
                     "p" if shape.is_some()
                         || slide_table_cell_mut(graphic_frame.as_mut()).is_some() =>
                     {
-                        paragraph = Some(SlideParagraphBuilder::default());
+                        paragraph = Some(SlideParagraphBuilder {
+                            master_kind: shape.as_ref().map(|shape| {
+                                inheritance::text_kind(
+                                    shape.placeholder_kind.as_deref().unwrap_or("other"),
+                                )
+                            }),
+                            style: paragraph_style(
+                                shape.as_ref(),
+                                chunks.inheritance.as_deref(),
+                                0,
+                            ),
+                            ..Default::default()
+                        });
                     }
-                    "pPr" if paragraph.is_some() => {
-                        capture_slide_paragraph_property(start, paragraph.as_mut())
+                    "pPr" if paragraph.is_some() => capture_slide_paragraph_property(
+                        start,
+                        paragraph.as_mut(),
+                        shape.as_ref(),
+                        chunks.inheritance.as_deref(),
+                    ),
+                    "lstStyle" if shape.is_some() => list_style_depth = Some(xml_depth),
+                    "defPPr" | "lvl1pPr" | "lvl2pPr" | "lvl3pPr" | "lvl4pPr" | "lvl5pPr"
+                    | "lvl6pPr" | "lvl7pPr" | "lvl8pPr" | "lvl9pPr"
+                        if list_style_depth.is_some() && paragraph.is_none() =>
+                    {
+                        list_style_level = style_level(name);
+                        if let Some(style) = shape
+                            .as_mut()
+                            .and_then(|shape| list_style_level.map(|i| &mut shape.local_styles[i]))
+                        {
+                            capture_text_alignment(start, style);
+                        }
+                    }
+                    "defRPr"
+                        if run.is_none() && (paragraph.is_some() || list_style_level.is_some()) =>
+                    {
+                        run_properties_depth = Some(xml_depth);
+                        capture_slide_format_property(
+                            start,
+                            current_text_format(
+                                run.as_mut(),
+                                paragraph.as_mut(),
+                                shape.as_mut(),
+                                list_style_level,
+                            ),
+                        );
                     }
                     "r" | "fld" if paragraph.is_some() => {
-                        run = Some(SlideRunBuilder::default());
+                        run = Some(SlideRunBuilder {
+                            format: paragraph
+                                .as_ref()
+                                .map(|paragraph| paragraph.style.format.clone())
+                                .unwrap_or_default(),
+                            ..Default::default()
+                        });
                     }
                     "rPr" if run.is_some() => {
                         run_properties_depth = Some(xml_depth);
-                        capture_slide_run_property(start, run.as_mut());
+                        capture_slide_format_property(
+                            start,
+                            current_text_format(
+                                run.as_mut(),
+                                paragraph.as_mut(),
+                                shape.as_mut(),
+                                list_style_level,
+                            ),
+                        );
                     }
-                    "latin" if run_properties_depth.is_some() => {
-                        if let Some(run) = run.as_mut() {
-                            run.format.font = attribute(start, "typeface");
+                    "latin" | "ea" | "cs" if run_properties_depth.is_some() => {
+                        if let Some(format) = current_text_format(
+                            run.as_mut(),
+                            paragraph.as_mut(),
+                            shape.as_mut(),
+                            list_style_level,
+                        ) {
+                            let font = attribute(start, "typeface").and_then(|font| {
+                                chunks
+                                    .inheritance
+                                    .as_ref()
+                                    .map_or_else(|| Some(font.clone()), |data| data.font(&font))
+                            });
+                            if name == "latin" {
+                                format.master_mask &= !hcd_core::pptx_design::MASTER_LATIN;
+                                format.font = font;
+                            } else if name == "ea" {
+                                format.master_mask &= !hcd_core::pptx_design::MASTER_EAST_ASIA;
+                                format.east_asia_font = font;
+                            } else {
+                                format.master_mask &= !hcd_core::pptx_design::MASTER_BIDI;
+                                format.complex_script_font = font;
+                            }
                         }
                     }
                     "srgbClr" if run_properties_depth.is_some() => {
-                        if let Some(run) = run.as_mut() {
-                            run.format.color = attribute(start, "val").and_then(strict_rgb);
+                        if let Some(format) = current_text_format(
+                            run.as_mut(),
+                            paragraph.as_mut(),
+                            shape.as_mut(),
+                            list_style_level,
+                        ) {
+                            format.master_mask &= !hcd_core::pptx_design::MASTER_COLOR;
+                            format.color = attribute(start, "val").and_then(strict_rgb);
                         }
                     }
                     "schemeClr" if run_properties_depth.is_some() => {
-                        if let Some(run) = run.as_mut() {
-                            run.format.color = attribute(start, "val")
-                                .and_then(|value| theme_colors.get(&value).cloned());
+                        if let Some(format) = current_text_format(
+                            run.as_mut(),
+                            paragraph.as_mut(),
+                            shape.as_mut(),
+                            list_style_level,
+                        ) {
+                            format.master_mask &= !hcd_core::pptx_design::MASTER_COLOR;
+                            format.color = attribute(start, "val").and_then(|value| {
+                                chunks
+                                    .inheritance
+                                    .as_ref()
+                                    .and_then(|data| data.color(&value))
+                                    .or_else(|| theme_colors.get(&value).cloned())
+                            });
                         }
                     }
                     "srgbClr" if table_border.is_some() => {
@@ -740,7 +1089,29 @@ where
             }
             Event::Empty(ref empty) => {
                 let qualified_name = empty.name();
-                match local_name(qualified_name.as_ref()) {
+                let name = local_name(qualified_name.as_ref());
+                block_master_paint(
+                    name,
+                    run_properties_depth.is_some(),
+                    current_text_format(
+                        run.as_mut(),
+                        paragraph.as_mut(),
+                        shape.as_mut(),
+                        list_style_level,
+                    ),
+                );
+                chunks.groups.observe(empty, name, xml_depth + 1);
+                if name == "ph" {
+                    capture_placeholder(
+                        empty,
+                        shape.as_mut(),
+                        picture.as_mut(),
+                        graphic_frame.as_mut(),
+                        chunks.inheritance.as_deref(),
+                    );
+                    chunks.groups.opaque();
+                }
+                match name {
                     "cNvPr" if shape.is_some() => capture_shape_identity(empty, shape.as_mut()),
                     "cNvPr" if picture.is_some() => {
                         capture_picture_identity(empty, picture.as_mut())
@@ -800,24 +1171,96 @@ where
                             table_border,
                         );
                     }
-                    "pPr" if paragraph.is_some() => {
-                        capture_slide_paragraph_property(empty, paragraph.as_mut())
+                    "pPr" if paragraph.is_some() => capture_slide_paragraph_property(
+                        empty,
+                        paragraph.as_mut(),
+                        shape.as_ref(),
+                        chunks.inheritance.as_deref(),
+                    ),
+                    "defPPr" | "lvl1pPr" | "lvl2pPr" | "lvl3pPr" | "lvl4pPr" | "lvl5pPr"
+                    | "lvl6pPr" | "lvl7pPr" | "lvl8pPr" | "lvl9pPr"
+                        if list_style_depth.is_some() && paragraph.is_none() =>
+                    {
+                        if let Some(style) = shape
+                            .as_mut()
+                            .and_then(|shape| style_level(name).map(|i| &mut shape.local_styles[i]))
+                        {
+                            capture_text_alignment(empty, style);
+                        }
                     }
-                    "rPr" if run.is_some() => capture_slide_run_property(empty, run.as_mut()),
-                    "latin" if run_properties_depth.is_some() => {
-                        if let Some(run) = run.as_mut() {
-                            run.format.font = attribute(empty, "typeface");
+                    "defRPr"
+                        if run.is_none() && (paragraph.is_some() || list_style_level.is_some()) =>
+                    {
+                        capture_slide_format_property(
+                            empty,
+                            current_text_format(
+                                run.as_mut(),
+                                paragraph.as_mut(),
+                                shape.as_mut(),
+                                list_style_level,
+                            ),
+                        );
+                    }
+                    "rPr" if run.is_some() => capture_slide_format_property(
+                        empty,
+                        current_text_format(
+                            run.as_mut(),
+                            paragraph.as_mut(),
+                            shape.as_mut(),
+                            list_style_level,
+                        ),
+                    ),
+                    "latin" | "ea" | "cs" if run_properties_depth.is_some() => {
+                        if let Some(format) = current_text_format(
+                            run.as_mut(),
+                            paragraph.as_mut(),
+                            shape.as_mut(),
+                            list_style_level,
+                        ) {
+                            let font = attribute(empty, "typeface").and_then(|font| {
+                                chunks
+                                    .inheritance
+                                    .as_ref()
+                                    .map_or_else(|| Some(font.clone()), |data| data.font(&font))
+                            });
+                            if name == "latin" {
+                                format.master_mask &= !hcd_core::pptx_design::MASTER_LATIN;
+                                format.font = font;
+                            } else if name == "ea" {
+                                format.master_mask &= !hcd_core::pptx_design::MASTER_EAST_ASIA;
+                                format.east_asia_font = font;
+                            } else {
+                                format.master_mask &= !hcd_core::pptx_design::MASTER_BIDI;
+                                format.complex_script_font = font;
+                            }
                         }
                     }
                     "srgbClr" if run_properties_depth.is_some() => {
-                        if let Some(run) = run.as_mut() {
-                            run.format.color = attribute(empty, "val").and_then(strict_rgb);
+                        if let Some(format) = current_text_format(
+                            run.as_mut(),
+                            paragraph.as_mut(),
+                            shape.as_mut(),
+                            list_style_level,
+                        ) {
+                            format.master_mask &= !hcd_core::pptx_design::MASTER_COLOR;
+                            format.color = attribute(empty, "val").and_then(strict_rgb);
                         }
                     }
                     "schemeClr" if run_properties_depth.is_some() => {
-                        if let Some(run) = run.as_mut() {
-                            run.format.color = attribute(empty, "val")
-                                .and_then(|value| theme_colors.get(&value).cloned());
+                        if let Some(format) = current_text_format(
+                            run.as_mut(),
+                            paragraph.as_mut(),
+                            shape.as_mut(),
+                            list_style_level,
+                        ) {
+                            format.master_mask &= !hcd_core::pptx_design::MASTER_COLOR;
+                            format.color = attribute(empty, "val").and_then(|value| {
+                                chunks
+                                    .inheritance
+                                    .as_ref()
+                                    .and_then(|data| data.color(&value))
+                                    .or_else(|| theme_colors.get(&value).cloned())
+                            });
                         }
                     }
                     "srgbClr" if table_border.is_some() => {
@@ -916,7 +1359,19 @@ where
                         )?;
                     }
                     "r" | "fld" => close_slide_run(paragraph.as_mut(), run.take()),
-                    "rPr" if run_properties_depth == Some(xml_depth) => run_properties_depth = None,
+                    "rPr" | "defRPr" if run_properties_depth == Some(xml_depth) => {
+                        run_properties_depth = None
+                    }
+                    "lstStyle" if list_style_depth == Some(xml_depth) => {
+                        list_style_depth = None;
+                        list_style_level = None;
+                    }
+                    "defPPr" | "lvl1pPr" | "lvl2pPr" | "lvl3pPr" | "lvl4pPr" | "lvl5pPr"
+                    | "lvl6pPr" | "lvl7pPr" | "lvl8pPr" | "lvl9pPr"
+                        if list_style_depth.is_some() =>
+                    {
+                        list_style_level = None
+                    }
                     "p" if shape.is_some()
                         || slide_table_cell_mut(graphic_frame.as_mut()).is_some() =>
                     {
@@ -963,14 +1418,22 @@ where
                     }
                     "tbl" if table_depth == Some(xml_depth) => table_depth = None,
                     "xfrm" if transform_depth == Some(xml_depth) => transform_depth = None,
+                    "grpSp" => {
+                        chunks.groups.end(&mut chunks.html, xml_depth);
+                        group_depth = group_depth.saturating_sub(1);
+                    }
                     "sp" => {
                         if let Some(shape) = shape.take() {
-                            if !shape.content.is_empty() || !shape.entries.is_empty() {
+                            if !shape.content.is_empty()
+                                || shape.width.is_some() && shape.height.is_some()
+                            {
                                 chunks.push_block(finish_shape(
                                     chunks.document_id,
                                     chunks.part,
                                     shape,
                                 ))?;
+                            } else {
+                                chunks.groups.opaque();
                             }
                         }
                     }
@@ -1036,7 +1499,7 @@ fn append_slide_text<F>(
     mut shape: Option<&mut ShapeBuilder>,
     graphic_frame: Option<&mut GraphicFrameBuilder>,
     paragraph: Option<&mut SlideParagraphBuilder>,
-    run: Option<&mut SlideRunBuilder>,
+    mut run: Option<&mut SlideRunBuilder>,
     chunks: &mut SlideChunkWriter<'_, F>,
 ) -> Result<(), HcdError>
 where
@@ -1045,6 +1508,20 @@ where
     let Some(paragraph) = paragraph else {
         return chunks.push_text(text, ordinal);
     };
+    if let (Some(run), Some(data)) = (run.as_deref_mut(), chunks.inheritance.as_ref()) {
+        if !run.opened {
+            let language = run.format.language.as_deref();
+            for font in [
+                &mut run.format.font,
+                &mut run.format.east_asia_font,
+                &mut run.format.complex_script_font,
+            ] {
+                if let Some(name) = font.as_deref() {
+                    *font = data.font_for_text(name, language, &text);
+                }
+            }
+        }
+    }
     ensure_slide_run_open(paragraph, run);
     let node_id = stable_node_id(&[
         chunks.document_id,
@@ -1146,7 +1623,24 @@ fn ensure_slide_run_open(paragraph: &mut SlideParagraphBuilder, run: Option<&mut
     if run.opened {
         return;
     }
-    paragraph.html.push_str(&slide_run_start(&run.format));
+    let mut tag = slide_run_start(&run.format);
+    if let Some(kind) = paragraph.master_kind {
+        let mut attrs = format!(" data-hcd-master-kind=\"{kind}\" data-hcd-master-level=\"{}\" data-hcd-master-mask=\"{}\"", paragraph.level + 1, run.format.master_mask);
+        for (name, font) in [
+            ("latin", &run.format.font),
+            ("ea", &run.format.east_asia_font),
+            ("cs", &run.format.complex_script_font),
+        ] {
+            if let Some(font) = font {
+                attrs.push_str(&format!(
+                    " data-hcd-master-font-{name}=\"{}\"",
+                    escape_attribute(font)
+                ));
+            }
+        }
+        tag.insert_str(tag.len() - 1, &attrs);
+    }
+    paragraph.html.push_str(&tag);
     run.opened = true;
 }
 
@@ -1173,33 +1667,66 @@ fn slide_run_start(format: &SlideRunFormat) -> String {
     if let Some(spacing) = format.spacing_hundredth_points {
         css.push(format!("letter-spacing:{:.2}pt", spacing as f64 / 100.0));
     }
-    if format.bold {
-        css.push("font-weight:700".to_string());
+    if let Some(bold) = format.bold {
+        css.push(
+            if bold {
+                "font-weight:700"
+            } else {
+                "font-weight:400"
+            }
+            .to_string(),
+        );
     }
-    if format.italic {
-        css.push("font-style:italic".to_string());
+    if let Some(italic) = format.italic {
+        css.push(
+            if italic {
+                "font-style:italic"
+            } else {
+                "font-style:normal"
+            }
+            .to_string(),
+        );
     }
     let mut decorations = Vec::new();
-    if format.underline {
+    if format.underline == Some(true) {
         decorations.push("underline");
     }
-    if format.strike {
+    if format.strike == Some(true) {
         decorations.push("line-through");
     }
     if !decorations.is_empty() {
         css.push(format!("text-decoration:{}", decorations.join(" ")));
+    } else if format.underline.is_some() || format.strike.is_some() {
+        css.push("text-decoration:none".into());
     }
     if let Some(color) = &format.color {
         css.push(format!("color:#{color}"));
     }
-    if let Some(font) = format.font.as_deref().and_then(safe_css_font) {
+    let fonts = [
+        format.font.as_deref(),
+        format.east_asia_font.as_deref(),
+        format.complex_script_font.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(safe_css_font)
+    .map(|font| format!("'{}'", font.replace('\'', "")))
+    .collect::<Vec<_>>();
+    if !fonts.is_empty() {
         css.push(format!(
-            "font-family:'{}',Arial,'Helvetica Neue',sans-serif",
-            font.replace('\'', "")
+            "font-family:{},Arial,'Helvetica Neue',sans-serif",
+            fonts.join(",")
         ));
     }
-    if format.rtl {
-        css.push("direction:rtl".to_string());
+    if let Some(rtl) = format.rtl {
+        css.push(
+            if rtl {
+                "direction:rtl"
+            } else {
+                "direction:ltr"
+            }
+            .to_string(),
+        );
     }
     if !css.is_empty() {
         attributes.push_str(" style=\"");
@@ -1225,32 +1752,50 @@ fn capture_shape_offset(element: &BytesStart<'_>, shape: Option<&mut ShapeBuilde
     let Some(shape) = shape else {
         return;
     };
-    shape.x = attribute(element, "x").and_then(|value| value.parse().ok());
-    shape.y = attribute(element, "y").and_then(|value| value.parse().ok());
+    shape.x = attribute(element, "x")
+        .and_then(|value| value.parse().ok())
+        .or(shape.x);
+    shape.y = attribute(element, "y")
+        .and_then(|value| value.parse().ok())
+        .or(shape.y);
 }
 
 fn capture_shape_extent(element: &BytesStart<'_>, shape: Option<&mut ShapeBuilder>) {
     let Some(shape) = shape else {
         return;
     };
-    shape.width = attribute(element, "cx").and_then(|value| value.parse().ok());
-    shape.height = attribute(element, "cy").and_then(|value| value.parse().ok());
+    shape.width = attribute(element, "cx")
+        .and_then(|value| value.parse().ok())
+        .or(shape.width);
+    shape.height = attribute(element, "cy")
+        .and_then(|value| value.parse().ok())
+        .or(shape.height);
 }
 
 fn capture_shape_body_properties(element: &BytesStart<'_>, shape: Option<&mut ShapeBuilder>) {
     let Some(shape) = shape else {
         return;
     };
-    shape.vertical_anchor = attribute(element, "anchor").and_then(|value| match value.as_str() {
-        "ctr" => Some("center"),
-        "b" => Some("flex-end"),
-        "t" => Some("flex-start"),
-        _ => None,
-    });
-    shape.margin_left = attribute(element, "lIns").and_then(|value| value.parse().ok());
-    shape.margin_right = attribute(element, "rIns").and_then(|value| value.parse().ok());
-    shape.margin_top = attribute(element, "tIns").and_then(|value| value.parse().ok());
-    shape.margin_bottom = attribute(element, "bIns").and_then(|value| value.parse().ok());
+    shape.vertical_anchor = attribute(element, "anchor")
+        .and_then(|value| match value.as_str() {
+            "ctr" => Some("center"),
+            "b" => Some("flex-end"),
+            "t" => Some("flex-start"),
+            _ => None,
+        })
+        .or(shape.vertical_anchor);
+    shape.margin_left = attribute(element, "lIns")
+        .and_then(|value| value.parse().ok())
+        .or(shape.margin_left);
+    shape.margin_right = attribute(element, "rIns")
+        .and_then(|value| value.parse().ok())
+        .or(shape.margin_right);
+    shape.margin_top = attribute(element, "tIns")
+        .and_then(|value| value.parse().ok())
+        .or(shape.margin_top);
+    shape.margin_bottom = attribute(element, "bIns")
+        .and_then(|value| value.parse().ok())
+        .or(shape.margin_bottom);
 }
 
 fn paint_mut<'a>(
@@ -1368,16 +1913,24 @@ fn capture_picture_offset(element: &BytesStart<'_>, picture: Option<&mut Picture
     let Some(picture) = picture else {
         return;
     };
-    picture.x = attribute(element, "x").and_then(|value| value.parse().ok());
-    picture.y = attribute(element, "y").and_then(|value| value.parse().ok());
+    picture.x = attribute(element, "x")
+        .and_then(|value| value.parse().ok())
+        .or(picture.x);
+    picture.y = attribute(element, "y")
+        .and_then(|value| value.parse().ok())
+        .or(picture.y);
 }
 
 fn capture_picture_extent(element: &BytesStart<'_>, picture: Option<&mut PictureBuilder>) {
     let Some(picture) = picture else {
         return;
     };
-    picture.width = attribute(element, "cx").and_then(|value| value.parse().ok());
-    picture.height = attribute(element, "cy").and_then(|value| value.parse().ok());
+    picture.width = attribute(element, "cx")
+        .and_then(|value| value.parse().ok())
+        .or(picture.width);
+    picture.height = attribute(element, "cy")
+        .and_then(|value| value.parse().ok())
+        .or(picture.height);
 }
 
 fn capture_picture_relationship(element: &BytesStart<'_>, picture: Option<&mut PictureBuilder>) {
@@ -1666,46 +2219,213 @@ fn capture_slide_table_fill_color(
     }
 }
 
+fn style_level(name: &str) -> Option<usize> {
+    if name == "defPPr" {
+        return Some(9);
+    }
+    name.strip_prefix("lvl")
+        .and_then(|name| name.strip_suffix("pPr"))
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| (1..=9).contains(value))
+        .map(|value| value - 1)
+}
+
+fn paragraph_style(
+    shape: Option<&ShapeBuilder>,
+    inherited: Option<&inheritance::LayoutInheritance>,
+    level: usize,
+) -> inheritance::TextStyle {
+    let mut style = shape
+        .and_then(|shape| shape.placeholder_defaults.as_ref())
+        .map(|data| data.styles[level].clone())
+        .or_else(|| {
+            inherited.map(|data| {
+                data.text_styles(
+                    shape
+                        .and_then(|shape| shape.placeholder_kind.as_deref())
+                        .unwrap_or("other"),
+                )[level]
+                    .clone()
+            })
+        })
+        .unwrap_or_default();
+    if let Some(shape) = shape {
+        style.overlay(&shape.local_styles[9]);
+        style.overlay(&shape.local_styles[level]);
+    }
+    style
+}
+
+fn current_text_format<'a>(
+    run: Option<&'a mut SlideRunBuilder>,
+    paragraph: Option<&'a mut SlideParagraphBuilder>,
+    shape: Option<&'a mut ShapeBuilder>,
+    level: Option<usize>,
+) -> Option<&'a mut SlideRunFormat> {
+    if let Some(run) = run {
+        return Some(&mut run.format);
+    }
+    if let Some(paragraph) = paragraph {
+        return Some(&mut paragraph.style.format);
+    }
+    match (shape, level) {
+        (Some(shape), Some(level)) => Some(&mut shape.local_styles[level].format),
+        _ => None,
+    }
+}
+
+fn capture_placeholder(
+    element: &BytesStart<'_>,
+    shape: Option<&mut ShapeBuilder>,
+    picture: Option<&mut PictureBuilder>,
+    frame: Option<&mut GraphicFrameBuilder>,
+    inherited: Option<&inheritance::LayoutInheritance>,
+) {
+    let index = attribute(element, "idx")
+        .unwrap_or_else(|| "0".into())
+        .parse::<u32>()
+        .ok();
+    let defaults = index.and_then(|index| inherited.and_then(|data| data.placeholder(index)));
+    if let Some(shape) = shape {
+        shape.placeholder = true;
+        shape.placeholder_kind = Some(
+            attribute(element, "type")
+                .or_else(|| defaults.as_ref().and_then(|data| data.text_kind.clone()))
+                .unwrap_or_else(|| "obj".into()),
+        );
+        if let Some(data) = defaults.as_ref() {
+            shape.x = shape.x.or(data.x);
+            shape.y = shape.y.or(data.y);
+            shape.width = shape.width.or(data.width);
+            shape.height = shape.height.or(data.height);
+            shape.rotation = shape.rotation.or(data.rotation);
+            shape.flip_h = data.flip_h.unwrap_or(shape.flip_h);
+            shape.flip_v = data.flip_v.unwrap_or(shape.flip_v);
+            shape.vertical_anchor = shape.vertical_anchor.or(data.anchor);
+            shape.margin_left = shape.margin_left.or(data.margins[0]);
+            shape.margin_right = shape.margin_right.or(data.margins[1]);
+            shape.margin_top = shape.margin_top.or(data.margins[2]);
+            shape.margin_bottom = shape.margin_bottom.or(data.margins[3]);
+        }
+        shape.placeholder_defaults = defaults.clone();
+    }
+    if let Some(picture) = picture {
+        picture.placeholder = true;
+        if let Some(data) = defaults.as_ref() {
+            picture.x = picture.x.or(data.x);
+            picture.y = picture.y.or(data.y);
+            picture.width = picture.width.or(data.width);
+            picture.height = picture.height.or(data.height);
+            picture.rotation = picture.rotation.or(data.rotation);
+            picture.flip_h = data.flip_h.unwrap_or(picture.flip_h);
+            picture.flip_v = data.flip_v.unwrap_or(picture.flip_v);
+        }
+    }
+    if let (Some(frame), Some(data)) = (frame, defaults) {
+        frame.x = frame.x.or(data.x);
+        frame.y = frame.y.or(data.y);
+        frame.width = frame.width.or(data.width);
+        frame.height = frame.height.or(data.height);
+    }
+}
+
 fn capture_slide_paragraph_property(
     element: &BytesStart<'_>,
     paragraph: Option<&mut SlideParagraphBuilder>,
+    shape: Option<&ShapeBuilder>,
+    inheritance: Option<&inheritance::LayoutInheritance>,
 ) {
     let Some(paragraph) = paragraph else {
         return;
     };
-    paragraph.alignment = attribute(element, "algn");
-    paragraph.rtl =
-        attribute(element, "rtl").is_some_and(|value| matches!(value.as_str(), "1" | "true"));
+    let level = attribute(element, "lvl")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|level| *level < 9)
+        .unwrap_or(0);
+    paragraph.style = paragraph_style(shape, inheritance, level);
+    paragraph.level = level as u8;
+    capture_text_alignment(element, &mut paragraph.style);
 }
 
-fn capture_slide_run_property(element: &BytesStart<'_>, run: Option<&mut SlideRunBuilder>) {
-    let Some(run) = run else {
+fn capture_text_alignment(element: &BytesStart<'_>, style: &mut inheritance::TextStyle) {
+    style.alignment = attribute(element, "algn").or_else(|| style.alignment.clone());
+    style.format.rtl = attribute(element, "rtl")
+        .map(|value| matches!(value.as_str(), "1" | "true"))
+        .or(style.format.rtl);
+}
+
+fn capture_slide_format_property(element: &BytesStart<'_>, format: Option<&mut SlideRunFormat>) {
+    let Some(format) = format else {
         return;
     };
-    run.format.size_hundredth_points =
-        attribute(element, "sz").and_then(|value| value.parse().ok());
-    run.format.spacing_hundredth_points =
-        attribute(element, "spc").and_then(|value| value.parse().ok());
-    run.format.bold =
-        attribute(element, "b").is_some_and(|value| matches!(value.as_str(), "1" | "true"));
-    run.format.italic =
-        attribute(element, "i").is_some_and(|value| matches!(value.as_str(), "1" | "true"));
-    run.format.underline = attribute(element, "u")
-        .is_some_and(|value| !matches!(value.as_str(), "none" | "0" | "false"));
-    run.format.strike = attribute(element, "strike")
-        .is_some_and(|value| !matches!(value.as_str(), "noStrike" | "0" | "false"));
-    run.format.rtl =
-        attribute(element, "rtl").is_some_and(|value| matches!(value.as_str(), "1" | "true"));
-    run.format.language = attribute(element, "lang");
+    use hcd_core::pptx_design::*;
+    for (name, bit) in [
+        ("sz", MASTER_SIZE),
+        ("b", MASTER_BOLD),
+        ("i", MASTER_ITALIC),
+        ("u", MASTER_UNDERLINE),
+    ] {
+        if attribute(element, name).is_some() {
+            format.master_mask &= !bit;
+        }
+    }
+    format.size_hundredth_points = attribute(element, "sz")
+        .and_then(|value| value.parse().ok())
+        .or(format.size_hundredth_points);
+    format.spacing_hundredth_points = attribute(element, "spc")
+        .and_then(|value| value.parse().ok())
+        .or(format.spacing_hundredth_points);
+    format.bold = attribute(element, "b")
+        .map(|value| matches!(value.as_str(), "1" | "true"))
+        .or(format.bold);
+    format.italic = attribute(element, "i")
+        .map(|value| matches!(value.as_str(), "1" | "true"))
+        .or(format.italic);
+    format.underline = attribute(element, "u")
+        .map(|value| !matches!(value.as_str(), "none" | "0" | "false"))
+        .or(format.underline);
+    format.strike = attribute(element, "strike")
+        .map(|value| !matches!(value.as_str(), "noStrike" | "0" | "false"))
+        .or(format.strike);
+    format.rtl = attribute(element, "rtl")
+        .map(|value| matches!(value.as_str(), "1" | "true"))
+        .or(format.rtl);
+    format.language = attribute(element, "lang").or_else(|| format.language.clone());
+}
+
+fn block_master_paint(name: &str, in_run: bool, format: Option<&mut SlideRunFormat>) {
+    if in_run
+        && matches!(
+            name,
+            "solidFill" | "noFill" | "gradFill" | "blipFill" | "pattFill" | "grpFill"
+        )
+    {
+        if let Some(format) = format {
+            format.master_mask &= !hcd_core::pptx_design::MASTER_COLOR;
+            format.blocked_master_mask |= hcd_core::pptx_design::MASTER_COLOR;
+        }
+    }
 }
 
 fn finish_slide_paragraph(paragraph: SlideParagraphBuilder) -> String {
     let mut css = Vec::new();
-    if let Some(alignment) = paragraph.alignment.as_deref().and_then(pptx_alignment) {
+    if let Some(alignment) = paragraph
+        .style
+        .alignment
+        .as_deref()
+        .and_then(pptx_alignment)
+    {
         css.push(format!("text-align:{alignment}"));
     }
-    if paragraph.rtl {
-        css.push("direction:rtl".to_string());
+    if let Some(rtl) = paragraph.style.format.rtl {
+        css.push(
+            if rtl {
+                "direction:rtl"
+            } else {
+                "direction:ltr"
+            }
+            .to_string(),
+        );
     }
     let style = if css.is_empty() {
         String::new()
@@ -1722,6 +2442,15 @@ fn finish_shape(document_id: &str, part: &str, shape: ShapeBuilder) -> RenderedS
         .unwrap_or_else(|| shape.ordinal.to_string());
     let node_id = stable_node_id(&[document_id, part, "shape", &identity]);
     let mut attributes = format!(" data-hcd-id=\"{node_id}\"");
+    if shape.grouped {
+        attributes.push_str(" data-hcd-pptx-grouped=\"true\"");
+    }
+    append_group_member_flags(
+        &mut attributes,
+        shape.flip_h,
+        shape.flip_v,
+        shape.placeholder,
+    );
     if let Some(source_id) = &shape.source_id {
         attributes.push_str(&format!(
             " data-hcd-shape-id=\"{}\"",
@@ -1792,13 +2521,11 @@ fn finish_shape(document_id: &str, part: &str, shape: ShapeBuilder) -> RenderedS
             css.push("border-radius:12px".to_string());
         }
     }
-    if let Some(rotation) = shape.rotation {
-        css.push(format!(
-            "transform:rotate({:.4}deg)",
-            rotation as f64 / 60_000.0
-        ));
-        css.push("transform-origin:center".to_string());
-    }
+    css.extend(drawing_orientation(
+        shape.rotation,
+        shape.flip_h,
+        shape.flip_v,
+    ));
     if let Some(anchor) = shape.vertical_anchor {
         css.push("display:flex".to_string());
         css.push("flex-direction:column".to_string());
@@ -1918,6 +2645,18 @@ fn finish_picture(
         " data-hcd-id=\"{node_id}\" data-hcd-node-hash=\"{node_hash}\" data-hcd-visual-hash=\"{visual_hash}\" data-hcd-node-kind=\"image\" data-hcd-editable=\"true\" data-hcd-source-part=\"{}\" data-hcd-source-path=\"{source_path}\"",
         escape_attribute(part)
     );
+    if picture.grouped {
+        attributes.push_str(" data-hcd-pptx-grouped=\"true\"");
+    }
+    append_group_member_flags(
+        &mut attributes,
+        picture.flip_h,
+        picture.flip_v,
+        picture.placeholder,
+    );
+    if let Some(rotation) = picture.rotation {
+        attributes.push_str(&format!(" data-hcd-rotation=\"{rotation}\""));
+    }
     if let Some(asset) = asset {
         attributes.push_str(&format!(" data-hcd-asset-hash=\"{}\"", asset.hash));
     }
@@ -1961,9 +2700,11 @@ fn finish_picture(
             attributes.push_str(&format!(" {name}=\"{value}\""));
         }
     }
+    let orientation =
+        drawing_orientation(picture.rotation, picture.flip_h, picture.flip_v).join(";");
     let style = match (picture.x, picture.y, picture.width, picture.height) {
         (Some(x), Some(y), Some(width), Some(height)) => format!(
-            " style=\"position:absolute;left:{:.2}px;top:{:.2}px;width:{:.2}px;height:{:.2}px;overflow:hidden\"",
+            " style=\"position:absolute;left:{:.2}px;top:{:.2}px;width:{:.2}px;height:{:.2}px;overflow:hidden;{orientation}\"",
             emu_to_px_signed(x),
             emu_to_px_signed(y),
             emu_to_px(width),
@@ -1998,6 +2739,52 @@ fn finish_picture(
             },
         }],
     }
+}
+
+fn append_group_member_flags(
+    attributes: &mut String,
+    flip_h: bool,
+    flip_v: bool,
+    placeholder: bool,
+) {
+    for (name, on) in [
+        ("flip-h", flip_h),
+        ("flip-v", flip_v),
+        ("placeholder", placeholder),
+    ] {
+        if on {
+            attributes.push_str(&format!(" data-hcd-pptx-{name}=\"true\""));
+        }
+    }
+}
+
+fn drawing_orientation(rotation: Option<i64>, flip_h: bool, flip_v: bool) -> Vec<String> {
+    if flip_h || flip_v {
+        use hcd_core::pptx_group::{DrawingRect, DrawingTransform};
+        let transform = DrawingTransform {
+            rotation: rotation.unwrap_or_default(),
+            flip_h,
+            flip_v,
+            ..DrawingTransform::object(DrawingRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            })
+        };
+        return vec![
+            format!("transform:{}", transform.object_css()),
+            "transform-origin:center".into(),
+        ];
+    }
+    rotation
+        .map(|angle| {
+            vec![
+                format!("transform:rotate({:.4}deg)", angle as f64 / 60_000.0),
+                "transform-origin:center".into(),
+            ]
+        })
+        .unwrap_or_default()
 }
 
 fn finish_chart(
@@ -3014,57 +3801,1064 @@ where
     Ok(assets)
 }
 
+/// A copied note exists in HCD before it has a native package name. Keep its
+/// canonical identity separate from the destination name chosen during export.
+fn copied_note_parts(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+) -> Result<HashMap<String, (String, String)>, HcdError> {
+    let mut owners = HashMap::new();
+    let mut parts = HashMap::new();
+    for page in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page)?.chunks {
+            if descriptor.region != "note" {
+                continue;
+            }
+            let html = bundle.read_chunk_verified(&descriptor)?;
+            let end = html
+                .find('>')
+                .ok_or_else(|| HcdError::InvalidBundle("PPTX note section is not closed".into()))?;
+            let section = &html[..=end];
+            if html_attribute(section, "data-hcd-note-copy") != Some("true") {
+                continue;
+            }
+            let owner = html_attribute(section, "data-hcd-notes-owner")
+                .ok_or_else(|| HcdError::InvalidBundle("copied notes have no slide owner".into()))?
+                .to_string();
+            let part = html_attribute(section, "data-hcd-source-part")
+                .ok_or_else(|| {
+                    HcdError::InvalidBundle("copied notes have no canonical part".into())
+                })?
+                .to_string();
+            let origin = html_attribute(section, "data-hcd-notes-source-hash")
+                .filter(|hash| {
+                    hash.len() == 64
+                        && hash
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                })
+                .ok_or_else(|| {
+                    HcdError::InvalidBundle("copied notes have no valid source identity".into())
+                })?
+                .to_string();
+            if owners
+                .insert(owner.clone(), (part.clone(), origin.clone()))
+                .is_some_and(|old| old != (part.clone(), origin))
+                || parts
+                    .insert(part, owner.clone())
+                    .is_some_and(|old| old != owner)
+            {
+                return Err(HcdError::InvalidBundle(
+                    "copied notes have ambiguous owners or parts".into(),
+                ));
+            }
+        }
+    }
+    Ok(owners)
+}
+
 pub(crate) fn export_pptx(
     bundle: &Bundle,
     source: &Path,
     target: &Path,
     options: &ExportOptions,
 ) -> Result<FidelityReport, HcdError> {
-    let (manifest, dirty_parts, dirty_node_ids, _) =
-        checked_export_state_with_restores(bundle, source, options)?;
+    let (manifest, dirty_parts, dirty_node_ids, revisions) =
+        checked_export_state_with_restores(bundle, source, options, RunFontSupport::Rewrites)?;
     let nodes = collect_dirty_nodes(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
+    let edited_formats = collect_edited_run_formats(bundle, &manifest, &dirty_parts)?;
+    let faces = collect_dirty_fonts(bundle, &manifest, &dirty_parts, &dirty_node_ids)?;
+    let mut fonts: HashMap<String, BTreeMap<u64, HtmlFontNode>> = HashMap::new();
     let mut replacements: HashMap<String, BTreeMap<u64, String>> = HashMap::new();
     let mut insertions: HashMap<String, Vec<InsertedPptxShape>> = HashMap::new();
-    for node in nodes {
+    let mut source_formats: HashMap<String, BTreeMap<u64, PptxRunFormat>> = HashMap::new();
+    let ShapeAlignRequests {
+        native: mut shape_alignments,
+        created: mut created_aligns,
+    } = collect_edited_shape_aligns(bundle, &manifest, &dirty_parts)?;
+    for node in &nodes {
         if node.source.created_in_hcd {
-            let shape = InsertedPptxShape::from_node(&node)?;
-            insertions.entry(node.source.part).or_default().push(shape);
-        } else {
-            replacements
-                .entry(node.source.part)
+            let mut shape = InsertedPptxShape::from_node(node)?;
+            shape.font = faces.get(&node.node_id).cloned();
+            if let Some(align) = created_aligns.remove(&node.node_id) {
+                shape.align = align;
+            }
+            if let Some(format) = edited_formats.get(&node.node_id) {
+                if let Some(size) = format.font_size_pt {
+                    let hundredths = (size * 100.0).round() as u32;
+                    if !(100..=25_600).contains(&hundredths) {
+                        return Err(HcdError::InvalidBundle(
+                            "PPTX edited font size is out of bounds".to_string(),
+                        ));
+                    }
+                    shape.font_size_hundredths = hundredths;
+                }
+                shape.format = format.clone();
+            }
+            insertions
+                .entry(node.source.part.clone())
                 .or_default()
-                .insert(node.source.text_ordinal, node.text);
+                .push(shape);
+        } else {
+            if let Some(face) = faces.get(&node.node_id) {
+                fonts
+                    .entry(node.source.part.clone())
+                    .or_default()
+                    .insert(node.source.text_ordinal, face.clone());
+            }
+            replacements
+                .entry(node.source.part.clone())
+                .or_default()
+                .insert(node.source.text_ordinal, node.text.clone());
+            if let Some(format) = edited_formats.get(&node.node_id) {
+                if source_formats
+                    .entry(node.source.part.clone())
+                    .or_default()
+                    .insert(node.source.text_ordinal, format.clone())
+                    .is_some()
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "PPTX run format ordinal is duplicated".to_string(),
+                    ));
+                }
+            }
         }
     }
     for shapes in insertions.values_mut() {
         shapes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
     }
-    let native_geometry = collect_edited_shape_geometry(bundle, &manifest, &dirty_parts)?;
+    if let Some(node_id) = created_aligns.keys().min() {
+        // The chunk says a box this history aligned is on the slide, yet no shape
+        // is being written for it. Losing the alignment quietly would leave the
+        // page disagreeing with the chunks that describe it.
+        return Err(HcdError::InvalidBundle(format!(
+            "PPTX aligned text box {node_id} has no shape to write"
+        )));
+    }
+    let SlideObjectEdits {
+        geometry: mut native_geometry,
+        primitives: added_primitives,
+        positions,
+    } = collect_edited_slide_objects(bundle, &manifest, &dirty_parts)?;
+    for (part, primitives) in added_primitives {
+        insertions.entry(part).or_default().extend(primitives);
+    }
+    for shapes in insertions.values_mut() {
+        shapes.sort_by_key(|shape| positions.get(&shape.node_id).copied());
+    }
+    // A slide HCD created is not in the source package, so the export writes it
+    // the way the workbook export writes a new tab: a blank slide part built
+    // here, grown with whatever text boxes landed on it, plus the three control
+    // parts that let the package address it and the presentation show it last.
+    // A page HCD deleted is that ledger read backwards: the part leaves, and so
+    // does every control entry that addressed it.
+    // A page HCD copied is that blank page's opposite: the package holds the page
+    // it was made from, so the export writes the copy from it rather than from a
+    // template.
+    let mut added_slides: Vec<SlideAddition> = Vec::new();
+    let mut removed_slides: Vec<SlideRemoval> = Vec::new();
+    let mut removal_revisions = HashMap::new();
+    let mut reordered_slides: Vec<SlideReorder> = Vec::new();
+    let mut copied_slides: Vec<SlideCopy> = Vec::new();
+    let mut copy_revision = HashMap::new();
+    for &revision in &revisions {
+        let record = bundle.revision(revision)?;
+        added_slides.extend(record.slide_additions);
+        for removal in record.slide_removals {
+            removal_revisions.insert(removal.slide_part.clone(), revision);
+            removed_slides.push(removal);
+        }
+        reordered_slides.extend(record.slide_reorders);
+        for copy in record.slide_copies {
+            copy_revision.insert(copy.slide_part.clone(), revision.saturating_sub(1));
+            copied_slides.push(copy);
+        }
+    }
+    // Undoing any of these is not one of these records: a restore is a
+    // structural revision, so the walk above never reaches it and the page is
+    // simply back in the deck, gone from it, or in the place it moved from.
+    let removed_parts: BTreeSet<String> = removed_slides
+        .iter()
+        .map(|removal| removal.slide_part.clone())
+        .collect();
+    // A page this history both invented — a blank one it created, a copy it made —
+    // and deleted again never reached the source package, so there is no part to
+    // drop and no page to write: it cancels out, the way a worksheet tab does.
+    let created_parts: BTreeSet<String> = added_slides
+        .iter()
+        .map(|addition| addition.slide_part.clone())
+        .chain(copied_slides.iter().map(|copy| copy.slide_part.clone()))
+        .collect();
+    let cancelled_parts: BTreeSet<String> = created_parts
+        .iter()
+        .filter(|part| removed_parts.contains(part.as_str()))
+        .cloned()
+        .collect();
     let scratch = tempfile::tempdir()?;
-    let mut replacement_paths = HashMap::new();
     let mut archive = StreamingOxmlArchive::open(source).map_err(package_error)?;
+    let mut replacement_paths: HashMap<String, PathBuf> = HashMap::new();
+    let mut removal_paths: BTreeSet<String> = BTreeSet::new();
+    if !removed_slides.is_empty() {
+        let names: Vec<String> = archive
+            .entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        // Text written on a page this history later deleted is not exported: the
+        // part is dropped, so rebuilding it would only ask for canonical maps the
+        // index no longer holds.
+        for part in &removed_parts {
+            replacements.remove(part);
+            insertions.remove(part);
+            native_geometry.remove(part);
+            source_formats.remove(part);
+            fonts.remove(part);
+            shape_alignments.remove(part);
+        }
+        for removal in &removed_slides {
+            let part = removal.slide_part.as_str();
+            if cancelled_parts.contains(part) {
+                continue;
+            }
+            // The name has to be a page's, because everything below addresses the
+            // package's three lists in the shape a slide part is written in.
+            slide_file_name(part)?;
+            if !names.iter().any(|name| name == part) {
+                return Err(HcdError::InvalidBundle(format!(
+                    "PPTX slide deletion target {part} is not in the source presentation"
+                )));
+            }
+            removal_paths.insert(part.to_string());
+            let rels = slide_relationships_part(part)?;
+            if names.iter().any(|name| name == &rels) {
+                removal_paths.insert(rels);
+            }
+        }
+        let deleted: BTreeSet<String> = removed_parts
+            .iter()
+            .filter(|part| !cancelled_parts.contains(*part))
+            .cloned()
+            .collect();
+        if !deleted.is_empty() {
+            // Speaker notes belong to one slide and point back to it. Remove
+            // the notes with that slide, but only if no surviving part still
+            // references them. Media and the shared notes master stay intact.
+            let mut deleted_notes: HashMap<String, String> = HashMap::new();
+            let types = archive
+                .read_control_part("[Content_Types].xml", MAX_CONTROL_BYTES)
+                .map_err(package_error)?;
+            let types = oxml::content_types::ContentTypes::parse(&types)
+                .map_err(|error| HcdError::InvalidBundle(format!("content types XML: {error}")))?;
+            for slide in &deleted {
+                let rels = slide_relationships_part(slide)?;
+                if !archive.contains(&rels) {
+                    continue;
+                }
+                let bytes = archive
+                    .read_control_part(&rels, MAX_CONTROL_BYTES)
+                    .map_err(package_error)?;
+                for relationship in read_pptx_relationships(&bytes, slide, &rels)? {
+                    if !relationship.kind.ends_with("/notesSlide") {
+                        continue;
+                    }
+                    let note = relationship.target.ok_or_else(|| {
+                        HcdError::InvalidBundle("slide notes relationship is external".into())
+                    })?;
+                    if types.content_type_for(&note).map(String::as_str) != Some("application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml")
+                        || !archive.contains(&note) || deleted_notes.insert(note.clone(), slide.clone()).is_some() {
+                        return Err(HcdError::InvalidBundle(format!("slide notes {note} are missing or shared")));
+                    }
+                    removal_paths.insert(note.clone());
+                    // The note's historical edits are copied from their own
+                    // revision below, but the deleted original is not rebuilt.
+                    replacements.remove(&note);
+                    insertions.remove(&note);
+                    native_geometry.remove(&note);
+                    source_formats.remove(&note);
+                    fonts.remove(&note);
+                    shape_alignments.remove(&note);
+                    let note_rels = copy_resources::relationship_part(&note)?;
+                    if archive.contains(&note_rels) {
+                        removal_paths.insert(note_rels);
+                    }
+                }
+            }
+            // Older HCD imports retain notes as separate chunks after a slide is
+            // deleted. Never silently discard edits made to that orphan chunk.
+            for (note, slide) in &deleted_notes {
+                let removed_at = removal_revisions[slide];
+                for revision in revisions
+                    .iter()
+                    .copied()
+                    .filter(|revision| *revision > removed_at)
+                {
+                    if bundle.revision(revision)?.dirty_source_parts.contains(note) {
+                        return Err(HcdError::Unsupported(format!(
+                            "speaker notes {note} were edited after slide {slide} was deleted; restore the slide or preserve those edits before export"
+                        )));
+                    }
+                }
+            }
+            let presentation =
+                current_control_part(&mut archive, &replacement_paths, "ppt/presentation.xml")?;
+            let list = read_pptx_slide_list(&presentation)?;
+            if list.custom_shows {
+                return Err(HcdError::Unsupported(
+                    "PPTX slide deletion cannot drop a page out of a presentation with custom shows; a show names slides by their list id, so remove the show first or export without --source".to_string(),
+                ));
+            }
+            if list.sections {
+                return Err(HcdError::Unsupported(
+                    "PPTX slide deletion cannot drop a page out of a presentation that groups its slides in sections; a section lists its own pages, so remove the sections first or export without --source".to_string(),
+                ));
+            }
+            // Whatever still points at a page about to be removed would dangle: a
+            // notes slide's list points back at the page it annotates, and a
+            // hyperlink from another page points at the page it jumps to. Both are
+            // refused, naming what stands in the way.
+            let mut dropped_relationship_ids: BTreeSet<String> = BTreeSet::new();
+            for name in &names {
+                if !name.ends_with(".rels") {
+                    continue;
+                }
+                let Some(owner) = pptx_rels_owner(name) else {
+                    continue;
+                };
+                if removed_parts.contains(&owner) || deleted_notes.contains_key(&owner) {
+                    // The page's own list leaves with the page it describes.
+                    continue;
+                }
+                let xml = archive
+                    .read_control_part(name, MAX_CONTROL_BYTES)
+                    .map_err(package_error)?;
+                for relationship in read_pptx_relationships(&xml, &owner, name)? {
+                    if relationship
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| deleted_notes.contains_key(target))
+                    {
+                        return Err(HcdError::Unsupported(format!(
+                            "PPTX slide deletion cannot remove notes still referenced by {name}"
+                        )));
+                    }
+                    let Some(target) = relationship
+                        .target
+                        .as_ref()
+                        .filter(|target| deleted.contains(*target))
+                    else {
+                        continue;
+                    };
+                    if name == "ppt/_rels/presentation.xml.rels" {
+                        if relationship.id.is_empty() {
+                            return Err(HcdError::InvalidBundle(format!(
+                                "{name} holds a relationship with no Id"
+                            )));
+                        }
+                        dropped_relationship_ids.insert(relationship.id.clone());
+                        continue;
+                    }
+                    return Err(HcdError::Unsupported(format!(
+                        "PPTX slide deletion cannot drop {target} while {name} still points at it; delete whatever named it first or export without --source"
+                    )));
+                }
+            }
+            if dropped_relationship_ids.len() != deleted.len() {
+                return Err(HcdError::InvalidBundle(format!(
+                    "the presentation addresses {} of the {} pages the history deleted",
+                    dropped_relationship_ids.len(),
+                    deleted.len()
+                )));
+            }
+            let mut dropped_slide_ids: BTreeSet<String> = BTreeSet::new();
+            for (id, relationship_id) in &list.entries {
+                if dropped_relationship_ids.contains(relationship_id) {
+                    dropped_slide_ids.insert(id.clone());
+                }
+            }
+            if dropped_slide_ids.len() != deleted.len() {
+                return Err(HcdError::InvalidBundle(
+                    "a deleted slide has no entry in the presentation's slide list".to_string(),
+                ));
+            }
+            // A complete remake may replace every source page with newly
+            // created pages. They are written below, after removals: the final
+            // deck, rather than this intermediate source list, must be nonempty.
+            let surviving_created = created_parts
+                .iter()
+                .any(|part| !cancelled_parts.contains(part));
+            if list.entries.len() == dropped_slide_ids.len() && !surviving_created {
+                return Err(HcdError::InvalidPatch(
+                    "PPTX presentation must keep one slide".to_string(),
+                ));
+            }
+            let (presentation, dropped) = drop_control_elements(
+                &presentation,
+                "sldIdLst",
+                "sldId",
+                "id",
+                &dropped_slide_ids,
+                "ppt/presentation.xml",
+            )?;
+            if dropped != dropped_slide_ids.len() {
+                return Err(HcdError::InvalidBundle(
+                    "PPTX slide list holds an entry the export could not remove".to_string(),
+                ));
+            }
+            let path = scratch
+                .path()
+                .join(safe_temp_name("removed-presentation.xml"));
+            std::fs::write(&path, presentation)?;
+            replacement_paths.insert("ppt/presentation.xml".to_string(), path);
+
+            let relationships = current_control_part(
+                &mut archive,
+                &replacement_paths,
+                "ppt/_rels/presentation.xml.rels",
+            )?;
+            let (relationships, dropped) = drop_control_elements(
+                &relationships,
+                "Relationships",
+                "Relationship",
+                "Id",
+                &dropped_relationship_ids,
+                "ppt/_rels/presentation.xml.rels",
+            )?;
+            if dropped != dropped_relationship_ids.len() {
+                return Err(HcdError::InvalidBundle(
+                    "PPTX relationship list holds an entry the export could not remove".to_string(),
+                ));
+            }
+            let path = scratch
+                .path()
+                .join(safe_temp_name("removed-presentation.xml.rels"));
+            std::fs::write(&path, relationships)?;
+            replacement_paths.insert("ppt/_rels/presentation.xml.rels".to_string(), path);
+
+            let content_types =
+                current_control_part(&mut archive, &replacement_paths, "[Content_Types].xml")?;
+            let part_names: BTreeSet<String> = removal_paths
+                .iter()
+                .map(|part| format!("/{part}"))
+                .collect();
+            let (content_types, _) = drop_control_elements(
+                &content_types,
+                "Types",
+                "Override",
+                "PartName",
+                &part_names,
+                "[Content_Types].xml",
+            )?;
+            // A deck that declares its pages through a Default extension carries no
+            // override to take away, which is why this count is not checked.
+            let path = scratch
+                .path()
+                .join(safe_temp_name("removed-content-types.xml"));
+            std::fs::write(&path, content_types)?;
+            replacement_paths.insert("[Content_Types].xml".to_string(), path);
+        }
+    }
+    let mut blank_slides: HashMap<String, PathBuf> = HashMap::new();
+    for addition in &added_slides {
+        if cancelled_parts.contains(&addition.slide_part) {
+            continue;
+        }
+        if archive.contains(&addition.slide_part) {
+            return Err(HcdError::InvalidBundle(format!(
+                "PPTX slide addition {} is already in the source presentation",
+                addition.slide_part
+            )));
+        }
+        let path = scratch
+            .path()
+            .join(safe_temp_name(&format!("blank-{}", addition.slide_part)));
+        std::fs::write(&path, BLANK_PPTX_SLIDE_XML)?;
+        blank_slides.insert(addition.slide_part.clone(), path);
+    }
+    // A page HCD copied is the source package's page again under a name the
+    // package does not carry yet. Which copies still stand, and which of them
+    // cancelled out, has to be settled before any part is rebuilt: a copy that
+    // this history also wrote on is rebuilt from the page it was made from rather
+    // than carried over as bytes.
+    // A copy can itself be the source of another copy, or originate in an HCD
+    // blank page. Resolve every historical copy, including deleted ancestors,
+    // before discarding the pages that are no longer present.
+    let mut copy_parts: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut copy_origins: HashMap<String, Option<String>> = added_slides
+        .iter()
+        .map(|slide| (slide.slide_part.clone(), None))
+        .collect();
+    let mut copy_note_revisions: HashMap<String, u64> = HashMap::new();
+    let mut cancelled_copies: BTreeSet<String> = BTreeSet::new();
+    for copy in &copied_slides {
+        let origin = if let Some(origin) = copy_origins.get(&copy.source_slide_part) {
+            origin.clone()
+        } else if archive.contains(&copy.source_slide_part) {
+            Some(copy.source_slide_part.clone())
+        } else {
+            return Err(HcdError::InvalidBundle(format!(
+                "PPTX slide copy asks for {}, which neither the source presentation nor its history holds",
+                copy.source_slide_part
+            )));
+        };
+        copy_origins.insert(copy.slide_part.clone(), origin.clone());
+        let note_revision = copy_note_revisions
+            .get(&copy.source_slide_part)
+            .copied()
+            .or_else(|| copy_revision.get(&copy.slide_part).copied())
+            .ok_or_else(|| HcdError::InvalidBundle("PPTX slide copy has no revision".into()))?;
+        copy_note_revisions.insert(copy.slide_part.clone(), note_revision);
+        if cancelled_parts.contains(copy.slide_part.as_str()) {
+            cancelled_copies.insert(copy.slide_part.clone());
+            continue;
+        }
+        slide_file_name(&copy.slide_part)?;
+        if archive.contains(&copy.slide_part) {
+            return Err(HcdError::InvalidBundle(format!(
+                "PPTX slide copy {} is already in the source presentation",
+                copy.slide_part
+            )));
+        }
+        copy_parts.insert(copy.slide_part.clone(), origin);
+    }
+    let mut addition_paths: HashMap<String, PathBuf> = HashMap::new();
+    let pinned_faces = fonts.values().map(BTreeMap::len).sum::<usize>()
+        + insertions
+            .values()
+            .flatten()
+            .filter(|shape| shape.font.is_some())
+            .count();
+    let mut current_notes = HashMap::new();
+    for (owner, (part, origin)) in copied_note_parts(bundle, &manifest)? {
+        if !copy_parts.contains_key(&owner) {
+            return Err(HcdError::InvalidBundle(
+                "copied notes refer to a missing copied slide".into(),
+            ));
+        }
+        current_notes.insert(
+            owner,
+            copy_resources::NoteChanges {
+                source_hash: Some(origin),
+                text: replacements.remove(&part).unwrap_or_default(),
+                insertions: insertions.remove(&part).unwrap_or_default(),
+                runs: PptxRunEdits {
+                    formats: source_formats.remove(&part).unwrap_or_default(),
+                    fonts: fonts.remove(&part).unwrap_or_default(),
+                },
+                geometry: native_geometry.remove(&part).unwrap_or_default(),
+                alignments: shape_alignments.remove(&part).unwrap_or_default(),
+            },
+        );
+    }
     for part in replacements
         .keys()
         .chain(insertions.keys())
         .chain(native_geometry.keys())
+        .chain(source_formats.keys())
+        .chain(fonts.keys())
+        .chain(shape_alignments.keys())
         .collect::<BTreeSet<_>>()
     {
         let values = replacements.get(part).cloned().unwrap_or_default();
         let shapes = insertions.get(part).cloned().unwrap_or_default();
         let geometry = native_geometry.get(part).cloned().unwrap_or_default();
+        let runs = PptxRunEdits {
+            formats: source_formats.get(part).cloned().unwrap_or_default(),
+            fonts: fonts.get(part).cloned().unwrap_or_default(),
+        };
+        let aligns = shape_alignments.get(part).cloned().unwrap_or_default();
         let path = scratch.path().join(safe_temp_name(part));
         let output = File::create(&path)?;
-        archive
-            .with_part(part, |input| {
-                rewrite_text_part(input, BufWriter::new(output), &values, &shapes, &geometry)
-                    .map_err(|error| PackageError::ReadPartError(error.to_string()))
-            })
-            .map_err(package_error)?;
-        replacement_paths.insert(part.clone(), path);
+        let rewrite = |input: &mut dyn Read, output: File| {
+            rewrite_text_part(
+                input,
+                BufWriter::new(output),
+                &values,
+                &shapes,
+                &geometry,
+                &runs,
+                &aligns,
+            )
+        };
+        if let Some(source_part) = copy_parts.get(part) {
+            // A page HCD copied that this history also wrote on has no part in the
+            // source package to rewrite in place. Its edits are rebuilt onto the
+            // page it was made from — the source's own bytes, which is what the copy
+            // was written from, not whatever a later revision has since said about
+            // that page — and come out under the copy's name.
+            if let Some(source_part) = source_part {
+                archive
+                    .with_part(source_part, |input| {
+                        rewrite(input, output)
+                            .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                    })
+                    .map_err(package_error)?;
+            } else {
+                rewrite(&mut BLANK_PPTX_SLIDE_XML.as_bytes(), output)?;
+            }
+            addition_paths.insert(part.clone(), path);
+        } else if let Some(template) = blank_slides.get(part) {
+            let mut input = File::open(template)?;
+            rewrite(&mut input, output)?;
+            addition_paths.insert(part.clone(), path);
+        } else {
+            archive
+                .with_part(part, |input| {
+                    rewrite(input, output)
+                        .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                })
+                .map_err(package_error)?;
+            replacement_paths.insert(part.clone(), path);
+        }
     }
-    let changed =
-        StreamingOxmlRewriter::rewrite(source, target, &replacement_paths, "ppt/presentation.xml")
-            .map_err(package_error)?;
+    // A slide nobody typed into yet is still a slide the package has to carry.
+    for (part, template) in &blank_slides {
+        addition_paths
+            .entry(part.clone())
+            .or_insert_with(|| template.clone());
+    }
+    if !blank_slides.is_empty() {
+        let layout_target = pptx_added_slide_layout(&mut archive)?;
+        let mut ordered: Vec<&String> = blank_slides.keys().collect();
+        ordered.sort_by_key(|part| (numeric_suffix(part.as_str()), part.to_string()));
+        let content_types =
+            current_control_part(&mut archive, &replacement_paths, "[Content_Types].xml")?;
+        let relationships = current_control_part(
+            &mut archive,
+            &replacement_paths,
+            "ppt/_rels/presentation.xml.rels",
+        )?;
+        let presentation =
+            current_control_part(&mut archive, &replacement_paths, "ppt/presentation.xml")?;
+        let first_relationship_id = highest_control_id(&relationships, "Relationship", "Id")? + 1;
+        // A slide's `id` is not its position: PowerPoint numbers them from 256,
+        // and a presentation whose list the exporter cannot find starts there.
+        let first_slide_id = highest_control_id(&presentation, "sldId", "id")?.max(255) + 1;
+        let mut type_children = Vec::new();
+        let mut relationship_children = Vec::new();
+        let mut slide_children = Vec::new();
+        for (index, part) in ordered.into_iter().enumerate() {
+            let file_name = slide_file_name(part)?;
+            type_children.push(AddedElement {
+                name: "Override",
+                attributes: vec![
+                    ("PartName".to_string(), format!("/{part}")),
+                    (
+                        "ContentType".to_string(),
+                        PPTX_SLIDE_CONTENT_TYPE.to_string(),
+                    ),
+                ],
+            });
+            relationship_children.push(AddedElement {
+                name: "Relationship",
+                attributes: vec![
+                    (
+                        "Id".to_string(),
+                        format!("rId{}", first_relationship_id + index as u64),
+                    ),
+                    ("Type".to_string(), PPTX_SLIDE_RELATIONSHIP_TYPE.to_string()),
+                    ("Target".to_string(), format!("slides/{file_name}")),
+                ],
+            });
+            slide_children.push(AddedElement {
+                name: "sldId",
+                attributes: vec![
+                    (
+                        "id".to_string(),
+                        (first_slide_id + index as u64).to_string(),
+                    ),
+                    (
+                        "r:id".to_string(),
+                        format!("rId{}", first_relationship_id + index as u64),
+                    ),
+                ],
+            });
+            // The new slide draws its master from a layout, the same way the
+            // slide before it does; without that relationship the presentation
+            // opens with a repair prompt instead of a blank page.
+            let rels_part = slide_relationships_part(part)?;
+            let rels_path = scratch.path().join(safe_temp_name(&rels_part));
+            std::fs::write(&rels_path, pptx_slide_relationships_xml(&layout_target))?;
+            addition_paths.insert(rels_part, rels_path);
+        }
+        for (part, parent, source_bytes, children) in [
+            (
+                "[Content_Types].xml",
+                "Types",
+                &content_types,
+                &type_children,
+            ),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                "Relationships",
+                &relationships,
+                &relationship_children,
+            ),
+            (
+                "ppt/presentation.xml",
+                "sldIdLst",
+                &presentation,
+                &slide_children,
+            ),
+        ] {
+            let rewritten = append_control_children(source_bytes, parent, children, part)?;
+            let path = scratch
+                .path()
+                .join(safe_temp_name(&format!("added-{part}")));
+            std::fs::write(&path, rewritten)?;
+            replacement_paths.insert(part.to_string(), path);
+        }
+    }
+    // Each standing copy gains one entry in the three control lists. Where that
+    // entry stands is not decided here: the presentation's list is put in the
+    // order the index holds right below, and that is what stands the copy behind
+    // the page it came from.
+    if !copy_parts.is_empty() {
+        let content_types =
+            current_control_part(&mut archive, &replacement_paths, "[Content_Types].xml")?;
+        let relationships = current_control_part(
+            &mut archive,
+            &replacement_paths,
+            "ppt/_rels/presentation.xml.rels",
+        )?;
+        let presentation =
+            current_control_part(&mut archive, &replacement_paths, "ppt/presentation.xml")?;
+        let first_relationship_id = highest_control_id(&relationships, "Relationship", "Id")? + 1;
+        let first_slide_id = highest_control_id(&presentation, "sldId", "id")?.max(255) + 1;
+        let mut type_children = Vec::new();
+        let mut relationship_children = Vec::new();
+        let mut slide_children = Vec::new();
+        let mut copied_resources =
+            copy_resources::CopyResources::new(&mut archive, scratch.path())?;
+        let mut note_snapshots = HashMap::new();
+        for (index, (part, source_part)) in copy_parts.iter().enumerate() {
+            let file_name = slide_file_name(part)?;
+            // The page exactly as the source package holds it — unless this history
+            // also wrote on the copy, in which case the page rebuilt above already
+            // stands under its name. Either way, what this history said about the
+            // page it was copied from belongs to that page alone: a copy does not go
+            // on changing with its original.
+            if !addition_paths.contains_key(part.as_str()) {
+                let part_path = scratch
+                    .path()
+                    .join(safe_temp_name(&format!("copied-slide-{part}")));
+                let mut output = File::create(&part_path)?;
+                if let Some(source_part) = source_part {
+                    archive
+                        .with_part(source_part, |input| {
+                            std::io::copy(input, &mut output)
+                                .map_err(|error| PackageError::ReadPartError(error.to_string()))
+                        })
+                        .map_err(package_error)?;
+                } else {
+                    output.write_all(BLANK_PPTX_SLIDE_XML.as_bytes())?;
+                }
+                addition_paths.insert(part.clone(), part_path);
+            }
+            // The relationship list travels with it, because the page names its
+            // pictures by the ids that list holds: the copy points at the same
+            // media the original does, and the ids still resolve because the copy
+            // carries its own list. A resource the source page holds on its own —
+            // a notes page, a chart, an embedded object — would be shared by two
+            // pages, which is a package an application repairs on opening.
+            let rels_part = slide_relationships_part(part)?;
+            // A page with nothing to point at carries no list at all, which a
+            // hand-written or minimal package does routinely. The copy is given an
+            // empty one so that its own name resolves, and nothing more.
+            let rels_bytes = if let Some(source_part) = source_part {
+                let source_rels = slide_relationships_part(source_part)?;
+                let original_rels = if archive.contains(&source_rels) {
+                    current_control_part(&mut archive, &replacement_paths, &source_rels)?
+                } else {
+                    PPTX_EMPTY_RELATIONSHIPS.as_bytes().to_vec()
+                };
+                let note_revision = copy_note_revisions[part];
+                let has_notes = read_pptx_relationships(&original_rels, source_part, &source_rels)?
+                    .iter()
+                    .any(|relationship| relationship.kind.ends_with("/notesSlide"));
+                if has_notes
+                    && !current_notes.contains_key(part)
+                    && note_revision > 0
+                    && !note_snapshots.contains_key(&note_revision)
+                {
+                    note_snapshots.insert(
+                        note_revision,
+                        copy_resources::NoteSnapshot::capture(bundle, source, note_revision)?,
+                    );
+                }
+                copied_resources.copy_slide(
+                    &mut archive,
+                    copy_resources::SlideCopySource {
+                        part: source_part,
+                        relationships: &original_rels,
+                        notes: note_snapshots.get(&note_revision),
+                        current_note: current_notes.get(part),
+                    },
+                    part,
+                    &removed_parts,
+                    &mut addition_paths,
+                )?
+            } else {
+                if current_notes.contains_key(part) {
+                    return Err(HcdError::Unsupported(
+                        "copied notes have no native source slide".into(),
+                    ));
+                }
+                pptx_slide_relationships_xml(&pptx_added_slide_layout(&mut archive)?).into_bytes()
+            };
+            let rels_path = scratch
+                .path()
+                .join(safe_temp_name(&format!("copied-rels-{rels_part}")));
+            std::fs::write(&rels_path, &rels_bytes)?;
+            addition_paths.insert(rels_part, rels_path);
+            type_children.push(AddedElement {
+                name: "Override",
+                attributes: vec![
+                    ("PartName".to_string(), format!("/{part}")),
+                    (
+                        "ContentType".to_string(),
+                        PPTX_SLIDE_CONTENT_TYPE.to_string(),
+                    ),
+                ],
+            });
+            relationship_children.push(AddedElement {
+                name: "Relationship",
+                attributes: vec![
+                    (
+                        "Id".to_string(),
+                        format!("rId{}", first_relationship_id + index as u64),
+                    ),
+                    ("Type".to_string(), PPTX_SLIDE_RELATIONSHIP_TYPE.to_string()),
+                    ("Target".to_string(), format!("slides/{file_name}")),
+                ],
+            });
+            slide_children.push(AddedElement {
+                name: "sldId",
+                attributes: vec![
+                    (
+                        "id".to_string(),
+                        (first_slide_id + index as u64).to_string(),
+                    ),
+                    (
+                        "r:id".to_string(),
+                        format!("rId{}", first_relationship_id + index as u64),
+                    ),
+                ],
+            });
+        }
+        type_children.extend(copied_resources.type_children);
+        for (part, parent, source_bytes, children) in [
+            (
+                "[Content_Types].xml",
+                "Types",
+                &content_types,
+                &type_children,
+            ),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                "Relationships",
+                &relationships,
+                &relationship_children,
+            ),
+            (
+                "ppt/presentation.xml",
+                "sldIdLst",
+                &presentation,
+                &slide_children,
+            ),
+        ] {
+            let rewritten = append_control_children(source_bytes, parent, children, part)?;
+            let path = scratch
+                .path()
+                .join(safe_temp_name(&format!("copy-list-{part}")));
+            std::fs::write(&path, rewritten)?;
+            replacement_paths.insert(part.to_string(), path);
+        }
+    }
+    // A page HCD moved left no trace in the package: its part, its relationship
+    // and its entry all keep the names they had, and only the order the entries
+    // stand in changed. HCD holds that order on the index, so the export reads it
+    // back out of this revision's index and writes the presentation's own list to
+    // match. The list is read after the additions, deletions and copies above,
+    // which is what lets a page HCD created or copied stand where the deck shows
+    // it, and moves one through a deck it now belongs to.
+    let mut moved_pages: Vec<(String, usize)> = Vec::new();
+    if !reordered_slides.is_empty() || !copy_parts.is_empty() {
+        let deck_order = pptx_deck_page_order(bundle, &manifest)?;
+        let presentation =
+            current_control_part(&mut archive, &replacement_paths, "ppt/presentation.xml")?;
+        let list = read_pptx_slide_list(&presentation)?;
+        if list.sections {
+            return Err(HcdError::Unsupported(
+                "PPTX slide move cannot reorder a presentation that groups its slides in sections; a section lists its own pages, so remove the sections first or export without --source".to_string(),
+            ));
+        }
+        // A custom show is left alone on purpose. A show names pages by their list
+        // id, and a move keeps every id the deck holds while changing only the
+        // order they are listed in — which is why a deletion refuses one and a move
+        // does not.
+        let relationships = current_control_part(
+            &mut archive,
+            &replacement_paths,
+            "ppt/_rels/presentation.xml.rels",
+        )?;
+        let mut addressed: BTreeMap<String, String> = BTreeMap::new();
+        for relationship in read_pptx_relationships(
+            &relationships,
+            "ppt/presentation.xml",
+            "ppt/_rels/presentation.xml.rels",
+        )? {
+            let Some(target) = relationship
+                .target
+                .filter(|target| target.starts_with("ppt/slides/"))
+            else {
+                continue;
+            };
+            if addressed.insert(target, relationship.id).is_some() {
+                return Err(HcdError::InvalidBundle(
+                    "the presentation addresses one slide page twice".to_string(),
+                ));
+            }
+        }
+        // The order is written as relationship ids, because that is how the list
+        // names its pages. Every page the index holds has to be one the
+        // presentation both addresses and shows, and the two lists have to be the
+        // same length: a page one of them is missing would leave the deck with a
+        // hole the export could not account for.
+        let mut wanted: Vec<String> = Vec::new();
+        for part in &deck_order {
+            let id = addressed.get(part).cloned().ok_or_else(|| {
+                HcdError::InvalidBundle(format!(
+                    "PPTX slide {part} is not addressed by the presentation's relationships"
+                ))
+            })?;
+            if !list.entries.iter().any(|(_, entry)| *entry == id) {
+                return Err(HcdError::InvalidBundle(format!(
+                    "PPTX slide {part} is not in the presentation's slide list"
+                )));
+            }
+            wanted.push(id);
+        }
+        if wanted.len() != list.entries.len() {
+            return Err(HcdError::InvalidBundle(format!(
+                "the HCD index holds {} slides, the presentation's slide list shows {}",
+                wanted.len(),
+                list.entries.len()
+            )));
+        }
+        let (rewritten, moved) = reorder_control_children(
+            &presentation,
+            "sldIdLst",
+            "sldId",
+            "r:id",
+            &wanted,
+            "ppt/presentation.xml",
+        )?;
+        // Two moves that cancel each other leave the list as the source wrote it,
+        // so the export writes nothing at all for them and the package stays
+        // byte-identical.
+        if moved != 0 {
+            let path = scratch
+                .path()
+                .join(safe_temp_name("reordered-presentation.xml"));
+            std::fs::write(&path, rewritten)?;
+            replacement_paths.insert("ppt/presentation.xml".to_string(), path);
+            for reorder in &reordered_slides {
+                if let Some(place) = deck_order
+                    .iter()
+                    .position(|part| *part == reorder.slide_part)
+                {
+                    moved_pages.push((reorder.slide_part.clone(), place + 1));
+                }
+            }
+            moved_pages.sort_by(|left, right| left.0.cmp(&right.0));
+            moved_pages.dedup();
+        }
+    }
+    let master_backgrounds = bundle.revision(manifest.revision)?.pptx_master_backgrounds;
+    let master_text_styles = bundle.revision(manifest.revision)?.pptx_master_text_styles;
+    design::write_masters(
+        &mut archive,
+        scratch.path(),
+        &mut replacement_paths,
+        &master_backgrounds,
+        &master_text_styles,
+    )?;
+    let removals: HashSet<String> = removal_paths.iter().cloned().collect();
+    let changed = StreamingOxmlRewriter::rewrite_with_changes(
+        source,
+        target,
+        &replacement_paths,
+        &addition_paths,
+        &removals,
+        "ppt/presentation.xml",
+    )
+    .map_err(package_error)?;
+    let mut warnings = manifest.warnings;
+    for part in &removed_parts {
+        // The report tells a page the export cut out of the package from one this
+        // history invented and then dropped again, because only the first of those
+        // has parts the reader will miss.
+        let message = if removal_paths.contains(part.as_str()) {
+            format!("slide {part} was deleted in HCD; the export dropped the page, its relationship, its entry in the presentation's slide list, and its content-type override")
+        } else {
+            format!("slide {part} was created and deleted inside this history; the export wrote no slide part for it")
+        };
+        warnings.push(FidelityWarning {
+            code: "PPTX_SLIDE_DELETE".to_string(),
+            message,
+            node_id: None,
+            source_part: Some(part.clone()),
+        });
+    }
+    for part in copy_parts.keys() {
+        let source_part = copied_slides
+            .iter()
+            .find(|copy| copy.slide_part == *part)
+            .map(|copy| copy.source_slide_part.as_str())
+            .ok_or_else(|| HcdError::InvalidBundle("PPTX slide copy history is missing".into()))?;
+        // The copy is written from the page the source holds, and this history's own
+        // edits on the copy are rebuilt onto it; an edit on the page it came from
+        // never reaches the copy.
+        let followed = if dirty_parts.contains(part.as_str()) {
+            "; the copy carries the edits this history wrote on it, rebuilt onto the page it was made from"
+        } else {
+            "; what this history wrote on the page it was copied from after the copy was made does not reach it"
+        };
+        warnings.push(FidelityWarning {
+            code: "PPTX_SLIDE_COPY".to_string(),
+            message: format!("slide {part} was copied in HCD from {source_part}; the export wrote that page again under a name the source package did not carry, with its own relationship list, entry in the presentation's slide list, and content-type override{followed}"),
+            node_id: None,
+            source_part: Some(part.clone()),
+        });
+    }
+    for part in &cancelled_copies {
+        warnings.push(FidelityWarning {
+            code: "PPTX_SLIDE_COPY".to_string(),
+            message: format!("slide {part} was copied and deleted inside this history; the export wrote no slide part for it"),
+            node_id: None,
+            source_part: Some(part.clone()),
+        });
+    }
+    for (part, place) in &moved_pages {
+        warnings.push(FidelityWarning {
+            code: "PPTX_SLIDE_REORDER".to_string(),
+            message: format!(
+                "slide {part} was moved in HCD; the export rewrote the presentation's slide list to the order the HCD index holds, which puts this page at position {place}"
+            ),
+            node_id: None,
+            source_part: Some(part.clone()),
+        });
+    }
+    let mut flattened = Vec::new();
+    if !addition_paths.is_empty() {
+        flattened.push("a slide created in HCD is written as a slide part the source package never had, on the layout the last existing slide draws from".to_string());
+    }
+    if !removal_paths.is_empty() {
+        flattened.push("a slide deleted in HCD leaves the package with its page entry, its relationship and its content-type override; media, layouts and charts that only that page used stay in the package unreferenced".to_string());
+    }
+    if !moved_pages.is_empty() {
+        flattened.push("a slide moved in HCD changes only the order the presentation's slide list holds its entries in; a section that grouped the old order has to be removed before a move exports, and a custom show keeps naming the pages it named".to_string());
+    }
     let report = FidelityReport {
         schema_version: HCD_SCHEMA_VERSION.to_string(),
         level: if changed.is_empty() {
@@ -3072,16 +4866,166 @@ pub(crate) fn export_pptx(
         } else {
             FidelityLevel::High
         },
-        preserved: vec![
-            "unmodified OOXML entries copied as raw compressed payloads".to_string(),
-            "slide geometry, run formatting, media, charts, notes and animations".to_string(),
-        ],
-        flattened: Vec::new(),
+        preserved: {
+            let mut preserved = vec![
+                "unmodified OOXML entries copied as raw compressed payloads".to_string(),
+                "slide geometry, run formatting, media, charts, notes and animations".to_string(),
+            ];
+            if pinned_faces > 0 {
+                preserved.push(format!(
+                    "run fonts pinned by text.font on {pinned_faces} mapped node(s)"
+                ));
+            }
+            if !master_backgrounds.is_empty() {
+                preserved.push(format!(
+                    "{} shared master backgrounds written as native PresentationML fills",
+                    master_backgrounds.len()
+                ));
+            }
+            if !master_text_styles.is_empty() {
+                preserved.push(format!("{} shared master text style(s) written as native DrawingML defaults without flattening placeholder inheritance",
+                    master_text_styles.values().map(Vec::len).sum::<usize>()));
+            }
+            preserved
+        },
+        flattened,
         dropped: vec!["HCD recognition annotations are not exported".to_string()],
-        warnings: manifest.warnings,
+        warnings,
     };
     write_fidelity_report(options, &report)?;
     Ok(report)
+}
+
+/// The file name of a slide part, checked to be one part of the slide folder.
+/// A slide HCD created is named `ppt/slides/slideN.xml`, and both the workbook
+/// of relationships and the content-type override are built from that name.
+fn slide_file_name(part: &str) -> Result<&str, HcdError> {
+    let name = part.strip_prefix("ppt/slides/").ok_or_else(|| {
+        HcdError::InvalidBundle(format!("PPTX slide addition {part} is not a slide part"))
+    })?;
+    if name.is_empty()
+        || !name.ends_with(".xml")
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+    {
+        return Err(HcdError::InvalidBundle(format!(
+            "PPTX slide addition {part} is not a slide part"
+        )));
+    }
+    Ok(name)
+}
+
+/// The relationship part that belongs to a slide part.
+fn slide_relationships_part(part: &str) -> Result<String, HcdError> {
+    Ok(format!("ppt/slides/_rels/{}.rels", slide_file_name(part)?))
+}
+
+/// The layout a slide HCD created draws from, written as the target of its own
+/// relationship: the layout the last slide that names one uses, which is the
+/// page the patch measured its size from in every presentation PowerPoint or
+/// WPS writes. A package that carries no layout at all cannot host a new slide,
+/// so the export names the part it would have to invent instead of writing a
+/// slide the application would refuse to open.
+fn pptx_added_slide_layout(archive: &mut StreamingOxmlArchive) -> Result<String, HcdError> {
+    let slides = presentation_slides(archive)?;
+    for (part, _) in slides.iter().rev() {
+        if let Some(layout) = slide_layout_part(archive, part)? {
+            return slide_layout_target(&layout);
+        }
+    }
+    // A hand-built package may carry a layout no slide references yet.
+    let mut layouts: Vec<String> = archive
+        .entries()
+        .iter()
+        .filter(|entry| !entry.is_dir)
+        .map(|entry| entry.name.clone())
+        .filter(|name| name.starts_with("ppt/slideLayouts/") && name.ends_with(".xml"))
+        .collect();
+    layouts.sort_by_key(|name| (numeric_suffix(name), name.clone()));
+    match layouts.first() {
+        Some(layout) => slide_layout_target(layout),
+        None => Err(HcdError::InvalidBundle(
+            "PPTX slide addition needs a slide layout for the new slide to draw from; \
+             give the presentation a layout or export it without --source"
+                .to_string(),
+        )),
+    }
+}
+
+/// The layout part a slide of the source package points at, if it points at one.
+fn slide_layout_part(
+    archive: &mut StreamingOxmlArchive,
+    slide_part: &str,
+) -> Result<Option<String>, HcdError> {
+    let rels_part = slide_relationships_part(slide_part)?;
+    if !archive.contains(&rels_part) {
+        return Ok(None);
+    }
+    let xml = archive
+        .read_control_part(&rels_part, MAX_CONTROL_BYTES)
+        .map_err(package_error)?;
+    let mut reader = Reader::from_reader(xml.as_slice());
+    let mut buffer = Vec::new();
+    let mut budget = XmlBudget::default();
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("slide layout XML: {error}")))?;
+        budget.observe(&event, &rels_part)?;
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element)
+                if local_name(element.name().as_ref()) == "Relationship" =>
+            {
+                let is_layout = attribute(element, "Type")
+                    .is_some_and(|kind| kind.ends_with(PPTX_SLIDE_LAYOUT_RELATIONSHIP_TYPE_SUFFIX));
+                let is_external = attribute(element, "TargetMode")
+                    .is_some_and(|mode| mode.eq_ignore_ascii_case("external"));
+                if is_layout && !is_external {
+                    if let Some(target) = attribute(element, "Target") {
+                        // A relationship target is read against the part that
+                        // owns the file, not against the `_rels` entry itself.
+                        // The walk stops here, so the budget is not closed.
+                        return Ok(Some(resolve_part(slide_part, &target)?));
+                    }
+                }
+            }
+            Event::Eof => {
+                budget.finish(&rels_part)?;
+                return Ok(None);
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
+/// A layout part written as a target seen from `ppt/slides`.
+fn slide_layout_target(layout_part: &str) -> Result<String, HcdError> {
+    let below_presentation = layout_part.strip_prefix("ppt/").ok_or_else(|| {
+        HcdError::InvalidBundle(format!(
+            "PPTX slide layout {layout_part} is outside the presentation folder"
+        ))
+    })?;
+    if below_presentation.starts_with("slides/") {
+        return Err(HcdError::InvalidBundle(format!(
+            "PPTX slide layout {layout_part} is a slide, not a layout"
+        )));
+    }
+    Ok(format!("../{below_presentation}"))
+}
+
+/// The relationships a slide HCD created carries: the layout it draws from.
+fn pptx_slide_relationships_xml(layout_target: &str) -> String {
+    format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
+            "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
+            "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout\" Target=\"{}\"/>",
+            "</Relationships>",
+        ),
+        escape_attribute(layout_target)
+    )
 }
 
 #[derive(Clone)]
@@ -3093,6 +5037,17 @@ struct InsertedPptxShape {
     height_emu: u64,
     font_size_hundredths: u32,
     text: String,
+    format: PptxRunFormat,
+    align: PptxShapeAlignPatch,
+    font: Option<HtmlFontNode>,
+    primitive: Option<PptxPrimitivePaint>,
+}
+
+#[derive(Clone)]
+struct PptxPrimitivePaint {
+    preset: hcd_core::PptxPreset,
+    fill: String,
+    stroke: String,
 }
 
 impl InsertedPptxShape {
@@ -3136,6 +5091,10 @@ impl InsertedPptxShape {
             height_emu: values[3],
             font_size_hundredths: values[4] as u32,
             text: node.text.clone(),
+            format: PptxRunFormat::default(),
+            align: PptxShapeAlignPatch::default(),
+            font: None,
+            primitive: None,
         })
     }
 }
@@ -3146,26 +5105,93 @@ fn html_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     Some(value.split_once('"')?.0)
 }
 
-fn collect_edited_shape_geometry(
+fn edited_picture_id(tag: &str) -> Option<&str> {
+    if tag.starts_with("<div class=\"hcd-slide-picture\"")
+        && html_attribute(tag, "data-hcd-image-geometry-patched") == Some("true")
+        && html_attribute(tag, "data-hcd-image-asset-patched").is_none()
+    {
+        html_attribute(tag, "data-hcd-picture-id")
+    } else {
+        None
+    }
+}
+
+pub(crate) fn has_native_picture_geometry(html: &str, node_id: &str) -> bool {
+    html.match_indices("<div class=\"hcd-slide-picture\"")
+        .filter_map(|(start, _)| html[start..].split_once('>').map(|(tag, _)| tag))
+        .any(|tag| {
+            html_attribute(tag, "data-hcd-id") == Some(node_id)
+                && edited_picture_id(tag).is_some_and(|id| id.parse::<u32>().is_ok_and(|id| id > 0))
+        })
+}
+
+pub(crate) fn authored_shape_positions<'a>(
+    html: &'a str,
+    map: &ChunkSourceMap,
+) -> Vec<(&'a str, usize)> {
+    let text_boxes: HashSet<_> = map
+        .entries
+        .iter()
+        .filter(|entry| entry.source.created_in_hcd && entry.source.node_kind == "slide-text")
+        .map(|entry| entry.node_id.as_str())
+        .collect();
+    let mut shapes = Vec::new();
+    for (offset, _) in html.match_indices(" data-hcd-id=\"") {
+        let Some((id, tail)) = html[offset + " data-hcd-id=\"".len()..].split_once('"') else {
+            continue;
+        };
+        let end = tail.find('>').unwrap_or(0);
+        if text_boxes.contains(id)
+            || html_attribute(&tail[..end], "data-hcd-created-preset").is_some()
+        {
+            shapes.push((id, offset));
+        }
+    }
+    shapes
+}
+
+#[derive(Default)]
+struct SlideObjectEdits {
+    geometry: HashMap<String, BTreeMap<u32, NativeShapeGeometry>>,
+    primitives: HashMap<String, Vec<InsertedPptxShape>>,
+    positions: HashMap<String, (usize, usize)>,
+}
+
+#[derive(Clone)]
+struct NativeShapeGeometry {
+    geometry: PptxShapeGeometry,
+    rotation: Option<i32>,
+    flip_h: bool,
+    flip_v: bool,
+}
+
+impl std::ops::Deref for NativeShapeGeometry {
+    type Target = PptxShapeGeometry;
+    fn deref(&self) -> &Self::Target {
+        &self.geometry
+    }
+}
+
+fn collect_edited_slide_objects(
     bundle: &Bundle,
     manifest: &HcdManifest,
     dirty_parts: &HashSet<String>,
-) -> Result<HashMap<String, BTreeMap<u32, PptxShapeGeometry>>, HcdError> {
-    let mut result: HashMap<String, BTreeMap<u32, PptxShapeGeometry>> = HashMap::new();
+) -> Result<SlideObjectEdits, HcdError> {
+    let mut edits = SlideObjectEdits::default();
     if dirty_parts.is_empty() {
-        return Ok(result);
+        return Ok(edits);
     }
     for page_number in 0..manifest.index_page_count {
         for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
             let source_map = bundle.read_map(&descriptor)?;
-            let Some(part) = source_map
-                .entries
-                .iter()
-                .map(|entry| entry.source.part.as_str())
-                .find(|part| dirty_parts.contains(*part))
-            else {
+            if !source_map.entries.is_empty()
+                && !source_map
+                    .entries
+                    .iter()
+                    .any(|entry| dirty_parts.contains(&entry.source.part))
+            {
                 continue;
-            };
+            }
             let html = bundle.read_chunk(&descriptor)?;
             if !html.starts_with("<section class=\"hcd-slide\"") {
                 continue;
@@ -3174,10 +5200,24 @@ fn collect_edited_shape_geometry(
                 HcdError::InvalidBundle("PPTX slide section is not closed".to_string())
             })?;
             let section = &html[..=section_end];
-            if html_attribute(section, "data-hcd-source-part") != Some(part) {
+            let Some(part) = html_attribute(section, "data-hcd-source-part")
+                .filter(|value| dirty_parts.contains(*value))
+            else {
+                continue;
+            };
+            if source_map
+                .entries
+                .iter()
+                .any(|entry| entry.source.part != part)
+            {
                 return Err(HcdError::InvalidBundle(
-                    "PPTX slide part differs from its source map".to_string(),
+                    "PPTX slide source map has a different part".into(),
                 ));
+            }
+            for (id, offset) in authored_shape_positions(&html, &source_map) {
+                edits
+                    .positions
+                    .insert(id.to_string(), (descriptor.sequence, offset));
             }
             let dimension = |name: &str| -> Result<u64, HcdError> {
                 html_attribute(section, name)
@@ -3186,9 +5226,7 @@ fn collect_edited_shape_geometry(
             };
             let slide_width = dimension("data-hcd-width-emu")?;
             let slide_height = dimension("data-hcd-height-emu")?;
-            let mut cursor = section_end + 1;
-            while let Some(relative) = html[cursor..].find("<div class=\"hcd-slide-shape\"") {
-                let start = cursor + relative;
+            for (start, _) in html.match_indices("<div class=\"hcd-slide-") {
                 let end = html[start..]
                     .find('>')
                     .map(|offset| start + offset)
@@ -3196,22 +5234,19 @@ fn collect_edited_shape_geometry(
                         HcdError::InvalidBundle("PPTX shape tag is not closed".to_string())
                     })?;
                 let tag = &html[start..=end];
-                cursor = end + 1;
-                if html_attribute(tag, "data-hcd-geometry-edited") != Some("true") {
+                let created = html_attribute(tag, "data-hcd-created-preset");
+                let source_id = if html_attribute(tag, hcd_core::pptx_group::EDITED_ATTRIBUTE)
+                    == Some("true")
+                {
+                    None
+                } else if html_attribute(tag, "data-hcd-geometry-edited") == Some("true") {
+                    html_attribute(tag, "data-hcd-shape-id")
+                } else {
+                    edited_picture_id(tag)
+                };
+                if source_id.is_none() && created.is_none() {
                     continue;
                 }
-                let Some(shape_id) = html_attribute(tag, "data-hcd-shape-id") else {
-                    continue;
-                };
-                let shape_id = shape_id
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|id| *id > 0)
-                    .ok_or_else(|| {
-                        HcdError::InvalidBundle(
-                            "PPTX edited source shape ID is invalid".to_string(),
-                        )
-                    })?;
                 let number = |name: &str| -> Result<u64, HcdError> {
                     html_attribute(tag, name)
                         .and_then(|value| value.parse::<u64>().ok())
@@ -3240,7 +5275,28 @@ fn collect_edited_shape_geometry(
                         "PPTX edited shape is outside the slide".to_string(),
                     ));
                 }
-                let shapes = result.entry(part.to_string()).or_default();
+                if let Some(preset) = created {
+                    edits
+                        .primitives
+                        .entry(part.to_string())
+                        .or_default()
+                        .push(primitive_from_html(tag, preset, geometry)?);
+                    continue;
+                }
+                let shape_id = source_id
+                    .and_then(|id| id.parse::<u32>().ok())
+                    .filter(|id| *id > 0)
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("PPTX edited source shape ID is invalid".into())
+                    })?;
+                let shapes = edits.geometry.entry(part.to_string()).or_default();
+                let geometry = NativeShapeGeometry {
+                    geometry,
+                    rotation: html_attribute(tag, "data-hcd-rotation")
+                        .and_then(|value| value.parse().ok()),
+                    flip_h: html_attribute(tag, "data-hcd-pptx-flip-h") == Some("true"),
+                    flip_v: html_attribute(tag, "data-hcd-pptx-flip-v") == Some("true"),
+                };
                 if shapes.insert(shape_id, geometry).is_some() {
                     return Err(HcdError::InvalidBundle(
                         "PPTX edited shape ID is duplicated".to_string(),
@@ -3249,15 +5305,268 @@ fn collect_edited_shape_geometry(
             }
         }
     }
-    Ok(result)
+    Ok(edits)
 }
+
+fn primitive_from_html(
+    tag: &str,
+    preset: &str,
+    geometry: PptxShapeGeometry,
+) -> Result<InsertedPptxShape, HcdError> {
+    use hcd_core::PptxPreset;
+    let preset = match preset {
+        "rect" => PptxPreset::Rect,
+        "roundRect" => PptxPreset::RoundRect,
+        "ellipse" => PptxPreset::Ellipse,
+        _ => return Err(HcdError::InvalidBundle("unsupported PPTX primitive".into())),
+    };
+    let color = |name| {
+        html_attribute(tag, name)
+            .and_then(|color| color.strip_prefix('#'))
+            .filter(|color| color.len() == 6 && color.bytes().all(|c| c.is_ascii_hexdigit()))
+            .map(str::to_ascii_uppercase)
+            .ok_or_else(|| HcdError::InvalidBundle(format!("invalid PPTX shape color {name}")))
+    };
+    Ok(InsertedPptxShape {
+        node_id: html_attribute(tag, "data-hcd-id")
+            .unwrap_or_default()
+            .to_string(),
+        x_emu: geometry.x_emu,
+        y_emu: geometry.y_emu,
+        width_emu: geometry.width_emu,
+        height_emu: geometry.height_emu,
+        font_size_hundredths: 1800,
+        text: String::new(),
+        font: None,
+        format: PptxRunFormat::default(),
+        align: PptxShapeAlignPatch::default(),
+        primitive: Some(PptxPrimitivePaint {
+            preset,
+            fill: color("data-hcd-shape-fill")?,
+            stroke: color("data-hcd-shape-stroke")?,
+        }),
+    })
+}
+
+/// The alignments this history moved, split the way the export writes them: a
+/// shape the presentation already had is found in the part by its ID, while a
+/// text box HCD made has no ID yet and is only known by the node that holds its
+/// text — so it travels with the shape the exporter builds for that node.
+struct ShapeAlignRequests {
+    native: HashMap<String, BTreeMap<u32, PptxShapeAlignPatch>>,
+    created: HashMap<String, PptxShapeAlignPatch>,
+}
+
+fn collect_edited_shape_aligns(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    dirty_parts: &HashSet<String>,
+) -> Result<ShapeAlignRequests, HcdError> {
+    let mut requests = ShapeAlignRequests {
+        native: HashMap::new(),
+        created: HashMap::new(),
+    };
+    if dirty_parts.is_empty() {
+        return Ok(requests);
+    }
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let source_map = bundle.read_map(&descriptor)?;
+            let Some(part) = source_map
+                .entries
+                .iter()
+                .map(|entry| entry.source.part.as_str())
+                .find(|part| dirty_parts.contains(*part))
+            else {
+                continue;
+            };
+            let html = bundle.read_chunk(&descriptor)?;
+            if !html.starts_with("<section class=\"hcd-slide\"") {
+                continue;
+            }
+            if html_attribute(&html, "data-hcd-source-part") != Some(part) {
+                return Err(HcdError::InvalidBundle(
+                    "PPTX slide part differs from its source map".to_string(),
+                ));
+            }
+            let mut cursor = 0usize;
+            while let Some(relative) = html[cursor..].find("data-hcd-align-edited=\"true\"") {
+                let at = cursor + relative;
+                let start = html[..at]
+                    .rfind("<div class=\"hcd-slide-shape\"")
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("PPTX aligned shape tag is missing".to_string())
+                    })?;
+                let end = html[at..]
+                    .find('>')
+                    .map(|offset| at + offset)
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("PPTX aligned shape tag is not closed".to_string())
+                    })?;
+                let tag = &html[start..=end];
+                cursor = end + 1;
+                let align = html_shape_align(tag)?;
+                if let Some(shape_id) = html_attribute(tag, "data-hcd-shape-id") {
+                    let shape_id = shape_id
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|id| *id > 0)
+                        .ok_or_else(|| {
+                            HcdError::InvalidBundle(
+                                "PPTX aligned source shape ID is invalid".to_string(),
+                            )
+                        })?;
+                    let shapes = requests.native.entry(part.to_string()).or_default();
+                    if shapes.insert(shape_id, align).is_some() {
+                        return Err(HcdError::InvalidBundle(
+                            "PPTX aligned shape ID is duplicated".to_string(),
+                        ));
+                    }
+                    continue;
+                }
+                // A box the editor drew has no shape ID to look the part up by, so
+                // the node inside it is what ties this request to a written shape.
+                let interior = &html[end + 1..];
+                let marker = interior.find("data-hcd-id=\"").ok_or_else(|| {
+                    HcdError::InvalidBundle("PPTX aligned shape has no text node".to_string())
+                })?;
+                let node_id = interior
+                    .get(marker + "data-hcd-id=\"".len()..)
+                    .and_then(|rest| rest.split('"').next())
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("PPTX aligned shape node ID is invalid".to_string())
+                    })?;
+                if requests
+                    .created
+                    .insert(node_id.to_string(), align)
+                    .is_some()
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "PPTX aligned text node is duplicated".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(requests)
+}
+
+/// Reads one alignment back off a shape's tag. The chunk stores the axes the
+/// patch settled on, so a value the part could not write is damage in the
+/// bundle rather than something the export may guess at.
+fn html_shape_align(tag: &str) -> Result<PptxShapeAlignPatch, HcdError> {
+    let axis =
+        |name: &str, token: fn(&str) -> Option<&'static str>| -> Result<Option<String>, HcdError> {
+            match html_attribute(tag, name) {
+                Some(value) if token(value).is_some() => Ok(Some(value.to_string())),
+                Some(_) => Err(HcdError::InvalidBundle(format!(
+                    "PPTX stored {name} is invalid"
+                ))),
+                None => Ok(None),
+            }
+        };
+    let align = PptxShapeAlignPatch {
+        horizontal: axis("data-hcd-horizontal", pptx_alignment_token)?,
+        vertical: axis("data-hcd-vertical", pptx_anchor_token)?,
+    };
+    if align.horizontal.is_none() && align.vertical.is_none() {
+        return Err(HcdError::InvalidBundle(
+            "PPTX aligned shape names no alignment".to_string(),
+        ));
+    }
+    Ok(align)
+}
+
+/// The drawingml token `a:pPr@algn` takes for one horizontal alignment.
+fn pptx_alignment_token(horizontal: &str) -> Option<&'static str> {
+    match horizontal {
+        "left" => Some("l"),
+        "center" => Some("ctr"),
+        "right" => Some("r"),
+        "justify" => Some("just"),
+        "distributed" => Some("dist"),
+        _ => None,
+    }
+}
+
+/// The drawingml token `a:bodyPr@anchor` takes for one vertical alignment.
+fn pptx_anchor_token(vertical: &str) -> Option<&'static str> {
+    match vertical {
+        "top" => Some("t"),
+        "center" => Some("ctr"),
+        "bottom" => Some("b"),
+        _ => None,
+    }
+}
+
+/// The paragraph waiting for its alignment. `a:pPr` has to be the paragraph's
+/// first child, and the run that carries the text is taken by the run buffer
+/// before the arms below ever see it, so the request is held here and written on
+/// the way into whatever element comes next — with the namespace prefix the
+/// paragraph itself was spelled with, since a synthesized element has to be in
+/// the same one.
+struct PendingParagraph {
+    shape_id: u32,
+    alignment: &'static str,
+    prefix: String,
+}
+
+fn paragraph_align(
+    shape_id: Option<u32>,
+    alignments: &BTreeMap<u32, PptxShapeAlignPatch>,
+) -> Option<(u32, &'static str)> {
+    let id = shape_id?;
+    let horizontal = alignments.get(&id)?.horizontal.as_deref()?;
+    Some((id, pptx_alignment_token(horizontal)?))
+}
+
+fn body_anchor(
+    shape_id: Option<u32>,
+    alignments: &BTreeMap<u32, PptxShapeAlignPatch>,
+) -> Option<(u32, &'static str)> {
+    let id = shape_id?;
+    let vertical = alignments.get(&id)?.vertical.as_deref()?;
+    Some((id, pptx_anchor_token(vertical)?))
+}
+
+/// One attribute of an element, set to what the edit asked for, with everything
+/// else the source element carried left where it was.
+fn set_element_attribute(element: &BytesStart<'_>, name: &str, value: &str) -> BytesStart<'static> {
+    let mut rewritten = element.to_owned();
+    rewritten.clear_attributes();
+    for attribute in element.attributes().with_checks(false).flatten() {
+        if local_name(attribute.key.as_ref()) != name {
+            rewritten.push_attribute((attribute.key.as_ref(), attribute.value.as_ref()));
+        }
+    }
+    rewritten.push_attribute((name, value));
+    rewritten
+}
+
+/// Formatting and script faces are written through the same run buffer.
+#[derive(Default)]
+struct PptxRunEdits {
+    formats: BTreeMap<u64, PptxRunFormat>,
+    fonts: BTreeMap<u64, HtmlFontNode>,
+}
+
+#[derive(Default)]
+struct PptxRunApplied {
+    formats: BTreeSet<u64>,
+    fonts: BTreeSet<u64>,
+}
+
+const MAX_RUN_EVENTS: usize = 100_000;
 
 fn rewrite_text_part(
     source: &mut dyn Read,
     output: impl Write,
     replacements: &BTreeMap<u64, String>,
     insertions: &[InsertedPptxShape],
-    native_geometry: &BTreeMap<u32, PptxShapeGeometry>,
+    native_geometry: &BTreeMap<u32, NativeShapeGeometry>,
+    runs: &PptxRunEdits,
+    alignments: &BTreeMap<u32, PptxShapeAlignPatch>,
 ) -> Result<(), HcdError> {
     let mut reader = Reader::from_reader(BufReader::with_capacity(64 * 1024, source));
     reader.config_mut().check_end_names = true;
@@ -3275,7 +5584,16 @@ fn rewrite_text_part(
     let mut shape_id = None;
     let mut properties_depth = None;
     let mut transform_depth = None;
+    let mut shape_placeholder = false;
+    let mut pending_transform = None;
     let mut geometry_seen: HashMap<u32, (bool, bool)> = HashMap::new();
+    let mut run_events: Vec<Event<'static>> = Vec::new();
+    let mut run_depth: Option<usize> = None;
+    let mut applied = PptxRunApplied::default();
+    // Per aligned shape: whether its body was anchored and how many of its
+    // paragraphs were. Both halves are checked against the request at the end.
+    let mut align_seen: HashMap<u32, (bool, usize)> = HashMap::new();
+    let mut pending_paragraph: Option<PendingParagraph> = None;
     loop {
         let event = reader
             .read_event_into(&mut buffer)
@@ -3287,6 +5605,92 @@ fn rewrite_text_part(
         } else {
             None
         };
+        let event_name = match &event {
+            Event::Start(start) | Event::Empty(start) => {
+                Some(local_name(start.name().as_ref()).to_string())
+            }
+            Event::End(end) => Some(local_name(end.name().as_ref()).to_string()),
+            _ => None,
+        };
+        if let Some(id) = pending_transform.take() {
+            if matches!(&event, Event::Start(_) | Event::Empty(_) | Event::End(_)) {
+                if !closes && event_name.as_deref() == Some("xfrm") {
+                    // A directly supplied transform is rewritten in place.
+                } else {
+                    write_native_transform(&mut writer, &native_geometry[&id])?;
+                    geometry_seen.insert(id, (true, true));
+                }
+            } else {
+                pending_transform = Some(id);
+            }
+        }
+        if let Some(pending) = pending_paragraph.take() {
+            // Text and other non-element events are left for later: whitespace
+            // between the paragraph and its first element carries no alignment,
+            // and the properties still have to precede the first element.
+            if matches!(&event, Event::Start(_) | Event::Empty(_) | Event::End(_)) {
+                let name = event_name.as_deref().unwrap_or_default();
+                if !closes && name == "pPr" {
+                    // The paragraph opens with its own properties: the arm below
+                    // folds the alignment into them instead of adding a second set.
+                    pending_paragraph = Some(pending);
+                } else if !closes && name == "p" {
+                    // A paragraph inside a paragraph is damage in the source, and
+                    // the shape that asked for an alignment is reported at the end.
+                } else {
+                    let PendingParagraph {
+                        shape_id,
+                        alignment,
+                        prefix,
+                    } = pending;
+                    write_paragraph_properties(&mut writer, &prefix, alignment)?;
+                    align_seen.entry(shape_id).or_default().1 += 1;
+                }
+            } else {
+                pending_paragraph = Some(pending);
+            }
+        }
+        if run_depth.is_some() && matches!(event, Event::Eof) {
+            return Err(HcdError::InvalidBundle(
+                "slide XML ends inside an unclosed run".to_string(),
+            ));
+        }
+        let entering_run =
+            run_depth.is_none() && opens && matches!(event_name.as_deref(), Some("r" | "fld"));
+        if entering_run || run_depth.is_some() {
+            if entering_run {
+                run_depth = Some(depth + 1);
+            }
+            let closing_run = closes
+                && matches!(event_name.as_deref(), Some("r" | "fld"))
+                && run_depth == Some(depth);
+            if run_events.len() >= MAX_RUN_EVENTS {
+                return Err(HcdError::ResourceLimit(format!(
+                    "PPTX run holds more than {MAX_RUN_EVENTS} XML events"
+                )));
+            }
+            run_events.push(event.into_owned());
+            if closing_run {
+                flush_pptx_run(
+                    &mut writer,
+                    &run_events,
+                    replacements,
+                    runs,
+                    &mut ordinal,
+                    &mut seen,
+                    &mut applied,
+                )?;
+                run_events.clear();
+                run_depth = None;
+            }
+            if opens {
+                depth += 1;
+            } else if closes {
+                depth = depth.saturating_sub(1);
+            }
+            buffer.clear();
+            continue;
+        }
         if let Event::Start(ref start) = event {
             match local_name(start.name().as_ref()) {
                 "spTree" => {
@@ -3298,16 +5702,34 @@ fn rewrite_text_part(
                     }
                     shape_tree_depth = Some(depth + 1);
                 }
-                "sp" if shape_tree_depth.is_some() && shape_depth.is_none() => {
+                "sp" | "pic" if shape_tree_depth.is_some() && shape_depth.is_none() => {
                     shape_depth = Some(depth + 1);
                     shape_id = None;
+                    shape_placeholder = false;
                 }
-                "spPr" if shape_depth == Some(depth) => properties_depth = Some(depth + 1),
+                "spPr" if shape_depth == Some(depth) => {
+                    properties_depth = Some(depth + 1);
+                    if shape_placeholder {
+                        pending_transform = shape_id.filter(|id| native_geometry.contains_key(id));
+                    }
+                }
                 "xfrm" if properties_depth == Some(depth) => transform_depth = Some(depth + 1),
+                "p" => {
+                    if let Some((id, alignment)) = paragraph_align(shape_id, alignments) {
+                        pending_paragraph = Some(PendingParagraph {
+                            shape_id: id,
+                            alignment,
+                            prefix: element_prefix(start.name().as_ref()),
+                        });
+                    }
+                }
                 _ => {}
             }
         }
         if let Event::Start(ref element) | Event::Empty(ref element) = event {
+            if local_name(element.name().as_ref()) == "ph" && shape_depth.is_some() {
+                shape_placeholder = true;
+            }
             if local_name(element.name().as_ref()) == "extLst"
                 && shape_tree_depth == Some(depth)
                 && !inserted
@@ -3317,7 +5739,48 @@ fn rewrite_text_part(
                 inserted = true;
             }
         }
+        if shape_placeholder
+            && transform_depth == Some(depth)
+            && ((closes && event_name.as_deref() == Some("xfrm"))
+                || (!closes && event_name.as_deref() == Some("ext")))
+        {
+            if let Some((id, geometry)) =
+                shape_id.and_then(|id| native_geometry.get(&id).map(|geometry| (id, geometry)))
+            {
+                let seen = geometry_seen.entry(id).or_default();
+                if !seen.0 {
+                    write_native_coordinates(&mut writer, geometry, true)?;
+                    seen.0 = true;
+                }
+                if closes && !seen.1 {
+                    write_native_coordinates(&mut writer, geometry, false)?;
+                    seen.1 = true;
+                }
+            }
+        }
         match event {
+            Event::Empty(ref element)
+                if shape_placeholder
+                    && ((local_name(element.name().as_ref()) == "spPr"
+                        && shape_depth == Some(depth))
+                        || (local_name(element.name().as_ref()) == "xfrm"
+                            && properties_depth == Some(depth)))
+                    && shape_id.is_some_and(|id| native_geometry.contains_key(&id)) =>
+            {
+                let id = shape_id.expect("checked above");
+                let geometry = &native_geometry[&id];
+                writer.write_event(Event::Start(element.to_owned()))?;
+                if local_name(element.name().as_ref()) == "spPr" {
+                    write_native_transform(&mut writer, geometry)?;
+                } else {
+                    write_native_coordinates(&mut writer, geometry, true)?;
+                    write_native_coordinates(&mut writer, geometry, false)?;
+                }
+                writer.write_event(Event::End(BytesEnd::new(String::from_utf8_lossy(
+                    element.name().as_ref(),
+                ))))?;
+                geometry_seen.insert(id, (true, true));
+            }
             Event::Start(ref start) | Event::Empty(ref start)
                 if local_name(start.name().as_ref()) == "cNvPr" =>
             {
@@ -3330,6 +5793,48 @@ fn rewrite_text_part(
                 writer.write_event(event.into_owned())?;
             }
             Event::Start(ref element) | Event::Empty(ref element)
+                if local_name(element.name().as_ref()) == "bodyPr"
+                    && body_anchor(shape_id, alignments).is_some() =>
+            {
+                // Every text body of the shape takes the anchor. A page that
+                // spells one shape twice — a choice and its fallback — is aligned
+                // the same way in both, rather than left disagreeing with itself.
+                let (id, anchor) = body_anchor(shape_id, alignments).expect("checked above");
+                let rewritten = set_element_attribute(element, "anchor", anchor);
+                align_seen.entry(id).or_default().0 = true;
+                if opens {
+                    writer.write_event(Event::Start(rewritten))?;
+                } else {
+                    writer.write_event(Event::Empty(rewritten))?;
+                }
+            }
+            Event::Start(ref element) | Event::Empty(ref element)
+                if pending_paragraph.is_some() && local_name(element.name().as_ref()) == "pPr" =>
+            {
+                let pending = pending_paragraph.take().expect("checked above");
+                let rewritten = set_element_attribute(element, "algn", pending.alignment);
+                align_seen.entry(pending.shape_id).or_default().1 += 1;
+                if opens {
+                    writer.write_event(Event::Start(rewritten))?;
+                } else {
+                    writer.write_event(Event::Empty(rewritten))?;
+                }
+            }
+            Event::Empty(ref element) if local_name(element.name().as_ref()) == "p" => {
+                // An empty paragraph is still a line the shape aligned, and it
+                // cannot be grown later: its properties go in here, first.
+                match paragraph_align(shape_id, alignments) {
+                    Some((id, alignment)) => {
+                        let prefix = element_prefix(element.name().as_ref());
+                        writer.write_event(Event::Start(element.to_owned()))?;
+                        write_paragraph_properties(&mut writer, &prefix, alignment)?;
+                        writer.write_event(Event::End(BytesEnd::new(format!("{prefix}p"))))?;
+                        align_seen.entry(id).or_default().1 += 1;
+                    }
+                    None => writer.write_event(Event::Empty(element.to_owned()))?,
+                }
+            }
+            Event::Start(ref element) | Event::Empty(ref element)
                 if transform_depth == Some(depth)
                     && matches!(local_name(element.name().as_ref()), "off" | "ext")
                     && shape_id.is_some_and(|id| native_geometry.contains_key(&id)) =>
@@ -3337,7 +5842,8 @@ fn rewrite_text_part(
                 let id = shape_id.expect("checked above");
                 let geometry = native_geometry.get(&id).expect("checked above");
                 let offset = local_name(element.name().as_ref()) == "off";
-                let rewritten = rewrite_shape_transform(element, geometry, offset)?;
+                let rewritten =
+                    rewrite_shape_transform(element, geometry, offset, shape_placeholder)?;
                 let seen = geometry_seen.entry(id).or_default();
                 let flag = if offset { &mut seen.0 } else { &mut seen.1 };
                 if *flag {
@@ -3403,7 +5909,7 @@ fn rewrite_text_part(
             match closing_name.as_deref() {
                 Some("xfrm") if transform_depth == Some(depth) => transform_depth = None,
                 Some("spPr") if properties_depth == Some(depth) => properties_depth = None,
-                Some("sp") if shape_depth == Some(depth) => {
+                Some("sp" | "pic") if shape_depth == Some(depth) => {
                     shape_depth = None;
                     shape_id = None;
                     properties_depth = None;
@@ -3420,6 +5926,22 @@ fn rewrite_text_part(
             "slide source map contains missing text ordinals".to_string(),
         ));
     }
+    let unwritten: Vec<_> = runs
+        .fonts
+        .keys()
+        .filter(|ordinal| !applied.fonts.contains(ordinal))
+        .copied()
+        .collect();
+    if !unwritten.is_empty() {
+        return Err(HcdError::Unsupported(format!(
+            "text.font pins a face onto slide text ordinals {unwritten:?} that this PPTX source has no writable run for; omit --source to use the pure-Rust semantic export, which applies the face"
+        )));
+    }
+    if applied.formats.len() != runs.formats.len() {
+        return Err(HcdError::InvalidBundle(
+            "PPTX run format does not match a slide text run".to_string(),
+        ));
+    }
     if !insertions.is_empty() && !inserted {
         return Err(HcdError::InvalidBundle(
             "PPTX slide shape tree is missing".to_string(),
@@ -3432,13 +5954,753 @@ fn rewrite_text_part(
             )));
         }
     }
+    for (id, align) in alignments {
+        let seen = align_seen.get(id).copied().unwrap_or_default();
+        if align.vertical.is_some() && !seen.0 {
+            return Err(HcdError::InvalidBundle(format!(
+                "PPTX source shape {id} has no text body to anchor"
+            )));
+        }
+        if align.horizontal.is_some() && seen.1 == 0 {
+            return Err(HcdError::InvalidBundle(format!(
+                "PPTX source shape {id} has no paragraph to align"
+            )));
+        }
+    }
     Ok(())
+}
+
+/// An alignment written where the paragraph schema wants it: `a:pPr` as the first
+/// child, spelled with the paragraph's own namespace prefix.
+fn write_paragraph_properties<W: Write>(
+    writer: &mut Writer<W>,
+    prefix: &str,
+    alignment: &str,
+) -> Result<(), HcdError> {
+    let mut element = BytesStart::new(format!("{prefix}pPr"));
+    element.push_attribute(("algn", alignment));
+    writer.write_event(Event::Empty(element))?;
+    Ok(())
+}
+
+fn collect_edited_run_formats(
+    bundle: &Bundle,
+    manifest: &HcdManifest,
+    dirty_parts: &HashSet<String>,
+) -> Result<HashMap<String, PptxRunFormat>, HcdError> {
+    let mut result = HashMap::new();
+    if dirty_parts.is_empty() {
+        return Ok(result);
+    }
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            let source_map = bundle.read_map(&descriptor)?;
+            if !source_map
+                .entries
+                .iter()
+                .any(|entry| dirty_parts.contains(&entry.source.part))
+            {
+                continue;
+            }
+            let html = bundle.read_chunk(&descriptor)?;
+            let mut cursor = 0usize;
+            while let Some(relative) = html[cursor..].find("data-hcd-run-edited=\"true\"") {
+                let at = cursor + relative;
+                let start = html[..at].rfind('<').ok_or_else(|| {
+                    HcdError::InvalidBundle("PPTX formatted run tag is missing".to_string())
+                })?;
+                let end = html[at..]
+                    .find('>')
+                    .map(|offset| at + offset)
+                    .ok_or_else(|| {
+                        HcdError::InvalidBundle("PPTX formatted run tag is not closed".to_string())
+                    })?;
+                let tag = &html[start..=end];
+                cursor = end + 1;
+                let Some(node_id) = html_attribute(tag, "data-hcd-id") else {
+                    continue;
+                };
+                if result
+                    .insert(node_id.to_string(), html_run_format(tag)?)
+                    .is_some()
+                {
+                    return Err(HcdError::InvalidBundle(
+                        "PPTX formatted text node is duplicated".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn html_run_format(tag: &str) -> Result<PptxRunFormat, HcdError> {
+    let flag = |name: &str| -> Result<Option<bool>, HcdError> {
+        match html_attribute(tag, name) {
+            Some("1") => Ok(Some(true)),
+            Some("0") => Ok(Some(false)),
+            Some(_) => Err(HcdError::InvalidBundle(format!("PPTX {name} is invalid"))),
+            None => Ok(None),
+        }
+    };
+    let font_size_pt = match html_attribute(tag, "data-hcd-font-size-pt") {
+        Some(value) => Some(value.parse::<f32>().map_err(|_| {
+            HcdError::InvalidBundle("PPTX stored font size is invalid".to_string())
+        })?),
+        None => None,
+    };
+    Ok(PptxRunFormat {
+        bold: flag("data-hcd-bold")?,
+        italic: flag("data-hcd-italic")?,
+        underline: flag("data-hcd-underline")?,
+        font_size_pt,
+        color: html_attribute(tag, "data-hcd-color").map(|value| format!("#{value}")),
+    })
+}
+
+fn flush_pptx_run<W: Write>(
+    writer: &mut Writer<W>,
+    events: &[Event<'static>],
+    replacements: &BTreeMap<u64, String>,
+    runs: &PptxRunEdits,
+    ordinal: &mut u64,
+    seen: &mut BTreeSet<u64>,
+    applied: &mut PptxRunApplied,
+) -> Result<(), HcdError> {
+    let text_count = events.iter().filter(|event| event_is_text(event)).count();
+    let first_ordinal = ordinal.saturating_add(1);
+    let mut pinned_events;
+    let events = if let Some(face) = runs.fonts.get(&first_ordinal).filter(|_| text_count > 0) {
+        let namespace = events
+            .first()
+            .and_then(event_start_or_empty)
+            .and_then(|(start, _)| run_namespace(start.name().as_ref()));
+        if let Some(namespace) = namespace {
+            pinned_events = events.to_vec();
+            pin_run_fonts(&mut pinned_events, &namespace, face)?;
+            applied.fonts.insert(first_ordinal);
+            pinned_events.as_slice()
+        } else {
+            events
+        }
+    } else {
+        events
+    };
+    let formats = &runs.formats;
+    for offset in 1..text_count {
+        if formats.contains_key(&(first_ordinal + offset as u64)) {
+            return Err(HcdError::Unsupported(
+                "PPTX run format applies to the first text node of a run".to_string(),
+            ));
+        }
+    }
+    let format = formats.get(&first_ordinal);
+    let mut saw_text = false;
+    let mut wrote_properties = false;
+    let mut index = 0usize;
+    while index < events.len() {
+        let event = &events[index];
+        if !saw_text {
+            if let Some((element, is_empty)) = event_start_or_empty(event) {
+                if local_name(element.name().as_ref()) == "rPr" {
+                    if let Some(format) = format {
+                        let consumed = write_formatted_run_properties(
+                            writer,
+                            element,
+                            format,
+                            is_empty,
+                            &events[index + 1..],
+                        )?;
+                        wrote_properties = true;
+                        index += consumed;
+                        continue;
+                    }
+                }
+            }
+        }
+        if event_is_text(event) {
+            *ordinal += 1;
+            if let Some(text_format) = formats.get(ordinal) {
+                if !wrote_properties {
+                    let prefix = events
+                        .first()
+                        .and_then(event_start_or_empty)
+                        .map_or("a:".to_string(), |(element, _)| {
+                            element_prefix(element.name().as_ref())
+                        });
+                    write_synthetic_run_properties(writer, &prefix, text_format)?;
+                    wrote_properties = true;
+                }
+                applied.formats.insert(*ordinal);
+            }
+            saw_text = true;
+            index += write_replaced_text(writer, events, index, replacements, *ordinal, seen)?;
+            continue;
+        }
+        writer.write_event(event.clone())?;
+        index += 1;
+    }
+    Ok(())
+}
+
+fn write_formatted_run_properties<W: Write>(
+    writer: &mut Writer<W>,
+    start: &BytesStart<'static>,
+    format: &PptxRunFormat,
+    is_empty: bool,
+    rest: &[Event<'static>],
+) -> Result<usize, HcdError> {
+    let rewritten = rewrite_run_property_attributes(start, format)?;
+    let prefix = element_prefix(start.name().as_ref());
+    let end_name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+    if is_empty {
+        if let Some(color) = format.color.as_deref() {
+            writer.write_event(Event::Start(rewritten))?;
+            write_solid_color(writer, &prefix, color)?;
+            writer.write_event(Event::End(BytesEnd::new(end_name)))?;
+        } else {
+            writer.write_event(Event::Empty(rewritten))?;
+        }
+        return Ok(1);
+    }
+    writer.write_event(Event::Start(rewritten))?;
+    let mut depth = 1usize;
+    let mut cursor = 0usize;
+    let mut wrote_color = false;
+    while cursor < rest.len() {
+        let event = &rest[cursor];
+        let name = event_local_name(event);
+        let opens = matches!(event, Event::Start(_));
+        let closes = matches!(event, Event::End(_));
+        if depth == 1
+            && format.color.is_some()
+            && matches!(
+                name.as_deref(),
+                Some(
+                    "solidFill"
+                        | "noFill"
+                        | "gradFill"
+                        | "blipFill"
+                        | "pattFill"
+                        | "grpFill"
+                        | "srgbClr"
+                        | "schemeClr"
+                )
+            )
+        {
+            if !wrote_color {
+                if let Some(value) = format.color.as_deref() {
+                    write_solid_color(writer, &prefix, value)?;
+                    wrote_color = true;
+                }
+            }
+            cursor += skip_element(rest, cursor)?;
+            continue;
+        }
+        // Fill precedes font faces and the other character properties in
+        // CT_TextCharacterProperties, including when a font pin created rPr.
+        if depth == 1
+            && !closes
+            && !wrote_color
+            && matches!(
+                name.as_deref(),
+                Some(
+                    "effectLst"
+                        | "effectDag"
+                        | "highlight"
+                        | "uLnTx"
+                        | "uLn"
+                        | "uFillTx"
+                        | "uFill"
+                        | "latin"
+                        | "ea"
+                        | "cs"
+                        | "sym"
+                        | "hlinkClick"
+                        | "hlinkMouseOver"
+                        | "rtl"
+                        | "extLst"
+                )
+            )
+        {
+            if let Some(color) = format.color.as_deref() {
+                write_solid_color(writer, &prefix, color)?;
+                wrote_color = true;
+            }
+        }
+        if closes && name.as_deref() == Some(local_name(start.name().as_ref())) && depth == 1 {
+            if let Some(color) = format.color.as_deref() {
+                if !wrote_color {
+                    write_solid_color(writer, &prefix, color)?;
+                }
+            }
+            writer.write_event(Event::End(BytesEnd::new(end_name)))?;
+            return Ok(cursor + 2);
+        }
+        writer.write_event(event.clone())?;
+        if opens {
+            depth += 1;
+        } else if closes {
+            depth = depth.saturating_sub(1);
+        }
+        cursor += 1;
+    }
+    Err(HcdError::InvalidBundle(
+        "PPTX run properties are not closed".to_string(),
+    ))
+}
+
+fn skip_element(events: &[Event<'static>], index: usize) -> Result<usize, HcdError> {
+    let event = events
+        .get(index)
+        .ok_or_else(|| HcdError::InvalidBundle("PPTX color element is missing".to_string()))?;
+    if matches!(event, Event::Empty(_)) {
+        return Ok(1);
+    }
+    let name = event_local_name(event);
+    let mut depth = 1usize;
+    let mut cursor = index + 1;
+    while cursor < events.len() {
+        let current = event_local_name(&events[cursor]);
+        if matches!(events[cursor], Event::Start(_)) && current == name {
+            depth += 1;
+        } else if matches!(events[cursor], Event::End(_)) && current == name {
+            depth -= 1;
+            if depth == 0 {
+                return Ok(cursor - index + 1);
+            }
+        }
+        cursor += 1;
+    }
+    Err(HcdError::InvalidBundle(
+        "PPTX color element is not closed".to_string(),
+    ))
+}
+
+fn write_synthetic_run_properties<W: Write>(
+    writer: &mut Writer<W>,
+    prefix: &str,
+    format: &PptxRunFormat,
+) -> Result<(), HcdError> {
+    let mut element = BytesStart::new(format!("{prefix}rPr"));
+    push_run_attributes(&mut element, format, false)?;
+    let end_name = format!("{prefix}rPr");
+    if let Some(color) = format.color.as_deref() {
+        writer.write_event(Event::Start(element))?;
+        write_solid_color(writer, prefix, color)?;
+        writer.write_event(Event::End(BytesEnd::new(end_name)))?;
+    } else {
+        writer.write_event(Event::Empty(element))?;
+    }
+    Ok(())
+}
+
+fn write_solid_color<W: Write>(
+    writer: &mut Writer<W>,
+    prefix: &str,
+    color: &str,
+) -> Result<(), HcdError> {
+    writer.write_event(Event::Start(BytesStart::new(format!("{prefix}solidFill"))))?;
+    let mut color_element = BytesStart::new(format!("{prefix}srgbClr"));
+    let hex = color.trim_start_matches('#').to_ascii_uppercase();
+    color_element.push_attribute(("val", hex.as_str()));
+    writer.write_event(Event::Empty(color_element))?;
+    writer.write_event(Event::End(BytesEnd::new(format!("{prefix}solidFill"))))?;
+    Ok(())
+}
+
+fn rewrite_run_property_attributes(
+    element: &BytesStart<'_>,
+    format: &PptxRunFormat,
+) -> Result<BytesStart<'static>, HcdError> {
+    let mut rewritten = element.to_owned();
+    rewritten.clear_attributes();
+    for attribute in element.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| {
+            HcdError::InvalidBundle(format!("PPTX run property attribute: {error}"))
+        })?;
+        let name = local_name(attribute.key.as_ref());
+        let replacement = match name {
+            "sz" => match format.font_size_pt {
+                Some(size) => Some(font_size_hundredths(size)?.to_string()),
+                None => None,
+            },
+            "b" => format.bold.map(|bold| {
+                if bold {
+                    "1".to_string()
+                } else {
+                    "0".to_string()
+                }
+            }),
+            "i" => format.italic.map(|italic| {
+                if italic {
+                    "1".to_string()
+                } else {
+                    "0".to_string()
+                }
+            }),
+            "u" => format.underline.map(|underline| {
+                if underline {
+                    "sng".to_string()
+                } else {
+                    "none".to_string()
+                }
+            }),
+            _ => None,
+        };
+        if let Some(value) = replacement {
+            rewritten.push_attribute((attribute.key.as_ref(), value.as_bytes()));
+        } else {
+            rewritten.push_attribute((attribute.key.as_ref(), attribute.value.as_ref()));
+        }
+    }
+    push_run_attributes(&mut rewritten, format, true)?;
+    Ok(rewritten)
+}
+
+fn push_run_attributes(
+    element: &mut BytesStart<'_>,
+    format: &PptxRunFormat,
+    only_missing: bool,
+) -> Result<(), HcdError> {
+    let existing = element
+        .attributes()
+        .with_checks(false)
+        .flatten()
+        .map(|attribute| local_name(attribute.key.as_ref()).to_string())
+        .collect::<Vec<_>>();
+    let missing = |name: &str| !only_missing || !existing.iter().any(|value| value == name);
+    if let Some(size) = format.font_size_pt {
+        if missing("sz") {
+            let size = font_size_hundredths(size)?.to_string();
+            element.push_attribute(("sz", size.as_str()));
+        }
+    }
+    if let Some(bold) = format.bold {
+        if missing("b") {
+            element.push_attribute(("b", if bold { "1" } else { "0" }));
+        }
+    }
+    if let Some(italic) = format.italic {
+        if missing("i") {
+            element.push_attribute(("i", if italic { "1" } else { "0" }));
+        }
+    }
+    if let Some(underline) = format.underline {
+        if missing("u") {
+            element.push_attribute(("u", if underline { "sng" } else { "none" }));
+        }
+    }
+    Ok(())
+}
+
+fn font_size_hundredths(size: f32) -> Result<u32, HcdError> {
+    if !size.is_finite() || !(1.0..=256.0).contains(&size) {
+        return Err(HcdError::InvalidBundle(
+            "PPTX edited font size is out of bounds".to_string(),
+        ));
+    }
+    Ok((size * 100.0).round() as u32)
+}
+
+fn write_replaced_text<W: Write>(
+    writer: &mut Writer<W>,
+    events: &[Event<'static>],
+    index: usize,
+    replacements: &BTreeMap<u64, String>,
+    ordinal: u64,
+    seen: &mut BTreeSet<u64>,
+) -> Result<usize, HcdError> {
+    let event = &events[index];
+    let Some(text) = replacements.get(&ordinal) else {
+        writer.write_event(event.clone())?;
+        return Ok(1);
+    };
+    match event {
+        Event::Start(start) => {
+            writer.write_event(Event::Start(start.to_owned()))?;
+            if !text.is_empty() {
+                writer.write_event(Event::Text(BytesText::new(text)))?;
+            }
+            let mut cursor = index + 1;
+            while cursor < events.len() {
+                match &events[cursor] {
+                    Event::Text(_) | Event::CData(_) => cursor += 1,
+                    Event::End(end) if local_name(end.name().as_ref()) == "t" => {
+                        writer.write_event(Event::End(end.to_owned()))?;
+                        seen.insert(ordinal);
+                        return Ok(cursor - index + 1);
+                    }
+                    _ => {
+                        return Err(HcdError::InvalidBundle(
+                            "PPTX text element is not closed".to_string(),
+                        ))
+                    }
+                }
+            }
+            Err(HcdError::InvalidBundle(
+                "PPTX text element is not closed".to_string(),
+            ))
+        }
+        Event::Empty(empty) => {
+            writer.write_event(Event::Start(empty.to_owned()))?;
+            if !text.is_empty() {
+                writer.write_event(Event::Text(BytesText::new(text)))?;
+            }
+            writer.write_event(Event::End(BytesEnd::new(
+                String::from_utf8_lossy(empty.name().as_ref()).into_owned(),
+            )))?;
+            seen.insert(ordinal);
+            Ok(1)
+        }
+        _ => Err(HcdError::InvalidBundle(
+            "PPTX text event is not an element".to_string(),
+        )),
+    }
+}
+
+fn event_is_text(event: &Event<'static>) -> bool {
+    event_start_or_empty(event)
+        .is_some_and(|(element, _)| local_name(element.name().as_ref()) == "t")
+}
+
+fn event_start_or_empty<'a>(event: &'a Event<'static>) -> Option<(&'a BytesStart<'static>, bool)> {
+    match event {
+        Event::Start(element) => Some((element, false)),
+        Event::Empty(element) => Some((element, true)),
+        _ => None,
+    }
+}
+
+fn event_local_name(event: &Event<'static>) -> Option<String> {
+    event_start_or_empty(event)
+        .map(|(element, _)| local_name(element.name().as_ref()).to_string())
+        .or_else(|| match event {
+            Event::End(end) => Some(local_name(end.name().as_ref()).to_string()),
+            _ => None,
+        })
+}
+
+fn element_prefix(name: &[u8]) -> String {
+    match name.iter().rposition(|byte| *byte == b':') {
+        Some(index) => String::from_utf8_lossy(&name[..=index]).into_owned(),
+        None => String::new(),
+    }
+}
+
+/// The namespace prefix of a DrawingML text run. Both `a:r` and `a:fld` write their
+/// properties before their first `a:t`. A source that spells these elements without
+/// the `a:` prefix stays uncaptured, so its pinned face is reported as having no
+/// writable run rather than being guessed onto another vocabulary's `r`.
+fn run_namespace(name: &[u8]) -> Option<String> {
+    let (prefix, local) = std::str::from_utf8(name).ok()?.rsplit_once(':')?;
+    ((local == "r" || local == "fld") && prefix == "a").then(|| prefix.to_string())
+}
+
+fn qualified(prefix: &str, local: &str) -> String {
+    if prefix.is_empty() {
+        local.to_string()
+    } else {
+        format!("{prefix}:{local}")
+    }
+}
+
+/// The script slots a pinned face writes, in the order `CT_TextCharacterProperties`
+/// declares them: `a:latin`, `a:ea`, `a:cs`.
+fn pinned_slots(face: &HtmlFontNode) -> Vec<(&'static str, String)> {
+    let mut slots = Vec::new();
+    if let Some(latin) = face.latin.clone() {
+        slots.push(("latin", latin));
+    }
+    if let Some(east_asia) = face.east_asia.clone() {
+        slots.push(("ea", east_asia));
+    }
+    if let Some(bidi) = face.bidi.clone() {
+        slots.push(("cs", bidi));
+    }
+    slots
+}
+
+fn pinned_font_children(prefix: &str, face: &HtmlFontNode) -> String {
+    pinned_slots(face)
+        .into_iter()
+        .map(|(name, typeface)| {
+            format!(
+                "<{} typeface=\"{}\"/>",
+                qualified(prefix, name),
+                escape_attribute(&typeface)
+            )
+        })
+        .collect()
+}
+
+fn font_element(namespace: &str, name: &str, typeface: &str) -> Event<'static> {
+    let mut start = BytesStart::new(qualified(namespace, name));
+    start.push_attribute(("typeface", typeface));
+    Event::Empty(start)
+}
+
+/// `CT_TextCharacterProperties` children that have to follow the script slots.
+const AFTER_FONT_SLOTS: [&str; 5] = ["sym", "hlinkClick", "hlinkMouseOver", "rtl", "extLst"];
+
+/// Writes the pinned faces into a captured run's `a:rPr`, creating the element when
+/// the run has none. A pinned slot replaces its old element outright, so a theme
+/// reference (`+mn-lt`), a stale `pitchFamily`, and a stale `charset` all leave with
+/// the typeface they described. Slots the patch left alone are untouched.
+fn pin_run_fonts(
+    events: &mut Vec<Event<'static>>,
+    namespace: &str,
+    face: &HtmlFontNode,
+) -> Result<(), HcdError> {
+    let slots = pinned_slots(face);
+    if slots.is_empty() {
+        return Ok(());
+    }
+    let properties = qualified(namespace, "rPr");
+    let Some(index) = direct_child(events, 0, &properties) else {
+        // run properties must be the run's first child when present
+        let mut inserted = vec![Event::Start(BytesStart::new(properties.clone()))];
+        inserted.extend(
+            slots
+                .into_iter()
+                .map(|(name, typeface)| font_element(namespace, name, &typeface)),
+        );
+        inserted.push(Event::End(BytesEnd::new(properties)));
+        events.splice(1..1, inserted);
+        return Ok(());
+    };
+    if matches!(events[index], Event::Empty(_)) {
+        let existing = match std::mem::replace(&mut events[index], Event::Text(BytesText::new("")))
+        {
+            Event::Empty(empty) => empty,
+            _ => {
+                return Err(HcdError::InvalidBundle(
+                    "PPTX run properties vanished mid-rewrite".to_string(),
+                ))
+            }
+        };
+        let name = String::from_utf8_lossy(existing.name().as_ref()).into_owned();
+        let mut replacement = vec![Event::Start(existing)];
+        replacement.extend(
+            slots
+                .into_iter()
+                .map(|(slot, typeface)| font_element(namespace, slot, &typeface)),
+        );
+        replacement.push(Event::End(BytesEnd::new(name)));
+        events.splice(index..index + 1, replacement);
+        return Ok(());
+    }
+    let (children, end) = children_and_end(events, index);
+    let end = end.ok_or_else(|| {
+        HcdError::InvalidBundle("PPTX run properties are not closed in the run".to_string())
+    })?;
+    let mut dropped: Vec<(usize, usize)> = Vec::new();
+    let mut position = end;
+    for (from, to) in children {
+        let name = element_local_name(&events[from]);
+        if slots.iter().any(|(slot, _)| *slot == name.as_str()) {
+            dropped.push((from, to));
+        } else if position == end && AFTER_FONT_SLOTS.contains(&name.as_str()) {
+            position = from;
+        }
+    }
+    let mut rebuilt: Vec<Event<'static>> = Vec::new();
+    let mut font_events: Vec<Event<'static>> = slots
+        .iter()
+        .map(|(name, typeface)| font_element(namespace, name, typeface))
+        .collect();
+    rebuilt.push(events[index].clone());
+    let mut offset = index + 1;
+    while offset < end {
+        if offset == position {
+            rebuilt.append(&mut font_events);
+        }
+        if let Some((_, to)) = dropped.iter().find(|(from, _)| *from == offset) {
+            offset = to + 1;
+            continue;
+        }
+        rebuilt.push(events[offset].clone());
+        offset += 1;
+    }
+    if position >= end {
+        rebuilt.append(&mut font_events);
+    }
+    rebuilt.push(events[end].clone());
+    events.splice(index..=end, rebuilt);
+    Ok(())
+}
+
+/// The local name of an element event, empty for any other event.
+fn element_local_name(event: &Event<'_>) -> String {
+    match event {
+        Event::Start(start) => local_name(start.name().as_ref()).to_string(),
+        Event::Empty(empty) => local_name(empty.name().as_ref()).to_string(),
+        _ => String::new(),
+    }
+}
+
+/// The index of a parent element's direct child with this element name, if it has one.
+fn direct_child(events: &[Event<'static>], parent: usize, name: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    for (index, event) in events.iter().enumerate().skip(parent + 1) {
+        match event {
+            Event::Start(start) if depth == 1 && start.name().as_ref() == name.as_bytes() => {
+                return Some(index)
+            }
+            Event::Empty(empty) if depth == 1 && empty.name().as_ref() == name.as_bytes() => {
+                return Some(index)
+            }
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            return None;
+        }
+    }
+    None
+}
+
+/// The direct children of the element at `parent`, as inclusive event ranges, plus
+/// the index of its own end tag.
+fn children_and_end(
+    events: &[Event<'static>],
+    parent: usize,
+) -> (Vec<(usize, usize)>, Option<usize>) {
+    let mut children: Vec<(usize, usize)> = Vec::new();
+    let mut depth = 0usize;
+    let mut open: Option<usize> = None;
+    for (index, event) in events.iter().enumerate().skip(parent + 1) {
+        match event {
+            Event::Start(_) => {
+                if depth == 0 {
+                    open = Some(index);
+                }
+                depth += 1;
+            }
+            Event::Empty(_) if depth == 0 => children.push((index, index)),
+            Event::End(_) => {
+                if depth == 0 {
+                    return (children, Some(index));
+                }
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(from) = open.take() {
+                        children.push((from, index));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (children, None)
 }
 
 fn rewrite_shape_transform(
     element: &BytesStart<'_>,
     geometry: &PptxShapeGeometry,
     offset: bool,
+    inherited: bool,
 ) -> Result<BytesStart<'static>, HcdError> {
     let desired = if offset {
         [("x", geometry.x_emu), ("y", geometry.y_emu)]
@@ -3464,11 +6726,66 @@ fn rewrite_shape_transform(
         }
     }
     if !seen.into_iter().all(|present| present) {
+        if inherited {
+            for (index, (name, value)) in desired.iter().enumerate() {
+                if !seen[index] {
+                    rewritten.push_attribute((*name, value.to_string().as_str()));
+                }
+            }
+            return Ok(rewritten);
+        }
         return Err(HcdError::InvalidBundle(
             "PPTX source shape transform is incomplete".to_string(),
         ));
     }
     Ok(rewritten)
+}
+
+fn write_native_coordinates<W: Write>(
+    writer: &mut Writer<W>,
+    geometry: &PptxShapeGeometry,
+    offset: bool,
+) -> Result<(), HcdError> {
+    let mut node = BytesStart::new(if offset { "a:off" } else { "a:ext" });
+    node.push_attribute((
+        "xmlns:a",
+        "http://schemas.openxmlformats.org/drawingml/2006/main",
+    ));
+    let values = if offset {
+        [("x", geometry.x_emu), ("y", geometry.y_emu)]
+    } else {
+        [("cx", geometry.width_emu), ("cy", geometry.height_emu)]
+    };
+    for (name, value) in values {
+        node.push_attribute((name, value.to_string().as_str()));
+    }
+    writer.write_event(Event::Empty(node))?;
+    Ok(())
+}
+
+fn write_native_transform<W: Write>(
+    writer: &mut Writer<W>,
+    geometry: &NativeShapeGeometry,
+) -> Result<(), HcdError> {
+    let mut node = BytesStart::new("a:xfrm");
+    node.push_attribute((
+        "xmlns:a",
+        "http://schemas.openxmlformats.org/drawingml/2006/main",
+    ));
+    if let Some(rotation) = geometry.rotation {
+        node.push_attribute(("rot", rotation.to_string().as_str()));
+    }
+    if geometry.flip_h {
+        node.push_attribute(("flipH", "1"));
+    }
+    if geometry.flip_v {
+        node.push_attribute(("flipV", "1"));
+    }
+    writer.write_event(Event::Start(node))?;
+    write_native_coordinates(writer, geometry, true)?;
+    write_native_coordinates(writer, geometry, false)?;
+    writer.write_event(Event::End(BytesEnd::new("a:xfrm")))?;
+    Ok(())
 }
 
 fn write_inserted_shapes<W: Write>(
@@ -3490,10 +6807,70 @@ fn write_inserted_shape<W: Write>(
     shape_id: u32,
     shape: &InsertedPptxShape,
 ) -> Result<(), HcdError> {
+    let creation_id = animations::creation_id_xml(&shape.node_id);
+    if let Some(primitive) = &shape.primitive {
+        let xml = format!(
+            "<p:sp xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:nvSpPr><p:cNvPr id=\"{shape_id}\" name=\"Shape {shape_id}\">{creation_id}</p:cNvPr><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"{}\"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill><a:ln w=\"12700\"><a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill></a:ln></p:spPr></p:sp>",
+            shape.x_emu, shape.y_emu, shape.width_emu, shape.height_emu,
+            primitive.preset.drawingml(), primitive.fill, primitive.stroke,
+        );
+        writer.get_mut().write_all(xml.as_bytes())?;
+        return Ok(());
+    }
+    let mut properties = format!("lang=\"en-US\" sz=\"{}\"", shape.font_size_hundredths);
+    if let Some(bold) = shape.format.bold {
+        properties.push_str(if bold { " b=\"1\"" } else { " b=\"0\"" });
+    }
+    if let Some(italic) = shape.format.italic {
+        properties.push_str(if italic { " i=\"1\"" } else { " i=\"0\"" });
+    }
+    if let Some(underline) = shape.format.underline {
+        properties.push_str(if underline {
+            " u=\"sng\""
+        } else {
+            " u=\"none\""
+        });
+    }
+    let color = shape
+        .format
+        .color
+        .as_deref()
+        .map(|color| {
+            format!(
+                "<a:solidFill><a:srgbClr val=\"{}\"/></a:solidFill>",
+                color.trim_start_matches('#').to_ascii_uppercase()
+            )
+        })
+        .unwrap_or_default();
+    let faces = shape
+        .font
+        .as_ref()
+        .map(|font| pinned_font_children("a", font))
+        .unwrap_or_default();
+    let run_properties = if color.is_empty() && faces.is_empty() {
+        format!("<a:rPr {properties}/>")
+    } else {
+        format!("<a:rPr {properties}>{color}{faces}</a:rPr>")
+    };
+    // A box the editor drew starts from nothing, so both axes are written the
+    // way a source shape would have carried them: the body anchored, the
+    // paragraph's properties ahead of the run that holds its text.
+    let anchor = shape
+        .align
+        .vertical
+        .as_deref()
+        .and_then(pptx_anchor_token)
+        .map_or(String::new(), |token| format!(" anchor=\"{token}\""));
+    let paragraph_properties = shape
+        .align
+        .horizontal
+        .as_deref()
+        .and_then(pptx_alignment_token)
+        .map_or(String::new(), |token| format!("<a:pPr algn=\"{token}\"/>"));
     let xml = format!(
-        "<p:sp xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:nvSpPr><p:cNvPr id=\"{shape_id}\" name=\"HCD Text {shape_id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" sz=\"{}\"/><a:t xml:space=\"preserve\">{}</a:t></a:r></a:p></p:txBody></p:sp>",
+        "<p:sp xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:nvSpPr><p:cNvPr id=\"{shape_id}\" name=\"HCD Text {shape_id}\">{creation_id}</p:cNvPr><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\"{anchor}/><a:lstStyle/><a:p>{paragraph_properties}<a:r>{run_properties}<a:t xml:space=\"preserve\">{}</a:t></a:r></a:p></p:txBody></p:sp>",
         shape.x_emu, shape.y_emu, shape.width_emu, shape.height_emu,
-        shape.font_size_hundredths, escape_text(&shape.text),
+        escape_text(&shape.text),
     );
     writer.get_mut().write_all(xml.as_bytes())?;
     Ok(())
@@ -3522,29 +6899,6 @@ fn relationship_id_attribute(element: &BytesStart<'_>) -> Option<String> {
                 .ok()
                 .map(|value| value.into_owned())
         })
-}
-
-fn attribute(element: &BytesStart<'_>, wanted: &str) -> Option<String> {
-    element
-        .attributes()
-        .with_checks(false)
-        .flatten()
-        .find(|attribute| local_name(attribute.key.as_ref()) == wanted)
-        .and_then(|attribute| {
-            attribute
-                .unescape_value()
-                .ok()
-                .map(|value| value.into_owned())
-        })
-}
-
-fn local_name(name: &[u8]) -> &str {
-    let local = name
-        .iter()
-        .rposition(|byte| *byte == b':')
-        .map(|index| &name[index + 1..])
-        .unwrap_or(name);
-    std::str::from_utf8(local).unwrap_or("")
 }
 
 fn resolve_part(source_part: &str, target: &str) -> Result<String, HcdError> {
@@ -3577,6 +6931,200 @@ fn resolve_part(source_part: &str, target: &str) -> Result<String, HcdError> {
     }
     Ok(output.to_string_lossy().replace('\\', "/"))
 }
+/// The pages a presentation addresses, and the two features that would be left
+/// pointing at a page the export removes.
+struct PptxSlideList {
+    /// `<p:sldId>` entries of the presentation's own list, in the order the deck
+    /// shows them: the id PowerPoint counts pages by, and the relationship that
+    /// names the page's part.
+    entries: Vec<(String, String)>,
+    /// Whether the deck carries `<p:custShowLst>`, whose shows list slides by that
+    /// same id and would name a page that no longer exists.
+    custom_shows: bool,
+    /// Whether the deck groups pages with `<p:sectionLst>`, which keeps its own
+    /// page lists a deletion has to be kept out of.
+    sections: bool,
+}
+
+/// Read a presentation's own page list. Only the list hanging off
+/// `<p:presentation>` counts: a section carries a nested `<p:sldIdLst>` whose
+/// entries name no relationship, and a deck that has one is refused before these
+/// entries are used.
+fn read_pptx_slide_list(xml: &[u8]) -> Result<PptxSlideList, HcdError> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::new();
+    let mut stack: Vec<String> = Vec::new();
+    let mut list = PptxSlideList {
+        entries: Vec::new(),
+        custom_shows: false,
+        sections: false,
+    };
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("PPTX presentation XML: {error}")))?;
+        let opening = matches!(event, Event::Start(_));
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element) => {
+                let name = local_name(element.name().as_ref()).to_string();
+                match name.as_str() {
+                    "custShowLst" => list.custom_shows = true,
+                    "sectionLst" => list.sections = true,
+                    "sldId"
+                        if stack.len() == 2
+                            && stack[0] == "presentation"
+                            && stack[1] == "sldIdLst" =>
+                    {
+                        let id = checked_attribute(element, "id")?.ok_or_else(|| {
+                            HcdError::InvalidBundle("PPTX slide list entry has no id".to_string())
+                        })?;
+                        let relationship_id =
+                            relationship_id_attribute(element).ok_or_else(|| {
+                                HcdError::InvalidBundle(
+                                    "PPTX slide list entry has no relationship".to_string(),
+                                )
+                            })?;
+                        list.entries.push((id, relationship_id));
+                    }
+                    _ => {}
+                }
+                if opening {
+                    stack.push(name);
+                }
+            }
+            Event::End(_) => {
+                stack.pop();
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(list)
+}
+
+/// The pages of the deck in the order the HCD index holds them, named by the
+/// slide part each one carries — the order a source-backed export writes the
+/// presentation's own list in after a page moved.
+///
+/// A page whose table the importer split repeats its section in every chunk it
+/// spans, and the deck shows that page once, so chunks that name the same part
+/// one after the other are one page. A part that comes back after a different page
+/// has been named is refused: the export would have no honest way to say which of
+/// the two the deck shows first.
+fn pptx_deck_page_order(bundle: &Bundle, manifest: &HcdManifest) -> Result<Vec<String>, HcdError> {
+    let mut parts: Vec<String> = Vec::new();
+    for page_number in 0..manifest.index_page_count {
+        for descriptor in bundle.read_index_page(manifest, page_number)?.chunks {
+            if descriptor.region != "slide" {
+                continue;
+            }
+            let html = bundle.read_chunk(&descriptor)?;
+            let section_end = html.find('>').ok_or_else(|| {
+                HcdError::InvalidBundle("PPTX slide section is not closed".to_string())
+            })?;
+            let part =
+                html_attribute(&html[..=section_end], "data-hcd-source-part").ok_or_else(|| {
+                    HcdError::InvalidBundle("PPTX slide page names no source part".to_string())
+                })?;
+            if parts.last().map(String::as_str) == Some(part) {
+                continue;
+            }
+            if parts.iter().any(|seen| seen == part) {
+                return Err(HcdError::Unsupported(format!(
+                    "the HCD index lists slide {part} in two places; a source-backed export cannot say which page the deck shows first, so export without --source"
+                )));
+            }
+            parts.push(part.to_string());
+        }
+    }
+    Ok(parts)
+}
+
+/// The part a `.rels` entry describes. Relationship targets are written relative
+/// to that part rather than to the relationship file, so a deletion has to know
+/// whose folder `../slides/slide2.xml` climbs out of. The package's own list
+/// names no part and answers with an empty one.
+fn pptx_rels_owner(rels_part: &str) -> Option<String> {
+    if let Some(file) = rels_part.strip_prefix("_rels/") {
+        if file == ".rels" {
+            return Some(String::new());
+        }
+        if file.contains('/') {
+            return None;
+        }
+        return file.strip_suffix(".rels").map(str::to_string);
+    }
+    let (folder, file) = rels_part.rsplit_once("/_rels/")?;
+    let owner = file.strip_suffix(".rels")?;
+    Some(format!("{folder}/{owner}"))
+}
+
+/// One relationship as the package wrote it.
+struct PptxRelationship {
+    id: String,
+    kind: String,
+    /// The part it names, resolved against the folder of the part the list
+    /// belongs to. `None` for an external target, which is a address outside the
+    /// package and can never name a part the export drops.
+    target: Option<String>,
+}
+
+/// Read a relationship list. An entry with no `Id` keeps an empty one: the export
+/// only asks for it when the entry is the one it has to take away, and refuses
+/// there rather than dropping a relationship it cannot name.
+fn read_pptx_relationships(
+    xml: &[u8],
+    owner_part: &str,
+    part: &str,
+) -> Result<Vec<PptxRelationship>, HcdError> {
+    let mut reader = Reader::from_reader(xml);
+    reader.config_mut().check_end_names = true;
+    let mut buffer = Vec::new();
+    let mut output = Vec::new();
+    loop {
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| HcdError::InvalidBundle(format!("{part} XML: {error}")))?;
+        if let Event::Empty(ref element) | Event::Start(ref element) = event {
+            if local_name(element.name().as_ref()) == "Relationship" {
+                let mut id = None;
+                let mut kind = None;
+                let mut target = None;
+                let mut external = false;
+                for attribute in element.attributes().with_checks(false) {
+                    let attribute = attribute.map_err(|error| {
+                        HcdError::InvalidBundle(format!("{part} attribute: {error}"))
+                    })?;
+                    let value = attribute.unescape_value().map_err(|error| {
+                        HcdError::InvalidBundle(format!("{part} value: {error}"))
+                    })?;
+                    match local_name(attribute.key.as_ref()) {
+                        "Id" => id = Some(value.to_string()),
+                        "Type" => kind = Some(value.to_string()),
+                        "Target" => target = Some(value.to_string()),
+                        "TargetMode" => external = value.as_ref() == "External",
+                        _ => {}
+                    }
+                }
+                output.push(PptxRelationship {
+                    id: id.unwrap_or_default(),
+                    kind: kind.unwrap_or_default(),
+                    target: target
+                        .filter(|_| !external)
+                        .map(|target| resolve_part(owner_part, &target))
+                        .transpose()?,
+                });
+            }
+        }
+        if matches!(event, Event::Eof) {
+            break;
+        }
+        buffer.clear();
+    }
+    Ok(output)
+}
 
 fn safe_temp_name(part: &str) -> String {
     part.chars()
@@ -3590,22 +7138,598 @@ fn safe_temp_name(part: &str) -> String {
         .collect()
 }
 
-fn package_error(error: PackageError) -> HcdError {
-    match error {
-        PackageError::ResourceLimit(message) => HcdError::ResourceLimit(message),
-        other => HcdError::InvalidBundle(other.to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use hcd_core::{
         apply_patch, extract_text_page, validate_bundle, NodePrecondition, PatchBatch,
-        PatchOperation, PptxShapePrecondition, HCD_PATCH_SCHEMA_VERSION,
+        PatchOperation, PptxRunFormat, PptxShapePrecondition, HCD_PATCH_SCHEMA_VERSION,
         HCD_PATCH_SCHEMA_VERSION_16, HCD_PATCH_SCHEMA_VERSION_17, HCD_PATCH_SCHEMA_VERSION_27,
+        HCD_PATCH_SCHEMA_VERSION_30, HCD_PATCH_SCHEMA_VERSION_37, HCD_PATCH_SCHEMA_VERSION_41,
+        HCD_PATCH_SCHEMA_VERSION_42, HCD_PATCH_SCHEMA_VERSION_43, HCD_PATCH_SCHEMA_VERSION_44,
+        HCD_PATCH_SCHEMA_VERSION_46,
     };
     use std::cell::Cell;
+
+    fn parts(root: &Path, folder: &Path, output: &mut Vec<(String, String)>) {
+        let mut entries = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        for entry in entries {
+            if entry.is_dir() {
+                parts(root, &entry, output);
+            } else {
+                output.push((
+                    entry
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    std::fs::read_to_string(entry).unwrap(),
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn shared_master_text_edits_preserve_overrides_native_inheritance_and_history() {
+        use hcd_core::pptx_design::{PptxMasterTextKind as Kind, PptxMasterTextStyle};
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("master.pptx");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/hdoc/embed-host/fixtures/pptx-inheritance");
+        let mut native_parts = Vec::new();
+        parts(&fixture, &fixture, &mut native_parts);
+        write_zip_fixture(
+            &source,
+            &native_parts
+                .iter()
+                .map(|(name, xml)| (name.as_str(), xml.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let source_bytes = std::fs::read(&source).unwrap();
+        let path = temp.path().join("master.hcd");
+        let initial = import_pptx(&source, &path, &ImportOptions::new("master-text"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let chunk = bundle.read_index_page(&initial, 0).unwrap().chunks[0]
+            .chunk_id
+            .clone();
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&initial.document_id, &chunk, 0),
+            0,
+        )
+        .unwrap();
+        let before_style = bundle.manifest().unwrap().revision;
+        let apply_style = |kind, level, format, font| {
+            let manifest = bundle.manifest().unwrap();
+            apply_patch(
+                &bundle,
+                &PatchBatch {
+                    schema_version: hcd_core::HCD_PATCH_SCHEMA_VERSION_66.into(),
+                    document_id: manifest.document_id,
+                    patch_id: format!("master-{}", manifest.revision),
+                    base_revision: manifest.revision,
+                    actor: BTreeMap::new(),
+                    metadata: BTreeMap::new(),
+                    operations: vec![PatchOperation::PptxMasterTextStyleSet {
+                        chunk_id: chunk.clone(),
+                        style: PptxMasterTextStyle {
+                            kind,
+                            level,
+                            format,
+                            font,
+                        },
+                    }],
+                },
+                manifest.revision,
+            )
+            .unwrap();
+        };
+        apply_style(
+            Kind::Title,
+            1,
+            PptxRunFormat {
+                font_size_pt: Some(36.),
+                bold: Some(false),
+                color: Some("#b34e32".into()),
+                ..Default::default()
+            },
+            Some(hcd_core::FontPatch {
+                latin: Some("Verdana".into()),
+                east_asia: Some("Noto Serif SC".into()),
+                bidi: Some("Amiri".into()),
+            }),
+        );
+        apply_style(
+            Kind::Body,
+            1,
+            PptxRunFormat {
+                font_size_pt: Some(22.),
+                bold: Some(false),
+                color: Some("#334455".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        // Create a local override after the shared style; it must survive the
+        // next shared edit, and remain direct formatting in the native file.
+        let title = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|node| node.text == "Master-led layout")
+            .unwrap();
+        let manifest = bundle.manifest().unwrap();
+        apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_30.into(),
+                document_id: manifest.document_id,
+                patch_id: "local-title-color".into(),
+                base_revision: manifest.revision,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::PptxRunFormat {
+                    node_id: title.node_id,
+                    precondition: NodePrecondition {
+                        node_hash: title.node_hash,
+                    },
+                    format: PptxRunFormat {
+                        color: Some("#6b4c9a".into()),
+                        ..Default::default()
+                    },
+                }],
+            },
+            manifest.revision,
+        )
+        .unwrap();
+        apply_style(
+            Kind::Title,
+            1,
+            PptxRunFormat {
+                color: Some("#0f7a6b".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        let styled_revision = bundle.manifest().unwrap().revision;
+        fn inspect(bundle: &Bundle) -> Vec<String> {
+            let manifest = bundle.manifest().unwrap();
+            bundle
+                .read_index_page(&manifest, 0)
+                .unwrap()
+                .chunks
+                .iter()
+                .filter(|c| c.region == "slide")
+                .map(|c| {
+                    let html = bundle.read_chunk(c).unwrap();
+                    let doc = roxmltree::Document::parse(&html).unwrap();
+                    let title = doc
+                        .descendants()
+                        .find(|n| n.attribute("data-hcd-shape-id") == Some("2"))
+                        .unwrap();
+                    let run = title
+                        .descendants()
+                        .find(|n| n.attribute("class") == Some("hcd-ppt-run"))
+                        .unwrap();
+                    let style = run.attribute("style").unwrap();
+                    assert!(
+                        style.contains("font-size:36.00pt")
+                            && style.contains("font-weight:400")
+                            && style.contains("Verdana"),
+                        "{style}"
+                    );
+                    let body = doc
+                        .descendants()
+                        .find(|n| n.attribute("data-hcd-shape-id") == Some("3"))
+                        .unwrap();
+                    let runs = body
+                        .descendants()
+                        .filter(|n| n.attribute("class") == Some("hcd-ppt-run"))
+                        .collect::<Vec<_>>();
+                    let first = runs[0].attribute("style").unwrap();
+                    assert!(
+                        first.contains("font-size:20.00pt")
+                            && first.contains("color:#246b57")
+                            && first.contains("font-weight:400"),
+                        "{first}"
+                    );
+                    let direct = runs[2].attribute("style").unwrap();
+                    assert!(
+                        direct.contains("font-size:12.00pt")
+                            && direct.contains("Times New Roman")
+                            && direct.contains("color:#633b1e"),
+                        "{direct}"
+                    );
+                    style.to_string()
+                })
+                .collect()
+        }
+        let styles = inspect(&bundle);
+        assert_eq!(styles.len(), 2);
+        assert!(styles[0].contains("color:#6b4c9a") && styles[1].contains("color:#0f7a6b"));
+        let native = temp.path().join("styled.pptx");
+        export_pptx(&bundle, &source, &native, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_bytes(&source, "ppt/slideLayouts/slideLayout1.xml"),
+            read_zip_bytes(&native, "ppt/slideLayouts/slideLayout1.xml")
+        );
+        assert_eq!(
+            read_zip_bytes(&source, "ppt/theme/theme1.xml"),
+            read_zip_bytes(&native, "ppt/theme/theme1.xml")
+        );
+        let master =
+            String::from_utf8(read_zip_bytes(&native, "ppt/slideMasters/slideMaster1.xml"))
+                .unwrap();
+        let doc = roxmltree::Document::parse(&master).unwrap();
+        let title = doc
+            .descendants()
+            .find(|n| n.has_tag_name("titleStyle"))
+            .unwrap();
+        let props = title
+            .descendants()
+            .find(|n| n.has_tag_name("defRPr"))
+            .unwrap();
+        assert_eq!(props.attribute("sz"), Some("3600"));
+        assert_eq!(props.attribute("b"), Some("0"));
+        assert_eq!(
+            props
+                .descendants()
+                .find(|n| n.has_tag_name("srgbClr"))
+                .unwrap()
+                .attribute("val"),
+            Some("0F7A6B")
+        );
+        let reimported = temp.path().join("reopened.hcd");
+        import_pptx(
+            &native,
+            &reimported,
+            &ImportOptions::new("master-reopened"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        inspect(&Bundle::open(&reimported).unwrap());
+        hcd_core::restore_revision(&bundle, before_style, styled_revision).unwrap();
+        let undone = temp.path().join("undone.pptx");
+        export_pptx(&bundle, &source, &undone, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_bytes(&source, "ppt/slideMasters/slideMaster1.xml"),
+            read_zip_bytes(&undone, "ppt/slideMasters/slideMaster1.xml")
+        );
+        hcd_core::restore_revision(&bundle, styled_revision, styled_revision + 1).unwrap();
+        inspect(&bundle);
+        let report = validate_bundle(&bundle).unwrap();
+        assert!(report.valid, "{:?}", report.issues);
+        assert_eq!(std::fs::read(source).unwrap(), source_bytes);
+    }
+
+    #[test]
+    fn inherited_placeholder_geometry_and_typography_survive_native_text_edit() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("inherited.pptx");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/hdoc/embed-host/fixtures/pptx-inheritance");
+        let mut native_parts = Vec::new();
+        parts(&fixture, &fixture, &mut native_parts);
+        write_zip_fixture(
+            &source,
+            &native_parts
+                .iter()
+                .map(|(name, xml)| (name.as_str(), xml.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let path = temp.path().join("document.hcd");
+        let manifest = import_pptx(
+            &source,
+            &path,
+            &ImportOptions::new("inherited-pptx"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        fn verify(bundle: &Bundle, manifest: &HcdManifest) {
+            let chunk = &bundle.read_index_page(manifest, 0).unwrap().chunks[0];
+            let html = bundle.read_chunk(chunk).unwrap();
+            let doc = roxmltree::Document::parse(&html).unwrap();
+            let title = doc
+                .descendants()
+                .find(|node| node.attribute("data-hcd-shape-id") == Some("2"))
+                .unwrap();
+            assert_eq!(title.attribute("data-hcd-x-emu"), Some("914400"));
+            assert_eq!(title.attribute("data-hcd-width-emu"), Some("7315200"));
+            assert!(title.attribute("style").unwrap().contains("top:48.00px"));
+            let title_run = title
+                .descendants()
+                .find(|node| node.attribute("class") == Some("hcd-ppt-run"))
+                .unwrap();
+            let style = title_run.attribute("style").unwrap();
+            for expected in [
+                "font-size:30.00pt",
+                "font-family:'Georgia'",
+                "font-weight:700",
+                "color:#222222",
+            ] {
+                assert!(style.contains(expected), "{style}");
+            }
+            let body = doc
+                .descendants()
+                .find(|node| node.attribute("data-hcd-shape-id") == Some("3"))
+                .unwrap();
+            assert_eq!(body.attribute("data-hcd-x-emu"), Some("1371600"));
+            assert_eq!(body.attribute("data-hcd-width-emu"), Some("6400800"));
+            let paragraphs = body
+                .children()
+                .filter(|node| node.has_tag_name("p"))
+                .collect::<Vec<_>>();
+            let styles = paragraphs
+                .iter()
+                .map(|p| {
+                    p.descendants()
+                        .find(|node| node.attribute("class") == Some("hcd-ppt-run"))
+                        .unwrap()
+                        .attribute("style")
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert!(styles[0].contains("font-size:20.00pt"), "{}", styles[0]);
+            assert!(styles[0].contains("color:#246b57"));
+            assert!(styles[1].contains("font-size:17.00pt"));
+            assert!(
+                styles[1].contains("font-weight:400") && styles[1].contains("font-style:normal")
+            );
+            assert!(
+                styles[2].contains("font-size:12.00pt")
+                    && styles[2].contains("font-family:'Times New Roman'")
+            );
+            assert!(
+                styles[3].contains("'Noto Sans SC'") && !styles[3].contains("+mn-ea"),
+                "{}",
+                styles[3]
+            );
+            assert!(paragraphs[2]
+                .attribute("style")
+                .unwrap()
+                .contains("text-align:right"));
+            let zero = doc
+                .descendants()
+                .find(|node| node.attribute("data-hcd-shape-id") == Some("4"))
+                .unwrap();
+            assert_eq!(zero.attribute("data-hcd-x-emu"), Some("0"));
+            assert_eq!(zero.attribute("data-hcd-width-emu"), Some("6400800"));
+            assert!(zero
+                .attribute("style")
+                .unwrap()
+                .contains("padding-left:0.00pt"));
+        }
+        verify(&bundle, &manifest);
+        let title = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.text == "Master-led layout")
+            .unwrap();
+        let changed = "Master-led title revised";
+        apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION.into(),
+                document_id: manifest.document_id,
+                patch_id: "edit-inherited-title".into(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::TextSplice {
+                    node_id: title.node_id.clone(),
+                    start: 0,
+                    delete_count: title.text.chars().count(),
+                    insert_text: changed.into(),
+                    precondition: NodePrecondition {
+                        node_hash: title.node_hash,
+                    },
+                }],
+            },
+            0,
+        )
+        .unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let exported = temp.path().join("edited.pptx");
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        for part in [
+            "ppt/slideMasters/slideMaster1.xml",
+            "ppt/slideLayouts/slideLayout1.xml",
+            "ppt/theme/theme1.xml",
+        ] {
+            assert_eq!(
+                read_zip_bytes(&source, part),
+                read_zip_bytes(&exported, part),
+                "inherited source part changed: {part}"
+            );
+        }
+        assert!(read_zip_entry(&exported, "ppt/slides/slide1.xml").contains("<p:spPr/>"));
+        let reopened = temp.path().join("reopened.hcd");
+        let next = import_pptx(
+            &exported,
+            &reopened,
+            &ImportOptions::new("inherited-pptx"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened = Bundle::open(reopened).unwrap();
+        verify(&reopened, &next);
+        assert_eq!(
+            extract_text_page(&reopened, None, 100)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|entry| entry.text == changed)
+                .unwrap()
+                .node_id,
+            title.node_id
+        );
+        let title = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.text == changed)
+            .unwrap();
+        apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_17.into(),
+                document_id: bundle.manifest().unwrap().document_id,
+                patch_id: "move-inherited-title".into(),
+                base_revision: 1,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::PptxShapeGeometry {
+                    node_id: title.node_id,
+                    geometry: PptxShapeGeometry {
+                        x_emu: 1828800,
+                        y_emu: 914400,
+                        width_emu: 7315200,
+                        height_emu: 914400,
+                    },
+                    precondition: PptxShapePrecondition {
+                        node_hash: title.node_hash,
+                        geometry: PptxShapeGeometry {
+                            x_emu: 914400,
+                            y_emu: 457200,
+                            width_emu: 7315200,
+                            height_emu: 914400,
+                        },
+                    },
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        let moved = temp.path().join("moved.pptx");
+        export_pptx(&bundle, &source, &moved, &ExportOptions::default()).unwrap();
+        let slide = read_zip_entry(&moved, "ppt/slides/slide1.xml");
+        assert!(
+            slide.contains("x=\"1828800\"") && slide.contains("cx=\"7315200\""),
+            "{slide}"
+        );
+        assert_eq!(
+            read_zip_bytes(&source, "ppt/slideMasters/slideMaster1.xml"),
+            read_zip_bytes(&moved, "ppt/slideMasters/slideMaster1.xml")
+        );
+        let moved_bundle = temp.path().join("moved.hcd");
+        let moved_manifest = import_pptx(
+            &moved,
+            &moved_bundle,
+            &ImportOptions::new("inherited-pptx"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let moved_bundle = Bundle::open(moved_bundle).unwrap();
+        let chunk = &moved_bundle
+            .read_index_page(&moved_manifest, 0)
+            .unwrap()
+            .chunks[0];
+        let moved_html = moved_bundle.read_chunk(chunk).unwrap();
+        let doc = roxmltree::Document::parse(&moved_html).unwrap();
+        let moved_title = doc
+            .descendants()
+            .find(|node| node.attribute("data-hcd-shape-id") == Some("2"))
+            .unwrap();
+        assert_eq!(moved_title.attribute("data-hcd-x-emu"), Some("1828800"));
+        assert_eq!(moved_title.attribute("data-hcd-y-emu"), Some("914400"));
+        assert!(moved_title
+            .descendants()
+            .any(|node| node.text() == Some(changed)));
+    }
+
+    #[test]
+    fn complete_remake_exports_when_new_slides_replace_every_source_page() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let output = temp.path().join("remade.pptx");
+        let bundle_path = temp.path().join("bundle");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("full-remake"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let original_parts = index_slide_order(&bundle, &manifest);
+        let original_chunks = original_parts
+            .iter()
+            .map(|part| slide_page_chunk(&bundle, &manifest, part))
+            .collect::<Vec<_>>();
+        let mut revision = 0;
+        let mut commit = |schema: &str, operations: Vec<PatchOperation>| {
+            revision = apply_patch(
+                &bundle,
+                &PatchBatch {
+                    schema_version: schema.into(),
+                    document_id: manifest.document_id.clone(),
+                    patch_id: format!("remake-{}", revision + 1),
+                    base_revision: revision,
+                    actor: BTreeMap::new(),
+                    metadata: BTreeMap::new(),
+                    operations,
+                },
+                revision,
+            )
+            .unwrap()
+            .revision;
+        };
+        commit(
+            HCD_PATCH_SCHEMA_VERSION_41,
+            vec![PatchOperation::PptxSlideAdd {}],
+        );
+        let head = bundle.manifest().unwrap();
+        let part = index_slide_order(&bundle, &head).last().unwrap().clone();
+        let chunk = slide_page_chunk(&bundle, &head, &part);
+        commit(
+            HCD_PATCH_SCHEMA_VERSION_16,
+            vec![PatchOperation::PptxTextInsert {
+                chunk_id: chunk,
+                slide_part: part.clone(),
+                x_emu: 100_000,
+                y_emu: 100_000,
+                width_emu: 2_000_000,
+                height_emu: 500_000,
+                font_size_pt: 20.0,
+                text: "北凪寿司 280".into(),
+            }],
+        );
+        for chunk in original_chunks {
+            commit(
+                HCD_PATCH_SCHEMA_VERSION_42,
+                vec![PatchOperation::PptxSlideDelete { chunk_id: chunk }],
+            );
+        }
+        export_pptx(&bundle, &source, &output, &ExportOptions::default()).unwrap();
+        let order = deck_shows(&output);
+        assert_eq!(order, vec![part.clone()]);
+        assert!(read_zip_entry(&output, &part).contains("北凪寿司 280"));
+        for old in original_parts {
+            assert!(!order.contains(&old));
+        }
+        let baseline = temp.path().join("baseline.pptx");
+        export_pptx(
+            &bundle,
+            &source,
+            &baseline,
+            &ExportOptions {
+                revision: Some(0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(deck_shows(&baseline).len(), 2);
+    }
     use std::rc::Rc;
     use zip::write::SimpleFileOptions;
 
@@ -3902,6 +8026,1083 @@ mod tests {
     }
 
     #[test]
+    fn appends_a_blank_slide_and_exports_it_as_a_new_slide_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let before = temp.path().join("revision0.pptx");
+        let exported = temp.path().join("added.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("add-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        // A slide the history has not created yet is not written: revision 0
+        // still exports the presentation exactly as it arrived.
+        export_pptx(
+            &bundle,
+            &source,
+            &before,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_zip_entry(&before, "ppt/presentation.xml"),
+            read_zip_entry(&source, "ppt/presentation.xml")
+        );
+        assert!(!has_zip_entry(&before, "ppt/slides/slide3.xml"));
+
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "add-slide-r1".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideAdd {}],
+        };
+        let result = apply_patch(&bundle, &patch, 0).unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_ADDED"));
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, manifest.chunk_count + 1);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        // The new page is the last slide chunk, and its HTML names the part.
+        let page = bundle
+            .read_index_page(&head, head.index_page_count - 1)
+            .unwrap();
+        let added_part = "ppt/slides/slide3.xml";
+        let chunk_id = page
+            .chunks
+            .iter()
+            .find(|descriptor| {
+                descriptor.region == "slide"
+                    && bundle
+                        .read_chunk(descriptor)
+                        .unwrap_or_default()
+                        .contains(added_part)
+            })
+            .expect("the added slide page")
+            .chunk_id
+            .clone();
+
+        // The blank page is there to type into: one text box makes it a slide.
+        let insert = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_16.to_string(),
+            document_id: head.document_id.clone(),
+            patch_id: "add-slide-r2".to_string(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxTextInsert {
+                chunk_id: chunk_id.clone(),
+                slide_part: added_part.to_string(),
+                x_emu: 914_400,
+                y_emu: 2_000_000,
+                width_emu: 4_000_000,
+                height_emu: 1_000_000,
+                font_size_pt: 20.0,
+                text: "新幻灯片".to_string(),
+            }],
+        };
+        assert_eq!(apply_patch(&bundle, &insert, 1).unwrap().revision, 2);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        // The page no longer carries the empty-slide placeholder. The index is
+        // read again: the shape rewrite published a new chunk object.
+        let current = bundle.manifest().unwrap();
+        let page = bundle
+            .read_index_page(&current, current.index_page_count - 1)
+            .unwrap();
+        let added_descriptor = page
+            .chunks
+            .iter()
+            .find(|descriptor| descriptor.chunk_id == chunk_id)
+            .unwrap();
+        assert!(
+            !bundle
+                .read_chunk(added_descriptor)
+                .unwrap()
+                .contains("hcd-empty-slide"),
+            "a slide with a shape on it is not an empty page"
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert!(report
+            .flattened
+            .iter()
+            .any(|item| item.contains("slide part the source package never had")));
+        let slide = read_zip_entry(&exported, added_part);
+        assert!(slide.contains("name=\"HCD Text"), "{slide}");
+        assert!(slide.contains("新幻灯片"));
+        assert!(slide.contains("<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>"));
+        assert_eq!(
+            slide.matches("<p:cNvPr id=").count(),
+            2,
+            "the group and the one shape it holds: {slide}"
+        );
+        // The new slide draws from the layout the last existing slide uses.
+        assert!(
+            read_zip_entry(&exported, "ppt/slides/_rels/slide3.xml.rels")
+                .contains("Target=\"../slideLayouts/slideLayout1.xml\"")
+        );
+        // The presentation gains the tab at the end and keeps the ones it had.
+        let presentation = read_zip_entry(&exported, "ppt/presentation.xml");
+        assert!(presentation.contains("<p:sldId id=\"256\" r:id=\"rId2\"/>"));
+        assert!(presentation.contains("<p:sldId id=\"257\" r:id=\"rId1\"/>"));
+        assert!(
+            presentation.contains("<p:sldId id=\"258\" r:id=\"rId3\"/>"),
+            "{presentation}"
+        );
+        assert!(read_zip_entry(&exported, "ppt/_rels/presentation.xml.rels").contains(
+            "<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide3.xml\"/>"
+        ));
+        assert!(read_zip_entry(&exported, "[Content_Types].xml").contains(
+            "<Override PartName=\"/ppt/slides/slide3.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"
+        ));
+        // Nothing else in the package moved.
+        for part in [
+            "ppt/slides/slide1.xml",
+            "ppt/slides/slide2.xml",
+            "ppt/slides/_rels/slide2.xml.rels",
+            "ppt/slideLayouts/slideLayout1.xml",
+            "ppt/media/image1.png",
+        ] {
+            assert_eq!(
+                read_zip_entry(&exported, part),
+                read_zip_entry(&source, part),
+                "{part}"
+            );
+        }
+
+        // Re-importing the export finds the new page under the same ID, so the
+        // slide HCD created stays a page the editor can keep editing.
+        let reopened_path = temp.path().join("reopened.hcd");
+        let reopened = import_pptx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("add-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened_bundle = Bundle::open(&reopened_path).unwrap();
+        let found = (0..reopened.index_page_count)
+            .flat_map(|page_number| {
+                reopened_bundle
+                    .read_index_page(&reopened, page_number)
+                    .unwrap()
+                    .chunks
+            })
+            .any(|descriptor| descriptor.chunk_id == chunk_id);
+        assert!(found, "the added slide keeps its page after a round trip");
+    }
+
+    #[test]
+    fn an_added_slide_refuses_a_package_that_has_no_layout_to_draw() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("added.pptx");
+        create_styled_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("add-slide-no-layout"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "add-slide-no-layout-r1".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideAdd {}],
+        };
+        assert_eq!(apply_patch(&bundle, &patch, 0).unwrap().revision, 1);
+        // HCD keeps the page: the refusal is about writing the source package,
+        // not about the revision, and the bundle still validates.
+        let error = export_pptx(&bundle, &source, &exported, &ExportOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("needs a slide layout"), "{error}");
+        assert!(!exported.exists());
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    /// Every page chunk that carries a slide's section, in index order, named by
+    /// the source part those sections point at. A page whose table is split keeps
+    /// repeating its section in every chunk it spans, so more than one answers.
+    fn slide_page_chunks(bundle: &Bundle, manifest: &HcdManifest, part: &str) -> Vec<String> {
+        (0..manifest.index_page_count)
+            .flat_map(|page_number| {
+                bundle
+                    .read_index_page(manifest, page_number)
+                    .unwrap()
+                    .chunks
+            })
+            .filter(|descriptor| {
+                descriptor.region == "slide"
+                    && bundle.read_chunk(descriptor).unwrap().contains(part)
+            })
+            .map(|descriptor| descriptor.chunk_id)
+            .collect()
+    }
+
+    /// The first page chunk that carries a slide's section.
+    fn slide_page_chunk(bundle: &Bundle, manifest: &HcdManifest, part: &str) -> String {
+        slide_page_chunks(bundle, manifest, part)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("no page chunk names {part}"))
+    }
+
+    /// The section a slide page is rendered into, so a test can read the markup a
+    /// patch wrote rather than guess which index page the bundle put it on.
+    fn slide_chunk_html(bundle: &Bundle, manifest: &HcdManifest, part: &str) -> String {
+        (0..manifest.index_page_count)
+            .flat_map(|page_number| {
+                bundle
+                    .read_index_page(manifest, page_number)
+                    .unwrap()
+                    .chunks
+            })
+            .map(|descriptor| bundle.read_chunk(&descriptor).unwrap())
+            .find(|html| html.starts_with("<section class=\"hcd-slide\"") && html.contains(part))
+            .unwrap_or_else(|| panic!("no slide chunk carries {part}"))
+    }
+
+    fn drop_slide_patch(document_id: &str, chunk_id: &str, base: u64) -> PatchBatch {
+        PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_42.to_string(),
+            document_id: document_id.to_string(),
+            patch_id: format!("drop-{base}"),
+            base_revision: base,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideDelete {
+                chunk_id: chunk_id.to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn deleting_a_slide_writes_a_package_that_no_longer_addresses_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("dropped.pptx");
+        let before = temp.path().join("before.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("drop-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunk_id = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        let result = apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &chunk_id, 0),
+            0,
+        )
+        .unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_REMOVED"));
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, manifest.chunk_count - 1);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        // The revision the deck still had is exported whole: the deletion is a
+        // later revision, and asking for revision 0 asks for the page back.
+        export_pptx(
+            &bundle,
+            &source,
+            &before,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(has_zip_entry(&before, "ppt/slides/slide2.xml"));
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert!(report
+            .flattened
+            .iter()
+            .any(|item| item.contains("leaves the package with its page entry")));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_DELETE"
+                && warning
+                    .source_part
+                    .as_deref()
+                    .is_some_and(|part| part == "ppt/slides/slide2.xml")));
+        // The page and the list of relationships it owned are both gone.
+        assert!(!has_zip_entry(&exported, "ppt/slides/slide2.xml"));
+        assert!(!has_zip_entry(
+            &exported,
+            "ppt/slides/_rels/slide2.xml.rels"
+        ));
+        // What addressed the page goes with it, and only that.
+        let presentation = read_zip_entry(&exported, "ppt/presentation.xml");
+        assert!(!presentation.contains("r:id=\"rId2\""), "{presentation}");
+        assert!(presentation.contains("<p:sldId id=\"257\" r:id=\"rId1\"/>"));
+        let relationships = read_zip_entry(&exported, "ppt/_rels/presentation.xml.rels");
+        assert!(
+            !relationships.contains("slides/slide2.xml"),
+            "{relationships}"
+        );
+        assert!(relationships.contains("Target=\"slides/slide1.xml\""));
+        let types = read_zip_entry(&exported, "[Content_Types].xml");
+        assert!(
+            !types.contains(r#"PartName="/ppt/slides/slide2.xml""#),
+            "{types}"
+        );
+        assert!(types.contains(r#"PartName="/ppt/slides/slide1.xml""#));
+        // The image the deleted page alone used stays, unreferenced, and nothing
+        // the deck kept moved.
+        for part in [
+            "ppt/slides/slide1.xml",
+            "ppt/slideLayouts/slideLayout1.xml",
+            "ppt/media/image1.png",
+            "ppt/media/image2.png",
+        ] {
+            assert_eq!(
+                read_zip_entry(&exported, part),
+                read_zip_entry(&source, part),
+                "{part}"
+            );
+        }
+
+        // Re-importing the export keeps the surviving page under the same ID, so
+        // the deck the editor reads again is the deck it wrote.
+        let reopened_path = temp.path().join("reopened.hcd");
+        let reopened = import_pptx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("drop-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened_bundle = Bundle::open(&reopened_path).unwrap();
+        assert_eq!(reopened.chunk_count, head.chunk_count);
+        assert_eq!(
+            slide_page_chunk(&reopened_bundle, &reopened, "ppt/slides/slide1.xml"),
+            slide_page_chunk(&bundle, &head, "ppt/slides/slide1.xml")
+        );
+    }
+
+    /// The patch that asks one page to move one place through the deck.
+    fn move_slide_patch(
+        document_id: &str,
+        chunk_id: &str,
+        direction: &str,
+        base: u64,
+    ) -> PatchBatch {
+        PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_43.to_string(),
+            document_id: document_id.to_string(),
+            patch_id: format!("move-{direction}-{base}"),
+            base_revision: base,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideReorder {
+                chunk_id: chunk_id.to_string(),
+                direction: direction.to_string(),
+                target_index: None,
+            }],
+        }
+    }
+
+    /// The pages the index shows, in the order the deck shows them, named by the
+    /// slide part each page carries.
+    fn index_slide_order(bundle: &Bundle, manifest: &HcdManifest) -> Vec<String> {
+        let mut parts: Vec<String> = Vec::new();
+        for page_number in 0..manifest.index_page_count {
+            for descriptor in bundle
+                .read_index_page(manifest, page_number)
+                .unwrap()
+                .chunks
+            {
+                if descriptor.region != "slide" {
+                    continue;
+                }
+                let html = bundle.read_chunk(&descriptor).unwrap();
+                let end = html.find('>').unwrap();
+                let part = html_attribute(&html[..=end], "data-hcd-source-part")
+                    .unwrap()
+                    .to_string();
+                // Chunks of one split page name the same part one after another.
+                if parts.last().map(String::as_str) != Some(part.as_str()) {
+                    parts.push(part);
+                }
+            }
+        }
+        parts
+    }
+
+    /// The relationship ids a presentation's own page list holds, in the order it
+    /// holds them — the order the deck shows its pages in.
+    fn slide_list_order(presentation: &str) -> Vec<String> {
+        presentation
+            .split("<p:sldId ")
+            .skip(1)
+            .map(|entry| {
+                entry
+                    .split("r:id=\"")
+                    .nth(1)
+                    .unwrap_or_else(|| panic!("a slide entry with no relationship: {entry}"))
+                    .split('"')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The pages a written deck shows, in the order its own list shows them, with
+    /// each entry resolved through the package's relationships to the part it
+    /// names. A history that deleted a page and created another one can hand the
+    /// created page the relationship id the deleted page let go, so this reads the
+    /// package rather than assuming which id the export minted.
+    fn deck_shows(pptx: &Path) -> Vec<String> {
+        let presentation = read_zip_entry(pptx, "ppt/presentation.xml");
+        let relationships = read_zip_entry(pptx, "ppt/_rels/presentation.xml.rels");
+        presentation
+            .split("<p:sldId ")
+            .skip(1)
+            .map(|entry| {
+                let id = entry
+                    .split("r:id=\"")
+                    .nth(1)
+                    .unwrap_or_else(|| panic!("a slide entry with no relationship: {entry}"))
+                    .split('"')
+                    .next()
+                    .unwrap();
+                let target = relationships
+                    .split(&format!("Id=\"{id}\""))
+                    .nth(1)
+                    .unwrap_or_else(|| panic!("the list names {id}, no relationship carries it"))
+                    .split("Target=\"")
+                    .nth(1)
+                    .unwrap()
+                    .split('"')
+                    .next()
+                    .unwrap();
+                format!(
+                    "ppt/slides/{}",
+                    target.strip_prefix("slides/").unwrap_or(target)
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn moving_a_page_writes_the_slide_list_in_the_decks_new_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("moved.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("move-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        // The fixture lists its pages as slide2 then slide1 while its
+        // relationships name slide1 first, so the order the export writes has to
+        // come off the list and not off the workbook of relationships.
+        assert_eq!(
+            index_slide_order(&bundle, &manifest),
+            ["ppt/slides/slide2.xml", "ppt/slides/slide1.xml"]
+        );
+        assert_eq!(
+            slide_list_order(&read_zip_entry(&source, "ppt/presentation.xml")),
+            ["rId2", "rId1"]
+        );
+
+        let chunk_id = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide1.xml");
+        let result = apply_patch(
+            &bundle,
+            &move_slide_patch(&manifest.document_id, &chunk_id, "up", 0),
+            0,
+        )
+        .unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_MOVED"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, manifest.chunk_count);
+        assert_eq!(
+            index_slide_order(&bundle, &head),
+            ["ppt/slides/slide1.xml", "ppt/slides/slide2.xml"]
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert!(report
+            .flattened
+            .iter()
+            .any(|item| item.contains("changes only the order")));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "PPTX_SLIDE_REORDER"
+                    && warning
+                        .source_part
+                        .as_deref()
+                        .is_some_and(|part| part == "ppt/slides/slide1.xml")
+                    && warning.message.contains("position 1")),
+            "{:?}",
+            report.warnings
+        );
+
+        // The two entries traded places and every other byte of the part stayed
+        // where it was. The ids come along with the entries they were written
+        // with: a slide's id is not its position in the deck.
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/presentation.xml"),
+            read_zip_entry(&source, "ppt/presentation.xml").replace(
+                "<p:sldId id=\"256\" r:id=\"rId2\"/><p:sldId id=\"257\" r:id=\"rId1\"/>",
+                "<p:sldId id=\"257\" r:id=\"rId1\"/><p:sldId id=\"256\" r:id=\"rId2\"/>",
+            )
+        );
+        // Nothing else in the package moved: not a page, not a relationship, not a
+        // content type.
+        for part in [
+            "ppt/slides/slide1.xml",
+            "ppt/slides/slide2.xml",
+            "ppt/slides/_rels/slide2.xml.rels",
+            "ppt/_rels/presentation.xml.rels",
+            "[Content_Types].xml",
+            "ppt/slideLayouts/slideLayout1.xml",
+            "ppt/media/image1.png",
+        ] {
+            assert_eq!(
+                read_zip_entry(&exported, part),
+                read_zip_entry(&source, part),
+                "{part}"
+            );
+        }
+
+        // Re-importing the export shows the deck in the order the editor moved it
+        // to, so the move is a fact about the package and not only about the index.
+        let reopened_path = temp.path().join("reopened.hcd");
+        let reopened = import_pptx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("move-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened_bundle = Bundle::open(&reopened_path).unwrap();
+        assert_eq!(
+            index_slide_order(&reopened_bundle, &reopened),
+            ["ppt/slides/slide1.xml", "ppt/slides/slide2.xml"]
+        );
+
+        // Absolute drag ordering shares the same source-backed export path.
+        let mut drag = move_slide_patch(&head.document_id, &chunk_id, "", 1);
+        drag.schema_version = hcd_core::HCD_PATCH_SCHEMA_VERSION_48.to_string();
+        drag.operations = vec![PatchOperation::PptxSlideReorder {
+            chunk_id: chunk_id.clone(),
+            direction: String::new(),
+            target_index: Some(1),
+        }];
+        apply_patch(&bundle, &drag, 1).unwrap();
+        let returned = temp.path().join("dragged-back.pptx");
+        export_pptx(&bundle, &source, &returned, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_entry(&returned, "ppt/presentation.xml"),
+            read_zip_entry(&source, "ppt/presentation.xml")
+        );
+    }
+
+    #[test]
+    fn a_page_moved_and_moved_back_writes_the_package_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("cancelled.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("move-back"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let first = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide1.xml");
+        apply_patch(
+            &bundle,
+            &move_slide_patch(&manifest.document_id, &first, "up", 0),
+            0,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        // The page that moved up is the deck's first now, so the way back is down.
+        let again = slide_page_chunk(&bundle, &head, "ppt/slides/slide1.xml");
+        assert_eq!(again, first);
+        apply_patch(
+            &bundle,
+            &move_slide_patch(&manifest.document_id, &again, "down", 1),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            index_slide_order(&bundle, &bundle.manifest().unwrap()),
+            ["ppt/slides/slide2.xml", "ppt/slides/slide1.xml"]
+        );
+
+        // Two moves that cancel are no order for the export to write, so the deck
+        // leaves as the source had it and the report says nothing about a move.
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::Exact);
+        assert!(report
+            .warnings
+            .iter()
+            .all(|warning| warning.code != "PPTX_SLIDE_REORDER"));
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/presentation.xml"),
+            read_zip_entry(&source, "ppt/presentation.xml")
+        );
+    }
+
+    #[test]
+    fn a_page_hcd_created_moves_through_the_deck_it_joined() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("moved-added.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("move-added"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let added_part = "ppt/slides/slide3.xml";
+        let added = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "add-slide".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideAdd {}],
+        };
+        apply_patch(&bundle, &added, 0).unwrap();
+        let head = bundle.manifest().unwrap();
+        assert_eq!(
+            index_slide_order(&bundle, &head),
+            ["ppt/slides/slide2.xml", "ppt/slides/slide1.xml", added_part]
+        );
+
+        // The new page joins at the end of both the index and the presentation's
+        // list; one move up takes it past the page in front of it.
+        let chunk_id = slide_page_chunk(&bundle, &head, added_part);
+        apply_patch(
+            &bundle,
+            &move_slide_patch(&manifest.document_id, &chunk_id, "up", 1),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            index_slide_order(&bundle, &bundle.manifest().unwrap()),
+            ["ppt/slides/slide2.xml", added_part, "ppt/slides/slide1.xml"]
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        let presentation = read_zip_entry(&exported, "ppt/presentation.xml");
+        assert_eq!(slide_list_order(&presentation), ["rId2", "rId3", "rId1"]);
+        assert!(
+            presentation.contains("<p:sldId id=\"258\" r:id=\"rId3\"/>"),
+            "{presentation}"
+        );
+        // The page the history created is still a page the package carries.
+        assert!(has_zip_entry(&exported, added_part));
+        assert!(has_zip_entry(&exported, "ppt/slides/_rels/slide3.xml.rels"));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_REORDER"
+                && warning
+                    .source_part
+                    .as_deref()
+                    .is_some_and(|part| part == added_part)));
+    }
+
+    #[test]
+    fn a_deck_that_grew_moved_and_lost_a_page_exports_all_three() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("all-three.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("all-three"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let added_part = "ppt/slides/slide3.xml";
+        let added = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "add-slide".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideAdd {}],
+        };
+        apply_patch(&bundle, &added, 0).unwrap();
+        let head = bundle.manifest().unwrap();
+        let created = slide_page_chunk(&bundle, &head, added_part);
+        apply_patch(
+            &bundle,
+            &move_slide_patch(&manifest.document_id, &created, "up", 1),
+            1,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        // Dropping the page that shows first leaves the created page in front.
+        let second = slide_page_chunk(&bundle, &head, "ppt/slides/slide2.xml");
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &second, 2),
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            index_slide_order(&bundle, &bundle.manifest().unwrap()),
+            [added_part, "ppt/slides/slide1.xml"]
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        // The list the export writes is the deck the history ended on: the page
+        // that was deleted is gone from it, and the page that was created stands
+        // where the move left it, in front of the page the deck kept.
+        assert_eq!(deck_shows(&exported), [added_part, "ppt/slides/slide1.xml"]);
+        assert!(has_zip_entry(&exported, added_part));
+        assert!(!has_zip_entry(&exported, "ppt/slides/slide2.xml"));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_DELETE"));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_REORDER"));
+    }
+
+    #[test]
+    fn a_page_created_and_deleted_inside_the_history_writes_no_slide_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("cancelled.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("cancel-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+                document_id: manifest.document_id.clone(),
+                patch_id: "cancel-add".to_string(),
+                base_revision: 0,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::PptxSlideAdd {}],
+            },
+            0,
+        )
+        .unwrap();
+        let added = bundle.manifest().unwrap();
+        let page = bundle
+            .read_index_page(&added, added.index_page_count - 1)
+            .unwrap();
+        let added_chunk = page.chunks.last().unwrap().chunk_id.clone();
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &added_chunk, 1),
+            1,
+        )
+        .unwrap();
+        assert_eq!(bundle.manifest().unwrap().chunk_count, manifest.chunk_count);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        // Nothing was written and nothing was dropped, so the package is the one
+        // that arrived.
+        assert_eq!(report.level, FidelityLevel::Exact);
+        assert!(report.warnings.iter().any(|warning| warning
+            .message
+            .contains("created and deleted inside this history")));
+        assert!(!has_zip_entry(&exported, "ppt/slides/slide3.xml"));
+        for part in [
+            "ppt/presentation.xml",
+            "ppt/_rels/presentation.xml.rels",
+            "[Content_Types].xml",
+        ] {
+            assert_eq!(
+                read_zip_entry(&exported, part),
+                read_zip_entry(&source, part),
+                "{part}"
+            );
+        }
+    }
+
+    #[test]
+    fn deleting_a_slide_removes_its_exclusive_notes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("dropped.pptx");
+        create_notes_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("drop-noted-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunk_id = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &chunk_id, 0),
+            0,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, manifest.chunk_count - 2);
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(!has_zip_entry(&exported, "ppt/slides/slide2.xml"));
+        assert!(!has_zip_entry(&exported, "ppt/notesSlides/notesSlide1.xml"));
+        assert!(!has_zip_entry(
+            &exported,
+            "ppt/notesSlides/_rels/notesSlide1.xml.rels"
+        ));
+        assert!(!read_zip_entry(&exported, "[Content_Types].xml")
+            .contains("/ppt/notesSlides/notesSlide1.xml"));
+        let reopened = temp.path().join("reopened.hcd");
+        import_pptx(
+            &exported,
+            &reopened,
+            &ImportOptions::new("reopened"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(
+            validate_bundle(&Bundle::open(reopened).unwrap())
+                .unwrap()
+                .valid
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn deleting_a_slide_never_drops_notes_referenced_by_a_surviving_part() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("shared-notes.pptx");
+        let mut parts = Vec::new();
+        for part in styled_fixture_parts() {
+            match part.0 {
+                "[Content_Types].xml" => parts.push((part.0, NOTES_TYPES_XML)),
+                "ppt/slides/_rels/slide2.xml.rels" => parts.push((part.0, NOTES_SLIDE2_RELS_XML)),
+                _ => parts.push(part),
+            }
+        }
+        parts.extend([
+            ("ppt/slides/_rels/slide1.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/></Relationships>"#),
+            ("ppt/slideLayouts/slideLayout1.xml", SLIDE_LAYOUT_XML),
+            ("ppt/notesSlides/notesSlide1.xml", NOTES_SLIDE_XML),
+            ("ppt/notesSlides/_rels/notesSlide1.xml.rels", NOTES_SLIDE_RELS_XML),
+        ]);
+        write_zip_fixture(&source, &parts);
+        let path = temp.path().join("bundle");
+        let output = temp.path().join("refused.pptx");
+        let manifest = import_pptx(&source, &path, &ImportOptions::new("shared-notes"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let chunk = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &chunk, 0),
+            0,
+        )
+        .unwrap();
+        let error = export_pptx(&bundle, &source, &output, &ExportOptions::default()).unwrap_err();
+        assert!(
+            error.to_string().contains("notes still referenced"),
+            "{error}"
+        );
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn edits_to_an_orphaned_legacy_note_are_never_silently_discarded() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let path = temp.path().join("bundle");
+        let output = temp.path().join("refused.pptx");
+        // Shared legacy notes deliberately have no unique slide owner, which
+        // reproduces the unassociated chunks written by older HCD imports.
+        let mut parts = Vec::new();
+        for part in styled_fixture_parts() {
+            match part.0 {
+                "[Content_Types].xml" => parts.push((part.0, NOTES_TYPES_XML)),
+                "ppt/slides/_rels/slide2.xml.rels" => parts.push((part.0, NOTES_SLIDE2_RELS_XML)),
+                _ => parts.push(part),
+            }
+        }
+        parts.extend([
+            ("ppt/slides/_rels/slide1.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/></Relationships>"#),
+            ("ppt/slideLayouts/slideLayout1.xml", SLIDE_LAYOUT_XML),
+            ("ppt/notesSlides/notesSlide1.xml", NOTES_SLIDE_XML),
+            ("ppt/notesSlides/_rels/notesSlide1.xml.rels", NOTES_SLIDE_RELS_XML),
+        ]);
+        write_zip_fixture(&source, &parts);
+        let manifest = import_pptx(&source, &path, &ImportOptions::new("orphan-note"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let slide = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &slide, 0),
+            0,
+        )
+        .unwrap();
+        let node = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.part == "ppt/notesSlides/notesSlide1.xml")
+            .unwrap();
+        apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION.into(),
+                document_id: manifest.document_id.clone(),
+                patch_id: "edit-orphan".into(),
+                base_revision: 1,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::TextSplice {
+                    node_id: node.node_id,
+                    start: 0,
+                    delete_count: 0,
+                    insert_text: "keep ".into(),
+                    precondition: NodePrecondition {
+                        node_hash: node.node_hash,
+                    },
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        let error = export_pptx(&bundle, &source, &output, &ExportOptions::default()).unwrap_err();
+        assert!(error.to_string().contains("edited after slide"), "{error}");
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn deleting_a_page_that_spans_chunks_takes_every_chunk_that_carries_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("dropped.pptx");
+        create_layout_fixture(&source);
+        // A deck written out one block per chunk: the page arrives as several
+        // chunks, each repeating the section that names its part.
+        let mut options = ImportOptions::new("split-slide");
+        options.chunk_soft_bytes = 1;
+        let manifest = import_pptx(&source, &bundle_path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let carriers = slide_page_chunks(&bundle, &manifest, "ppt/slides/slide2.xml");
+        assert!(
+            carriers.len() > 1,
+            "the fixture must spread one page over several chunks, got {}",
+            carriers.len()
+        );
+        // The patch may name any of them; the outline shows only the first, but a
+        // client that holds the last one must not be able to leave the rest.
+        let dropped = carriers.len();
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, carriers.last().unwrap(), 0),
+            0,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, manifest.chunk_count - dropped);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        assert!(
+            slide_page_chunks(&bundle, &head, "ppt/slides/slide2.xml").is_empty(),
+            "a chunk still carries the page the deck dropped"
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert!(!has_zip_entry(&exported, "ppt/slides/slide2.xml"));
+        assert!(!has_zip_entry(
+            &exported,
+            "ppt/slides/_rels/slide2.xml.rels"
+        ));
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/slides/slide1.xml"),
+            read_zip_entry(&source, "ppt/slides/slide1.xml")
+        );
+    }
+
+    #[test]
     fn moves_native_slide_text_shape_and_preserves_history_and_formatting() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source.pptx");
@@ -4012,6 +9213,119 @@ mod tests {
     }
 
     #[test]
+    fn formats_native_slide_runs_and_preserves_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("formatted.pptx");
+        create_styled_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("format-native-run"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let entries = extract_text_page(&bundle, None, 100).unwrap().entries;
+        let styled = entries
+            .iter()
+            .find(|entry| entry.text == "样式 😀")
+            .unwrap();
+        let plain = entries.iter().find(|entry| entry.text == "第二页").unwrap();
+        let styled_patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_30.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "native-format-r1".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxRunFormat {
+                node_id: styled.node_id.clone(),
+                format: PptxRunFormat {
+                    bold: Some(false),
+                    italic: None,
+                    underline: None,
+                    font_size_pt: Some(32.0),
+                    color: Some("#00aa00".to_string()),
+                },
+                precondition: NodePrecondition {
+                    node_hash: styled.node_hash.clone(),
+                },
+            }],
+        };
+        let result = apply_patch(&bundle, &styled_patch, 0).unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_DIRECT_RUN_FORMAT"));
+        let head = bundle.manifest().unwrap();
+        let html = bundle
+            .read_chunk(&bundle.read_index_page(&head, 0).unwrap().chunks[0])
+            .unwrap();
+        assert!(html.contains("data-hcd-run-edited=\"true\""));
+        assert!(html.contains("data-hcd-bold=\"0\""));
+        assert!(html.contains("data-hcd-font-size-pt=\"32.00\""));
+        assert!(html.contains("data-hcd-color=\"00AA00\""));
+        assert!(html.contains("font-size:32.00pt"));
+        assert!(html.contains("color:#00aa00"));
+        assert!(!html.contains("font-weight:700"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let plain_patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_30.to_string(),
+            document_id: manifest.document_id,
+            patch_id: "plain-format-r2".to_string(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxRunFormat {
+                node_id: plain.node_id.clone(),
+                format: PptxRunFormat {
+                    bold: Some(true),
+                    italic: Some(true),
+                    underline: Some(true),
+                    font_size_pt: None,
+                    color: None,
+                },
+                precondition: NodePrecondition {
+                    node_hash: plain.node_hash.clone(),
+                },
+            }],
+        };
+        assert_eq!(apply_patch(&bundle, &plain_patch, 1).unwrap().revision, 2);
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let styled_slide = read_zip_entry(&exported, &styled.source.part);
+        assert!(styled_slide.contains("b=\"0\""));
+        assert!(styled_slide.contains("sz=\"3200\""));
+        assert!(styled_slide.contains("i=\"1\""));
+        assert!(styled_slide.contains("u=\"sng\""));
+        assert!(styled_slide.contains("val=\"00AA00\""));
+        assert!(styled_slide.contains("样式 😀"));
+        let plain_slide = read_zip_entry(&exported, &plain.source.part);
+        assert!(plain_slide.contains("b=\"1\""));
+        assert!(plain_slide.contains("i=\"1\""));
+        assert!(plain_slide.contains("u=\"sng\""));
+        assert!(plain_slide.contains(">第二页<"));
+        let original = temp.path().join("original.pptx");
+        let report = export_pptx(
+            &bundle,
+            &source,
+            &original,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.level, FidelityLevel::Exact);
+        assert_eq!(
+            read_zip_entry(&original, &styled.source.part),
+            read_zip_entry(&source, &styled.source.part)
+        );
+    }
+
+    #[test]
     fn inserts_slide_shape_before_extension_list() {
         let source = b"<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"><p:cSld><p:spTree><p:cNvPr id=\"4\"/><p:extLst/></p:spTree></p:cSld></p:sld>";
         let shape = InsertedPptxShape {
@@ -4022,6 +9336,10 @@ mod tests {
             height_emu: 457_200,
             font_size_hundredths: 1_200,
             text: "new".to_string(),
+            format: PptxRunFormat::default(),
+            align: PptxShapeAlignPatch::default(),
+            font: None,
+            primitive: None,
         };
         let mut output = Vec::new();
         rewrite_text_part(
@@ -4030,10 +9348,354 @@ mod tests {
             &BTreeMap::new(),
             &[shape],
             &BTreeMap::new(),
+            &PptxRunEdits::default(),
+            &BTreeMap::new(),
         )
         .unwrap();
         let xml = String::from_utf8(output).unwrap();
         assert!(xml.find("HCD Text 5").unwrap() < xml.find("<p:extLst").unwrap());
+    }
+
+    /// `styled_fixture_parts` with the first page's single shape grown into the
+    /// shapes an alignment edit has to reach: one text body with three paragraphs
+    /// — a bare one, one whose properties already name an indent, a direction and
+    /// an alignment of their own, and an empty line — written beside a second shape
+    /// that must keep exactly what it was made with.
+    const ALIGNED_SLIDE1_XML: &str = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">"#,
+        r#"<p:cSld><p:spTree>"#,
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="3" name="Second"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>"#,
+        r#"<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4572000" cy="1828800"/></a:xfrm></p:spPr>"#,
+        r#"<p:txBody><a:bodyPr/><a:lstStyle/>"#,
+        r#"<a:p><a:r><a:t>第二页</a:t></a:r></a:p>"#,
+        r#"<a:p><a:pPr marL="45720" algn="l" rtl="0"><a:lnSpc><a:spcPct val="100000"/></a:lnSpc></a:pPr><a:r><a:t>缩进行</a:t></a:r></a:p>"#,
+        r#"<a:p/>"#,
+        r#"</p:txBody></p:sp>"#,
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="7" name="Kept"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>"#,
+        r#"<p:spPr><a:xfrm><a:off x="457200" y="457200"/><a:ext cx="1828800" cy="914400"/></a:xfrm></p:spPr>"#,
+        r#"<p:txBody><a:bodyPr anchor="t"/><a:lstStyle/>"#,
+        r#"<a:p><a:pPr algn="r"/><a:r><a:t>保持原样</a:t></a:r></a:p>"#,
+        r#"</p:txBody></p:sp>"#,
+        r#"</p:spTree></p:cSld></p:sld>"#,
+    );
+
+    fn create_aligned_fixture(path: &Path) {
+        let parts = styled_fixture_parts()
+            .into_iter()
+            .map(|part| {
+                if part.0 == "ppt/slides/slide1.xml" {
+                    (part.0, ALIGNED_SLIDE1_XML)
+                } else {
+                    part
+                }
+            })
+            .collect::<Vec<_>>();
+        write_zip_fixture(path, &parts);
+    }
+
+    fn shape_align(
+        document_id: &str,
+        node_id: String,
+        node_hash: String,
+        horizontal: Option<&str>,
+        vertical: Option<&str>,
+        base: u64,
+    ) -> PatchBatch {
+        PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_46.to_string(),
+            document_id: document_id.to_string(),
+            patch_id: format!("align-{node_id}-r{}", base + 1),
+            base_revision: base,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxShapeAlign {
+                node_id,
+                align: PptxShapeAlignPatch {
+                    horizontal: horizontal.map(str::to_string),
+                    vertical: vertical.map(str::to_string),
+                },
+                precondition: NodePrecondition { node_hash },
+            }],
+        }
+    }
+
+    #[test]
+    fn aligning_a_slide_shape_writes_every_paragraph_and_the_body_anchor() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("aligned.pptx");
+        let historical = temp.path().join("revision-zero.pptx");
+        create_aligned_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("align-shape"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let entries = extract_text_page(&bundle, None, 100).unwrap().entries;
+        let bare = entries.iter().find(|entry| entry.text == "第二页").unwrap();
+        let patch = shape_align(
+            &manifest.document_id,
+            bare.node_id.clone(),
+            bare.node_hash.clone(),
+            Some("center"),
+            Some("bottom"),
+            0,
+        );
+        let result = apply_patch(&bundle, &patch, 0).unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_DIRECT_SHAPE_ALIGN"));
+        let head = bundle.manifest().unwrap();
+        let html = slide_chunk_html(&bundle, &head, "ppt/slides/slide1.xml");
+        assert!(html.contains("data-hcd-align-edited=\"true\""), "{html}");
+        assert!(html.contains("data-hcd-horizontal=\"center\""));
+        assert!(html.contains("data-hcd-vertical=\"bottom\""));
+        assert!(html.contains("justify-content:flex-end"));
+        assert!(html.contains("text-align:center"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let slide = read_zip_entry(&exported, "ppt/slides/slide1.xml");
+        // The body takes the anchor, and every paragraph of the shape takes the
+        // alignment: the bare one gets properties written first, the one that
+        // already had them keeps its indent and direction, and the empty line is
+        // grown a paragraph-properties element of its own.
+        assert!(slide.contains("<a:bodyPr anchor=\"b\"/>"));
+        assert!(slide.contains("<a:p><a:pPr algn=\"ctr\"/><a:r>"));
+        assert!(slide.contains("marL=\"45720\" rtl=\"0\" algn=\"ctr\""));
+        assert!(slide.contains("<a:lnSpc><a:spcPct val=\"100000\"/></a:lnSpc>"));
+        assert!(slide.contains("<a:p><a:pPr algn=\"ctr\"/></a:p>"));
+        assert!(slide.contains("第二页"));
+        assert!(slide.contains("缩进行"));
+        // The shape nobody aligned is written the way the source had it.
+        assert!(slide.contains("<a:bodyPr anchor=\"t\"/>"));
+        assert!(slide.contains("<a:pPr algn=\"r\"/>"));
+        assert!(!slide.contains("anchor=\"ctr\""));
+        assert!(!slide.contains("algn=\"l\""));
+        let other = read_zip_entry(&exported, "ppt/slides/slide2.xml");
+        assert_eq!(other, read_zip_entry(&source, "ppt/slides/slide2.xml"));
+
+        let report = export_pptx(
+            &bundle,
+            &source,
+            &historical,
+            &ExportOptions {
+                revision: Some(0),
+                ..ExportOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.level, FidelityLevel::Exact);
+        assert_eq!(
+            read_zip_entry(&historical, "ppt/slides/slide1.xml"),
+            read_zip_entry(&source, "ppt/slides/slide1.xml")
+        );
+    }
+
+    #[test]
+    fn a_second_paragraph_alignment_only_moves_the_axis_it_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("moved.pptx");
+        create_aligned_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("align-one-axis"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let entries = extract_text_page(&bundle, None, 100).unwrap().entries;
+        let indented = entries.iter().find(|entry| entry.text == "缩进行").unwrap();
+        let first = shape_align(
+            &manifest.document_id,
+            indented.node_id.clone(),
+            indented.node_hash.clone(),
+            Some("right"),
+            Some("top"),
+            0,
+        );
+        assert_eq!(apply_patch(&bundle, &first, 0).unwrap().revision, 1);
+        // The next request names only the horizontal axis, and the vertical one it
+        // already settled on stays where it was — the way typing a new alignment
+        // into a desktop editor leaves the body anchor alone.
+        let second = shape_align(
+            &manifest.document_id,
+            indented.node_id.clone(),
+            indented.node_hash.clone(),
+            Some("distributed"),
+            None,
+            1,
+        );
+        assert_eq!(apply_patch(&bundle, &second, 1).unwrap().revision, 2);
+        let head = bundle.manifest().unwrap();
+        let html = slide_chunk_html(&bundle, &head, "ppt/slides/slide1.xml");
+        assert!(html.contains("data-hcd-horizontal=\"distributed\""));
+        assert!(html.contains("data-hcd-vertical=\"top\""));
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let slide = read_zip_entry(&exported, "ppt/slides/slide1.xml");
+        assert!(slide.contains("algn=\"dist\""));
+        assert!(slide.contains("<a:bodyPr anchor=\"t\"/>"));
+        assert!(!slide.contains("algn=\"ctr\""));
+        assert!(!slide.contains("anchor=\"b\""));
+    }
+
+    #[test]
+    fn an_alignment_the_part_has_no_shape_or_no_paragraph_for_is_refused() {
+        // A text body written without its properties and without a single
+        // paragraph: neither half of an alignment has anywhere to go here.
+        let body = b"<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id=\"4\" name=\"Body\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:txBody><a:lstStyle/></p:txBody></p:sp></p:spTree></p:cSld></p:sld>";
+        let mut missing = BTreeMap::new();
+        missing.insert(
+            9u32,
+            PptxShapeAlignPatch {
+                horizontal: Some("center".to_string()),
+                vertical: Some("bottom".to_string()),
+            },
+        );
+        let mut without_paragraphs = BTreeMap::new();
+        without_paragraphs.insert(
+            4u32,
+            PptxShapeAlignPatch {
+                horizontal: Some("center".to_string()),
+                vertical: None,
+            },
+        );
+        let mut without_body = BTreeMap::new();
+        without_body.insert(
+            4u32,
+            PptxShapeAlignPatch {
+                horizontal: None,
+                vertical: Some("top".to_string()),
+            },
+        );
+
+        let mut output = Vec::new();
+        let error = rewrite_text_part(
+            &mut body.as_slice(),
+            &mut output,
+            &BTreeMap::new(),
+            &[],
+            &BTreeMap::new(),
+            &PptxRunEdits::default(),
+            &missing,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("PPTX source shape 9 has no text body to anchor"),
+            "{error}"
+        );
+
+        let mut output = Vec::new();
+        let error = rewrite_text_part(
+            &mut body.as_slice(),
+            &mut output,
+            &BTreeMap::new(),
+            &[],
+            &BTreeMap::new(),
+            &PptxRunEdits::default(),
+            &without_paragraphs,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("PPTX source shape 4 has no paragraph to align"),
+            "{error}"
+        );
+
+        // The shape the request names is in the page, but its body carries no
+        // properties element to put an anchor on.
+        let mut output = Vec::new();
+        let error = rewrite_text_part(
+            &mut body.as_slice(),
+            &mut output,
+            &BTreeMap::new(),
+            &[],
+            &BTreeMap::new(),
+            &PptxRunEdits::default(),
+            &without_body,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("PPTX source shape 4 has no text body to anchor"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_text_box_hcd_created_keeps_the_alignment_it_was_drawn_with() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("aligned-box.pptx");
+        create_aligned_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("align-created-box"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let descriptor = &bundle.read_index_page(&manifest, 0).unwrap().chunks[0];
+        let chunk_id = descriptor.chunk_id.clone();
+        let slide_part = bundle.read_map(descriptor).unwrap().entries[0]
+            .source
+            .part
+            .clone();
+        let inserted = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_16.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "insert-then-align".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxTextInsert {
+                chunk_id,
+                slide_part: slide_part.clone(),
+                x_emu: 914_400,
+                y_emu: 5_000_000,
+                width_emu: 2_000_000,
+                height_emu: 457_200,
+                font_size_pt: 18.0,
+                text: "新框".to_string(),
+            }],
+        };
+        assert_eq!(apply_patch(&bundle, &inserted, 0).unwrap().revision, 1);
+        let box_node = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.text == "新框")
+            .unwrap();
+        let align = shape_align(
+            &manifest.document_id,
+            box_node.node_id.clone(),
+            box_node.node_hash.clone(),
+            Some("center"),
+            Some("bottom"),
+            1,
+        );
+        assert_eq!(apply_patch(&bundle, &align, 1).unwrap().revision, 2);
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let slide = read_zip_entry(&exported, &slide_part);
+        assert!(
+            slide.contains("<a:bodyPr wrap=\"square\" lIns=\"0\" tIns=\"0\" rIns=\"0\" bIns=\"0\" anchor=\"b\"/>"),
+            "{slide}"
+        );
+        assert!(slide.contains("<a:p><a:pPr algn=\"ctr\"/><a:r>"));
+        assert!(slide.contains("新框"));
     }
 
     struct EofTrackingReader {
@@ -4140,6 +9802,7 @@ mod tests {
             document_id: "painted-pptx",
             part: "ppt/slides/slide1.xml",
             region: "slide",
+            related_part: None,
             writer: &mut writer,
             emit: &mut emit,
             soft_bytes: MAX_CHUNK_BYTES,
@@ -4151,6 +9814,10 @@ mod tests {
             slide_width_emu: 12_192_000,
             slide_height_emu: 6_858_000,
             background: SlidePaint::default(),
+            animation_attributes: String::new(),
+            design: None,
+            inheritance: None,
+            groups: group_import::GroupImport::default(),
         };
         let xml = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:bg><p:bgPr><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="0D1B2A"/></a:gs><a:gs pos="100000"><a:srgbClr val="0A1628"/></a:gs></a:gsLst><a:lin ang="5400000"/></a:gradFill></p:bgPr></p:bg><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="7" name="Painted ellipse"/></p:nvSpPr><p:spPr><a:xfrm rot="2700000"><a:off x="914400" y="457200"/><a:ext cx="1828800" cy="914400"/></a:xfrm><a:prstGeom prst="ellipse"/><a:solidFill><a:schemeClr val="accent1"><a:alpha val="8000"/></a:schemeClr></a:solidFill><a:ln w="25400"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr anchor="b" lIns="12700"/><a:p><a:r><a:t>styled</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#;
         let mut source = xml.as_bytes();
@@ -4318,6 +9985,7 @@ mod tests {
             document_id: "oversized-pptx-table",
             part: "ppt/slides/slide1.xml",
             region: "slide",
+            related_part: None,
             writer: &mut writer,
             emit: &mut emit,
             soft_bytes: MAX_CHUNK_BYTES,
@@ -4329,6 +9997,10 @@ mod tests {
             slide_width_emu: 12_192_000,
             slide_height_emu: 6_858_000,
             background: SlidePaint::default(),
+            animation_attributes: String::new(),
+            design: None,
+            inheritance: None,
+            groups: group_import::GroupImport::default(),
         };
         let xml = format!(
             r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="9" name="Oversized"/></p:nvGraphicFramePr><a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w="1"/></a:tblGrid><a:tr h="1"><a:tc gridSpan="{}"><a:txBody><a:p><a:r><a:t>x</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>"#,
@@ -4374,6 +10046,7 @@ mod tests {
             document_id: "progressive-pptx-table",
             part: "ppt/slides/slide1.xml",
             region: "slide",
+            related_part: None,
             writer: &mut writer,
             emit: &mut emit,
             soft_bytes: 32 * 1024,
@@ -4385,6 +10058,10 @@ mod tests {
             slide_width_emu: 12_192_000,
             slide_height_emu: 6_858_000,
             background: SlidePaint::default(),
+            animation_attributes: String::new(),
+            design: None,
+            inheritance: None,
+            groups: group_import::GroupImport::default(),
         };
         let payload = "x".repeat(2_048);
         let mut xml = String::from(
@@ -4460,6 +10137,7 @@ mod tests {
             document_id: "oversized-pptx-merge",
             part: "ppt/slides/slide1.xml",
             region: "slide",
+            related_part: None,
             writer: &mut writer,
             emit: &mut emit,
             soft_bytes: 1,
@@ -4471,6 +10149,10 @@ mod tests {
             slide_width_emu: 12_192_000,
             slide_height_emu: 6_858_000,
             background: SlidePaint::default(),
+            animation_attributes: String::new(),
+            design: None,
+            inheritance: None,
+            groups: group_import::GroupImport::default(),
         };
         // Keep every XML text node comfortably below the node limit while making the
         // indivisible three-row merge group larger than a single HCD chunk.
@@ -4540,12 +10222,1654 @@ mod tests {
         contents
     }
 
+    fn has_zip_entry(path: &Path, name: &str) -> bool {
+        let file = File::open(path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let found = archive.by_name(name).is_ok();
+        found
+    }
+
+    fn read_zip_bytes(path: &Path, name: &str) -> Vec<u8> {
+        let file = File::open(path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut entry = archive.by_name(name).unwrap();
+        let mut contents = Vec::new();
+        entry.read_to_end(&mut contents).unwrap();
+        contents
+    }
+
+    /// The patch that asks one page to be copied.
+    fn copy_slide_patch(document_id: &str, chunk_id: &str, base: u64) -> PatchBatch {
+        PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_44.to_string(),
+            document_id: document_id.to_string(),
+            patch_id: format!("copy-{chunk_id}-{base}"),
+            base_revision: base,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideCopy {
+                chunk_id: chunk_id.to_string(),
+            }],
+        }
+    }
+
+    /// The pages a presentation's own list shows, resolved through its
+    /// relationships to the parts they name, in the order the list holds them —
+    /// which is the order an application opens the deck in.
+    fn slide_part_order(presentation: &str, relationships: &str) -> Vec<String> {
+        let addressed: Vec<(String, String)> = read_pptx_relationships(
+            relationships.as_bytes(),
+            "ppt/presentation.xml",
+            "ppt/_rels/presentation.xml.rels",
+        )
+        .unwrap()
+        .into_iter()
+        .filter_map(|relationship| Some((relationship.id, relationship.target?)))
+        .filter(|(_, target)| target.starts_with("ppt/slides/"))
+        .collect();
+        slide_list_order(presentation)
+            .into_iter()
+            .map(|id| {
+                addressed
+                    .iter()
+                    .find(|(entry_id, _)| *entry_id == id)
+                    .map(|(_, target)| target.clone())
+                    .unwrap_or_else(|| panic!("a slide entry naming {id} with no relationship"))
+            })
+            .collect()
+    }
+
+    /// Every part name a package holds, so an export can be checked against the
+    /// package it started from one entry at a time.
+    fn zip_entry_names(path: &Path) -> Vec<String> {
+        let file = File::open(path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        (0..archive.len())
+            .map(|index| archive.by_index(index).unwrap().name().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_copied_page_is_written_as_a_slide_part_the_package_did_not_carry() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("copied.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("copy-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunk_id = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        let result = apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &chunk_id, 0),
+            0,
+        )
+        .unwrap();
+        assert_eq!(result.revision, 1);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_COPIED"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        assert_eq!(head.chunk_count, manifest.chunk_count + 1);
+        // The copy stands right behind the page it was made from, which is the
+        // first page of this deck.
+        assert_eq!(
+            index_slide_order(&bundle, &head),
+            [
+                "ppt/slides/slide2.xml",
+                "ppt/slides/slide3.xml",
+                "ppt/slides/slide1.xml"
+            ]
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "PPTX_SLIDE_COPY"
+                    && warning
+                        .source_part
+                        .as_deref()
+                        .is_some_and(|part| part == "ppt/slides/slide3.xml")),
+            "{:?}",
+            report.warnings
+        );
+
+        // The package gains exactly the page and the relationship list the copy
+        // needs, and nothing else is moved.
+        let mut expected_names = zip_entry_names(&source);
+        expected_names.push("ppt/slides/slide3.xml".to_string());
+        expected_names.push("ppt/slides/_rels/slide3.xml.rels".to_string());
+        expected_names.sort();
+        let mut written_names = zip_entry_names(&exported);
+        written_names.sort();
+        assert_eq!(written_names, expected_names);
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/slides/slide3.xml"),
+            read_zip_entry(&source, "ppt/slides/slide2.xml")
+        );
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/slides/_rels/slide3.xml.rels"),
+            read_zip_entry(&source, "ppt/slides/_rels/slide2.xml.rels")
+        );
+        // The three lists each gained one entry, and nothing else moved: the page
+        // it was copied from keeps its own bytes, its own relationship, its own
+        // entry, and so do the layout and the media it shares with the copy.
+        assert!(read_zip_entry(&exported, "[Content_Types].xml")
+            .contains(r##"PartName="/ppt/slides/slide3.xml""##));
+        assert_eq!(
+            slide_part_order(
+                &read_zip_entry(&exported, "ppt/presentation.xml"),
+                &read_zip_entry(&exported, "ppt/_rels/presentation.xml.rels"),
+            ),
+            [
+                "ppt/slides/slide2.xml",
+                "ppt/slides/slide3.xml",
+                "ppt/slides/slide1.xml"
+            ]
+        );
+        // Everything the copy did not need is left exactly where it was: the page
+        // it was copied from keeps its own bytes and its own relationship list, and
+        // so do the layout and the media the two pages share.
+        for name in zip_entry_names(&source) {
+            if matches!(
+                name.as_str(),
+                "[Content_Types].xml" | "ppt/presentation.xml" | "ppt/_rels/presentation.xml.rels"
+            ) {
+                continue;
+            }
+            assert_eq!(
+                read_zip_entry(&exported, &name),
+                read_zip_entry(&source, &name),
+                "{name} was rewritten for a copy of it"
+            );
+        }
+
+        // Re-importing the export shows three pages, and the copy is one of them.
+        let reopened_path = temp.path().join("reopened.hcd");
+        let reopened = import_pptx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("copy-slide"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened_bundle = Bundle::open(&reopened_path).unwrap();
+        assert_eq!(
+            index_slide_order(&reopened_bundle, &reopened),
+            [
+                "ppt/slides/slide2.xml",
+                "ppt/slides/slide3.xml",
+                "ppt/slides/slide1.xml"
+            ]
+        );
+        assert!(validate_bundle(&reopened_bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn an_edit_on_a_copied_page_is_rebuilt_onto_the_page_it_was_made_from() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("edited-copy.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("copy-then-edit-the-copy"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunk_id = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &chunk_id, 0),
+            0,
+        )
+        .unwrap();
+
+        // The copy is addressed by its own name and holds its own node ids, which
+        // are not the ids of the page it was made from.
+        let entries = extract_text_page(&bundle, None, 200).unwrap().entries;
+        let text_node = |part: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.source.part == part && entry.text == "样式 😀")
+                .cloned()
+                .unwrap_or_else(|| panic!("no text node naming {part}"))
+        };
+        let copied = text_node("ppt/slides/slide3.xml");
+        assert_ne!(copied.node_id, text_node("ppt/slides/slide2.xml").node_id);
+
+        let editor = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "edit-the-copy".to_string(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: copied.node_id.clone(),
+                start: 0,
+                delete_count: 2,
+                insert_text: "已复制".to_string(),
+                precondition: NodePrecondition {
+                    node_hash: copied.node_hash.clone(),
+                },
+            }],
+        };
+        let result = apply_patch(&bundle, &editor, 1).unwrap();
+        assert_eq!(result.revision, 2);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        let head = bundle.manifest().unwrap();
+        assert_eq!(
+            index_slide_order(&bundle, &head),
+            [
+                "ppt/slides/slide2.xml",
+                "ppt/slides/slide3.xml",
+                "ppt/slides/slide1.xml"
+            ]
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "PPTX_SLIDE_COPY"
+                    && warning
+                        .source_part
+                        .as_deref()
+                        .is_some_and(|part| part == "ppt/slides/slide3.xml")
+                    && warning
+                        .message
+                        .contains("the copy carries the edits this history wrote on it")),
+            "{:?}",
+            report.warnings
+        );
+
+        // The copy has no part in the source package to rewrite in place, so it is
+        // rebuilt onto the page it was made from: the new words land on the copy,
+        // the formatting the page was copied with stays, and the page it was copied
+        // from keeps its own words.
+        let copy = read_zip_entry(&exported, "ppt/slides/slide3.xml");
+        assert!(copy.contains("已复制 😀"), "{copy}");
+        assert!(!copy.contains("样式"), "{copy}");
+        assert!(copy.contains("sz=\"2400\""), "{copy}");
+        assert!(copy.contains("rot=\"5400000\""), "{copy}");
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/slides/slide2.xml"),
+            read_zip_entry(&source, "ppt/slides/slide2.xml")
+        );
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/slides/_rels/slide3.xml.rels"),
+            read_zip_entry(&source, "ppt/slides/_rels/slide2.xml.rels")
+        );
+
+        // The package still gains only the copy's own page and relationship list.
+        let mut expected_names = zip_entry_names(&source);
+        expected_names.push("ppt/slides/slide3.xml".to_string());
+        expected_names.push("ppt/slides/_rels/slide3.xml.rels".to_string());
+        expected_names.sort();
+        let mut written_names = zip_entry_names(&exported);
+        written_names.sort();
+        assert_eq!(written_names, expected_names);
+        assert_eq!(
+            slide_part_order(
+                &read_zip_entry(&exported, "ppt/presentation.xml"),
+                &read_zip_entry(&exported, "ppt/_rels/presentation.xml.rels"),
+            ),
+            [
+                "ppt/slides/slide2.xml",
+                "ppt/slides/slide3.xml",
+                "ppt/slides/slide1.xml"
+            ]
+        );
+
+        // Re-importing the export shows the edit on the copy alone.
+        let reopened_path = temp.path().join("reopened.hcd");
+        let reopened_manifest = import_pptx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("copy-then-edit-the-copy"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened = Bundle::open(&reopened_path).unwrap();
+        assert!(validate_bundle(&reopened).unwrap().valid);
+        let texts = extract_text_page(&reopened, None, 200).unwrap().entries;
+        assert!(
+            texts
+                .iter()
+                .any(|entry| entry.source.part == "ppt/slides/slide3.xml"
+                    && entry.text == "已复制 😀")
+        );
+        assert!(texts
+            .iter()
+            .any(|entry| entry.source.part == "ppt/slides/slide2.xml" && entry.text == "样式 😀"));
+        assert_eq!(
+            index_slide_order(&reopened, &reopened_manifest),
+            [
+                "ppt/slides/slide2.xml",
+                "ppt/slides/slide3.xml",
+                "ppt/slides/slide1.xml"
+            ]
+        );
+    }
+
+    #[test]
+    fn edited_and_created_slide_copies_export_independent_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let path = temp.path().join("bundle");
+        let exported = temp.path().join("copies.pptx");
+        create_layout_fixture(&source);
+        let manifest =
+            import_pptx(&source, &path, &ImportOptions::new("snapshots"), |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let edit = |part: &str, before: &str, after: &str| {
+            let revision = bundle.manifest().unwrap().revision;
+            let node = extract_text_page(&bundle, None, 200)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|entry| entry.source.part == part && entry.text == before)
+                .unwrap();
+            let patch = PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION.to_string(),
+                document_id: manifest.document_id.clone(),
+                patch_id: format!("edit-{revision}"),
+                base_revision: revision,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::TextSplice {
+                    node_id: node.node_id,
+                    start: 0,
+                    delete_count: before.chars().count(),
+                    insert_text: after.to_string(),
+                    precondition: NodePrecondition {
+                        node_hash: node.node_hash,
+                    },
+                }],
+            };
+            apply_patch(&bundle, &patch, revision).unwrap();
+        };
+        let copy = |part: &str| {
+            let head = bundle.manifest().unwrap();
+            let chunk = slide_page_chunk(&bundle, &head, part);
+            apply_patch(
+                &bundle,
+                &copy_slide_patch(&manifest.document_id, &chunk, head.revision),
+                head.revision,
+            )
+            .unwrap();
+        };
+        edit("ppt/slides/slide2.xml", "样式 😀", "Snapshot");
+        copy("ppt/slides/slide2.xml");
+        edit("ppt/slides/slide2.xml", "Snapshot", "Source later");
+        copy("ppt/slides/slide3.xml");
+        edit("ppt/slides/slide3.xml", "Snapshot", "Copy later");
+
+        let head = bundle.manifest().unwrap();
+        apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_41.to_string(),
+                document_id: manifest.document_id.clone(),
+                patch_id: "add-blank".into(),
+                base_revision: head.revision,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::PptxSlideAdd {}],
+            },
+            head.revision,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        let chunk = slide_page_chunk(&bundle, &head, "ppt/slides/slide5.xml");
+        apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_16.to_string(),
+                document_id: manifest.document_id.clone(),
+                patch_id: "new-text".into(),
+                base_revision: head.revision,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::PptxTextInsert {
+                    chunk_id: chunk,
+                    slide_part: "ppt/slides/slide5.xml".into(),
+                    x_emu: 914_400,
+                    y_emu: 2_000_000,
+                    width_emu: 4_000_000,
+                    height_emu: 1_000_000,
+                    font_size_pt: 20.0,
+                    text: "New snapshot".into(),
+                }],
+            },
+            head.revision,
+        )
+        .unwrap();
+        copy("ppt/slides/slide5.xml");
+        edit("ppt/slides/slide5.xml", "New snapshot", "New later");
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+
+        for (part, text) in [
+            ("slide2.xml", "Source later"),
+            ("slide3.xml", "Copy later"),
+            ("slide4.xml", "Snapshot"),
+            ("slide5.xml", "New later"),
+            ("slide6.xml", "New snapshot"),
+        ] {
+            let xml = read_zip_entry(&exported, &format!("ppt/slides/{part}"));
+            assert!(xml.contains(text), "{part} lacks {text}: {xml}");
+        }
+        assert!(
+            read_zip_entry(&exported, "ppt/slides/_rels/slide6.xml.rels").contains("slideLayout")
+        );
+        let reopened = temp.path().join("reopened");
+        import_pptx(
+            &exported,
+            &reopened,
+            &ImportOptions::new("reopened"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(
+            validate_bundle(&Bundle::open(&reopened).unwrap())
+                .unwrap()
+                .valid
+        );
+
+        // Removing either copied ancestor must not remove the independent
+        // copy, even when the ultimate ancestor was an HCD-created page.
+        for part in ["ppt/slides/slide3.xml", "ppt/slides/slide5.xml"] {
+            let head = bundle.manifest().unwrap();
+            let chunk = slide_page_chunk(&bundle, &head, part);
+            apply_patch(
+                &bundle,
+                &drop_slide_patch(&manifest.document_id, &chunk, head.revision),
+                head.revision,
+            )
+            .unwrap();
+        }
+        let after_deletion = temp.path().join("deleted-ancestors.pptx");
+        export_pptx(&bundle, &source, &after_deletion, &ExportOptions::default()).unwrap();
+        assert!(!has_zip_entry(&after_deletion, "ppt/slides/slide3.xml"));
+        assert!(!has_zip_entry(&after_deletion, "ppt/slides/slide5.xml"));
+        assert!(read_zip_entry(&after_deletion, "ppt/slides/slide4.xml").contains("Snapshot"));
+        assert!(read_zip_entry(&after_deletion, "ppt/slides/slide6.xml").contains("New snapshot"));
+    }
+
+    #[test]
+    fn a_page_that_points_at_nothing_copies_with_an_empty_relationship_list() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("bare.pptx");
+        create_styled_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("copy-bare"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        // The first page of this deck names nothing, so the package holds no
+        // relationship list under its name at all.
+        assert!(!has_zip_entry(&source, "ppt/slides/_rels/slide1.xml.rels"));
+        let chunk_id = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide1.xml");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &chunk_id, 0),
+            0,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        assert_eq!(
+            index_slide_order(&bundle, &head),
+            [
+                "ppt/slides/slide2.xml",
+                "ppt/slides/slide1.xml",
+                "ppt/slides/slide3.xml"
+            ]
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        // The copy gets a list with nothing in it — there was nothing to carry over
+        // — so its name resolves the way the page it was made from does.
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/slides/_rels/slide3.xml.rels"),
+            PPTX_EMPTY_RELATIONSHIPS
+        );
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/slides/slide3.xml"),
+            read_zip_entry(&source, "ppt/slides/slide1.xml")
+        );
+        let mut expected_names = zip_entry_names(&source);
+        expected_names.push("ppt/slides/slide3.xml".to_string());
+        expected_names.push("ppt/slides/_rels/slide3.xml.rels".to_string());
+        expected_names.sort();
+        let mut written_names = zip_entry_names(&exported);
+        written_names.sort();
+        assert_eq!(written_names, expected_names);
+        assert_eq!(
+            slide_part_order(
+                &read_zip_entry(&exported, "ppt/presentation.xml"),
+                &read_zip_entry(&exported, "ppt/_rels/presentation.xml.rels"),
+            ),
+            [
+                "ppt/slides/slide2.xml",
+                "ppt/slides/slide1.xml",
+                "ppt/slides/slide3.xml"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_copy_outlives_the_page_it_was_made_from() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("orphan.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("copy-then-drop-the-original"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunk_id = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &chunk_id, 0),
+            0,
+        )
+        .unwrap();
+        apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_42.to_string(),
+                document_id: manifest.document_id.clone(),
+                patch_id: "drop-the-original".to_string(),
+                base_revision: 1,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::PptxSlideDelete {
+                    chunk_id: chunk_id.clone(),
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        assert_eq!(
+            index_slide_order(&bundle, &head),
+            ["ppt/slides/slide3.xml", "ppt/slides/slide1.xml"]
+        );
+        assert!(validate_bundle(&bundle).unwrap().valid);
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_COPY"),);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "PPTX_SLIDE_DELETE"
+                && warning
+                    .source_part
+                    .as_deref()
+                    .is_some_and(|part| part == "ppt/slides/slide2.xml")));
+
+        // The page it was copied from leaves the package; the copy stays, holding
+        // what that page said when the copy was made. This is a move in all but
+        // name, and it works because the copy is written from the source before the
+        // source's own entry is taken away.
+        assert_eq!(
+            read_zip_entry(&exported, "ppt/slides/slide3.xml"),
+            read_zip_entry(&source, "ppt/slides/slide2.xml")
+        );
+        let mut expected_names: Vec<String> = zip_entry_names(&source)
+            .into_iter()
+            .filter(|name| {
+                name != "ppt/slides/slide2.xml" && name != "ppt/slides/_rels/slide2.xml.rels"
+            })
+            .collect();
+        expected_names.push("ppt/slides/slide3.xml".to_string());
+        expected_names.push("ppt/slides/_rels/slide3.xml.rels".to_string());
+        expected_names.sort();
+        let mut written_names = zip_entry_names(&exported);
+        written_names.sort();
+        assert_eq!(written_names, expected_names);
+        let content_types = read_zip_entry(&exported, "[Content_Types].xml");
+        assert!(content_types.contains(r##"PartName="/ppt/slides/slide3.xml""##));
+        assert!(!content_types.contains(r##"PartName="/ppt/slides/slide2.xml""##));
+        assert_eq!(
+            slide_part_order(
+                &read_zip_entry(&exported, "ppt/presentation.xml"),
+                &read_zip_entry(&exported, "ppt/_rels/presentation.xml.rels"),
+            ),
+            ["ppt/slides/slide3.xml", "ppt/slides/slide1.xml"]
+        );
+
+        let reopened_path = temp.path().join("reopened.hcd");
+        let reopened = import_pptx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("copy-then-drop-the-original"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let reopened_bundle = Bundle::open(&reopened_path).unwrap();
+        assert_eq!(
+            index_slide_order(&reopened_bundle, &reopened),
+            ["ppt/slides/slide3.xml", "ppt/slides/slide1.xml"]
+        );
+    }
+
+    #[test]
+    fn a_page_copied_and_deleted_again_writes_the_package_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("cancelled.pptx");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("copy-then-drop"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunk_id = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &chunk_id, 0),
+            0,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        let copy_chunk = slide_page_chunk(&bundle, &head, "ppt/slides/slide3.xml");
+        apply_patch(
+            &bundle,
+            &PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION_42.to_string(),
+                document_id: manifest.document_id.clone(),
+                patch_id: "drop-the-copy".to_string(),
+                base_revision: 1,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::PptxSlideDelete {
+                    chunk_id: copy_chunk,
+                }],
+            },
+            1,
+        )
+        .unwrap();
+        assert!(validate_bundle(&bundle).unwrap().valid);
+        assert_eq!(
+            index_slide_order(&bundle, &bundle.manifest().unwrap()),
+            ["ppt/slides/slide2.xml", "ppt/slides/slide1.xml"]
+        );
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        // A page invented and dropped again inside one history leaves no trace:
+        // nothing was written for it, so nothing had to be taken away either.
+        assert_eq!(zip_entry_names(&exported), zip_entry_names(&source));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.code == "PPTX_SLIDE_COPY"
+                    && warning
+                        .message
+                        .contains("copied and deleted inside this history")),
+            "{:?}",
+            report.warnings
+        );
+        for name in zip_entry_names(&source) {
+            assert_eq!(
+                read_zip_entry(&exported, &name),
+                read_zip_entry(&source, &name),
+                "{name} was rewritten for a page that is not there"
+            );
+        }
+    }
+
+    #[test]
+    fn copying_a_slide_gives_each_copy_its_own_notes_and_back_reference() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        let exported = temp.path().join("with-notes.pptx");
+        create_notes_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("copy-notes"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let chunk_id = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &chunk_id, 0),
+            0,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        let first_copy = slide_page_chunk(&bundle, &head, "ppt/slides/slide3.xml");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &first_copy, 1),
+            1,
+        )
+        .unwrap();
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        for (slide, note) in [(2, 1), (3, 2), (4, 3)] {
+            let rels = read_zip_entry(
+                &exported,
+                &format!("ppt/slides/_rels/slide{slide}.xml.rels"),
+            );
+            assert!(
+                rels.contains(&format!("../notesSlides/notesSlide{note}.xml")),
+                "{rels}"
+            );
+            let notes = read_zip_entry(&exported, &format!("ppt/notesSlides/notesSlide{note}.xml"));
+            assert!(notes.contains("讲稿 😀"));
+            let notes_rels = read_zip_entry(
+                &exported,
+                &format!("ppt/notesSlides/_rels/notesSlide{note}.xml.rels"),
+            );
+            assert!(
+                notes_rels.contains(&format!("../slides/slide{slide}.xml")),
+                "{notes_rels}"
+            );
+            assert!(read_zip_entry(&exported, "[Content_Types].xml")
+                .contains(&format!("/ppt/notesSlides/notesSlide{note}.xml")));
+        }
+        // A copied note survives deletion of the source slide and its note.
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &chunk_id, 2),
+            2,
+        )
+        .unwrap();
+        let after = temp.path().join("source-deleted.pptx");
+        export_pptx(&bundle, &source, &after, &ExportOptions::default()).unwrap();
+        assert!(!has_zip_entry(&after, "ppt/notesSlides/notesSlide1.xml"));
+        assert!(has_zip_entry(&after, "ppt/notesSlides/notesSlide2.xml"));
+        assert!(has_zip_entry(&after, "ppt/notesSlides/notesSlide3.xml"));
+        let reopened = temp.path().join("reopened.hcd");
+        import_pptx(&after, &reopened, &ImportOptions::new("reopened"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            validate_bundle(&Bundle::open(reopened).unwrap())
+                .unwrap()
+                .valid
+        );
+    }
+
+    #[test]
+    fn copying_a_slide_duplicates_native_charts_in_nonstandard_part_locations() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/ppt/charts/charts-column.pptx");
+        let bundle_path = temp.path().join("source.hcd");
+        let exported = temp.path().join("copied.pptx");
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("copy-native-chart"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let original = "ppt/slides/slide1.xml";
+        let chunk = slide_page_chunk(&bundle, &manifest, original);
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &chunk, 0),
+            0,
+        )
+        .unwrap();
+        let copied = bundle.revision(1).unwrap().slide_copies[0]
+            .slide_part
+            .clone();
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let original_rels = slide_relationships_part(original).unwrap();
+        let copied_rels = slide_relationships_part(&copied).unwrap();
+        let old = read_pptx_relationships(
+            read_zip_entry(&exported, &original_rels).as_bytes(),
+            original,
+            &original_rels,
+        )
+        .unwrap();
+        let new = read_pptx_relationships(
+            read_zip_entry(&exported, &copied_rels).as_bytes(),
+            &copied,
+            &copied_rels,
+        )
+        .unwrap();
+        let charts: Vec<_> = old
+            .iter()
+            .filter(|rel| rel.kind.ends_with("/chart"))
+            .collect();
+        assert!(!charts.is_empty());
+        for chart in charts {
+            let original_chart = chart.target.as_ref().unwrap();
+            assert!(original_chart.starts_with("ppt/slides/charts/"));
+            let copied_chart = new
+                .iter()
+                .find(|rel| rel.id == chart.id)
+                .unwrap()
+                .target
+                .as_ref()
+                .unwrap();
+            assert_ne!(original_chart, copied_chart);
+            assert_eq!(
+                read_zip_entry(&exported, original_chart),
+                read_zip_entry(&exported, copied_chart)
+            );
+            assert!(read_zip_entry(&exported, "[Content_Types].xml")
+                .contains(&format!("/{copied_chart}")));
+        }
+        let reopened = temp.path().join("reopened.hcd");
+        import_pptx(
+            &exported,
+            &reopened,
+            &ImportOptions::new("reopened"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(
+            validate_bundle(&Bundle::open(reopened).unwrap())
+                .unwrap()
+                .valid
+        );
+    }
+
+    #[test]
+    fn copied_notes_capture_the_revision_at_which_the_slide_was_copied() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let path = temp.path().join("bundle");
+        create_notes_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &path,
+            &ImportOptions::new("note-snapshots"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let slide = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        let edit_note = |text: &str| {
+            let head = bundle.manifest().unwrap();
+            let node = extract_text_page(&bundle, None, 100)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|entry| entry.source.part == "ppt/notesSlides/notesSlide1.xml")
+                .unwrap();
+            let patch = PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION.into(),
+                document_id: manifest.document_id.clone(),
+                patch_id: format!("note-{}", head.revision),
+                base_revision: head.revision,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::TextSplice {
+                    node_id: node.node_id,
+                    start: 0,
+                    delete_count: node.text.chars().count(),
+                    insert_text: text.into(),
+                    precondition: NodePrecondition {
+                        node_hash: node.node_hash,
+                    },
+                }],
+            };
+            apply_patch(&bundle, &patch, head.revision).unwrap();
+        };
+        edit_note("first version");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &slide, 1),
+            1,
+        )
+        .unwrap();
+        edit_note("second version");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &slide, 3),
+            3,
+        )
+        .unwrap();
+        let first_copy = slide_page_chunk(
+            &bundle,
+            &bundle.manifest().unwrap(),
+            "ppt/slides/slide3.xml",
+        );
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &first_copy, 4),
+            4,
+        )
+        .unwrap();
+        edit_note("latest version");
+        let output = temp.path().join("snapshots.pptx");
+        export_pptx(&bundle, &source, &output, &ExportOptions::default()).unwrap();
+        for (part, expected) in [
+            (1, "latest version"),
+            (2, "first version"),
+            (3, "second version"),
+            (4, "first version"),
+        ] {
+            let xml = read_zip_entry(&output, &format!("ppt/notesSlides/notesSlide{part}.xml"));
+            assert!(xml.contains(expected), "notes {part}: {xml}");
+        }
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &slide, 6),
+            6,
+        )
+        .unwrap();
+        let after_deletion = temp.path().join("after-deletion.pptx");
+        export_pptx(&bundle, &source, &after_deletion, &ExportOptions::default()).unwrap();
+        assert!(!has_zip_entry(
+            &after_deletion,
+            "ppt/notesSlides/notesSlide1.xml"
+        ));
+        assert!(
+            read_zip_entry(&after_deletion, "ppt/notesSlides/notesSlide2.xml")
+                .contains("first version")
+        );
+        assert!(
+            read_zip_entry(&after_deletion, "ppt/notesSlides/notesSlide3.xml")
+                .contains("second version")
+        );
+        assert!(
+            read_zip_entry(&after_deletion, "ppt/notesSlides/notesSlide4.xml")
+                .contains("first version")
+        );
+    }
+
+    #[test]
+    fn copied_notes_keep_their_own_run_format() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let path = temp.path().join("bundle");
+        let output = temp.path().join("formatted-notes.pptx");
+        create_notes_fixture(&source);
+        let manifest = import_pptx(&source, &path, &ImportOptions::new("note-format"), |_| {
+            Ok(())
+        })
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let node = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.part == "ppt/notesSlides/notesSlide1.xml")
+            .unwrap();
+        let format = |revision: u64, bold: bool, color: &str| PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_30.into(),
+            document_id: manifest.document_id.clone(),
+            patch_id: format!("format-{revision}"),
+            base_revision: revision,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxRunFormat {
+                node_id: node.node_id.clone(),
+                format: PptxRunFormat {
+                    bold: Some(bold),
+                    color: Some(color.into()),
+                    ..Default::default()
+                },
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash.clone(),
+                },
+            }],
+        };
+        apply_patch(&bundle, &format(0, true, "#cc2244"), 0).unwrap();
+        let slide = slide_page_chunk(
+            &bundle,
+            &bundle.manifest().unwrap(),
+            "ppt/slides/slide2.xml",
+        );
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &slide, 1),
+            1,
+        )
+        .unwrap();
+        apply_patch(&bundle, &format(2, false, "#2244cc"), 2).unwrap();
+        export_pptx(&bundle, &source, &output, &ExportOptions::default()).unwrap();
+        let original = read_zip_entry(&output, "ppt/notesSlides/notesSlide1.xml");
+        let copied = read_zip_entry(&output, "ppt/notesSlides/notesSlide2.xml");
+        assert!(
+            original.contains("b=\"0\"") && original.contains("2244CC"),
+            "{original}"
+        );
+        assert!(
+            copied.contains("b=\"1\"") && copied.contains("CC2244"),
+            "{copied}"
+        );
+    }
+
+    #[test]
+    fn copied_notes_are_immediately_independent_and_follow_slide_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let path = temp.path().join("bundle");
+        create_notes_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &path,
+            &ImportOptions::new("editable-notes"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let slide = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        let note_part = |slide_part: &str| {
+            let head = bundle.manifest().unwrap();
+            let chunk = slide_page_chunk(&bundle, &head, slide_part);
+            let descriptor = (0..head.index_page_count)
+                .flat_map(|page| bundle.read_index_page(&head, page).unwrap().chunks)
+                .find(|descriptor| descriptor.chunk_id == chunk)
+                .unwrap();
+            html_attribute(
+                &bundle.read_chunk(&descriptor).unwrap(),
+                "data-hcd-notes-part",
+            )
+            .unwrap()
+            .to_string()
+        };
+        let edit = |part: &str, text: &str| {
+            let head = bundle.manifest().unwrap();
+            let node = extract_text_page(&bundle, None, 100)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|entry| entry.source.part == part)
+                .unwrap();
+            let patch = PatchBatch {
+                schema_version: HCD_PATCH_SCHEMA_VERSION.into(),
+                document_id: manifest.document_id.clone(),
+                patch_id: format!("note-edit-{}", head.revision),
+                base_revision: head.revision,
+                actor: BTreeMap::new(),
+                metadata: BTreeMap::new(),
+                operations: vec![PatchOperation::TextSplice {
+                    node_id: node.node_id,
+                    start: 0,
+                    delete_count: node.text.chars().count(),
+                    insert_text: text.into(),
+                    precondition: NodePrecondition {
+                        node_hash: node.node_hash,
+                    },
+                }],
+            };
+            apply_patch(&bundle, &patch, head.revision).unwrap();
+        };
+        edit("ppt/notesSlides/notesSlide1.xml", "original before copy");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &slide, 1),
+            1,
+        )
+        .unwrap();
+        let first = slide_page_chunk(
+            &bundle,
+            &bundle.manifest().unwrap(),
+            "ppt/slides/slide3.xml",
+        );
+        let first_note = note_part("ppt/slides/slide3.xml");
+        assert_ne!(first_note, "ppt/notesSlides/notesSlide1.xml");
+        edit(&first_note, "copied note before second copy");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &first, 3),
+            3,
+        )
+        .unwrap();
+        let second_note = note_part("ppt/slides/slide4.xml");
+        assert_ne!(first_note, second_note);
+        edit(&first_note, "first copy changed later");
+        edit("ppt/notesSlides/notesSlide1.xml", "original changed later");
+        let output = temp.path().join("edited.pptx");
+        export_pptx(&bundle, &source, &output, &ExportOptions::default()).unwrap();
+        for (number, expected) in [
+            (1, "original changed later"),
+            (2, "first copy changed later"),
+            (3, "copied note before second copy"),
+        ] {
+            let xml = read_zip_entry(&output, &format!("ppt/notesSlides/notesSlide{number}.xml"));
+            assert!(xml.contains(expected), "{xml}");
+        }
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &slide, 6),
+            6,
+        )
+        .unwrap();
+        assert!(!extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.source.part == "ppt/notesSlides/notesSlide1.xml"));
+        let deleted = temp.path().join("deleted.pptx");
+        export_pptx(&bundle, &source, &deleted, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&deleted, "ppt/notesSlides/notesSlide2.xml")
+            .contains("first copy changed later"));
+        assert!(read_zip_entry(&deleted, "ppt/notesSlides/notesSlide3.xml")
+            .contains("copied note before second copy"));
+        hcd_core::restore_revision(&bundle, 6, 7).unwrap();
+        let restored = temp.path().join("restored.pptx");
+        export_pptx(&bundle, &source, &restored, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&restored, "ppt/notesSlides/notesSlide1.xml")
+            .contains("original changed later"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn copied_notes_cannot_be_exported_under_another_slides_source_relationship() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        create_notes_fixture(&source);
+        let mut archive = StreamingOxmlArchive::open(&source).unwrap();
+        let slide = "ppt/slides/slide2.xml";
+        let rels = slide_relationships_part(slide).unwrap();
+        let bytes = archive.read_control_part(&rels, MAX_CONTROL_BYTES).unwrap();
+        let mut resources = copy_resources::CopyResources::new(&mut archive, temp.path()).unwrap();
+        let note = copy_resources::NoteChanges {
+            source_hash: Some("0".repeat(64)),
+            ..Default::default()
+        };
+        let error = resources
+            .copy_slide(
+                &mut archive,
+                copy_resources::SlideCopySource {
+                    part: slide,
+                    relationships: &bytes,
+                    notes: None,
+                    current_note: Some(&note),
+                },
+                "ppt/slides/slide3.xml",
+                &BTreeSet::new(),
+                &mut HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("do not belong to the source slide"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn copying_a_slide_copies_every_associated_note_fragment() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("fragmented-notes.pptx");
+        let extra = r#"<p:sp><p:nvSpPr><p:cNvPr id="4" name="Additional note"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>second note</a:t></a:r></a:p></p:txBody></p:sp>"#;
+        let note_xml = NOTES_SLIDE_XML.replace("</p:spTree>", &format!("{extra}</p:spTree>"));
+        let mut parts = Vec::new();
+        for part in styled_fixture_parts() {
+            match part.0 {
+                "[Content_Types].xml" => parts.push((part.0, NOTES_TYPES_XML)),
+                "ppt/slides/_rels/slide2.xml.rels" => parts.push((part.0, NOTES_SLIDE2_RELS_XML)),
+                _ => parts.push(part),
+            }
+        }
+        parts.extend([
+            ("ppt/slideLayouts/slideLayout1.xml", SLIDE_LAYOUT_XML),
+            ("ppt/notesSlides/notesSlide1.xml", note_xml.as_str()),
+            (
+                "ppt/notesSlides/_rels/notesSlide1.xml.rels",
+                NOTES_SLIDE_RELS_XML,
+            ),
+        ]);
+        write_zip_fixture(&source, &parts);
+        let path = temp.path().join("bundle");
+        let mut options = ImportOptions::new("fragmented-notes");
+        options.chunk_blocks = 1;
+        let manifest = import_pptx(&source, &path, &options, |_| Ok(())).unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let slide = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &slide, 0),
+            0,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        let notes: Vec<_> = (0..head.index_page_count)
+            .flat_map(|page| bundle.read_index_page(&head, page).unwrap().chunks)
+            .filter(|chunk| {
+                chunk.region == "note"
+                    && bundle
+                        .read_chunk(chunk)
+                        .unwrap()
+                        .contains("data-hcd-notes-owner=\"ppt/slides/slide3.xml\"")
+            })
+            .collect();
+        assert_eq!(notes.len(), 2);
+        assert!(!notes[0].continuation && notes[1].continuation);
+        let entries = extract_text_page(&bundle, None, 100).unwrap().entries;
+        let node = entries
+            .iter()
+            .find(|entry| entry.chunk_id == notes[1].chunk_id && entry.text == "second note")
+            .unwrap();
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION.into(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "edit-fragment".into(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::TextSplice {
+                node_id: node.node_id.clone(),
+                start: 0,
+                delete_count: node.text.chars().count(),
+                insert_text: "edited second note".into(),
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash.clone(),
+                },
+            }],
+        };
+        apply_patch(&bundle, &patch, 1).unwrap();
+        let output = temp.path().join("edited.pptx");
+        export_pptx(&bundle, &source, &output, &ExportOptions::default()).unwrap();
+        let copied = read_zip_entry(&output, "ppt/notesSlides/notesSlide2.xml");
+        assert!(
+            copied.contains("讲稿 😀") && copied.contains("edited second note"),
+            "{copied}"
+        );
+        assert!(read_zip_entry(&output, "ppt/notesSlides/notesSlide1.xml").contains("second note"));
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &slide, 2),
+            2,
+        )
+        .unwrap();
+        let deleted = temp.path().join("deleted.pptx");
+        export_pptx(&bundle, &source, &deleted, &ExportOptions::default()).unwrap();
+        assert!(read_zip_entry(&deleted, "ppt/notesSlides/notesSlide2.xml")
+            .contains("edited second note"));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn copying_a_chart_slide_also_copies_its_editable_workbook_and_notes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/hdoc/embed-host/fixtures/notes-chart.pptx");
+        let bundle_path = temp.path().join("source.hcd");
+        let exported = temp.path().join("copied.pptx");
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("chart-workbook"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let first = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide1.xml");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &first, 0),
+            0,
+        )
+        .unwrap();
+        let head = bundle.manifest().unwrap();
+        let second = slide_page_chunk(&bundle, &head, "ppt/slides/slide3.xml");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &second, 1),
+            1,
+        )
+        .unwrap();
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let mut charts = HashSet::new();
+        let mut books = HashSet::new();
+        let mut notes = HashSet::new();
+        let mut original_chart = None;
+        let mut original_book = None;
+        for slide in [
+            "ppt/slides/slide1.xml",
+            "ppt/slides/slide3.xml",
+            "ppt/slides/slide4.xml",
+        ] {
+            let rels = slide_relationships_part(slide).unwrap();
+            let relationships =
+                read_pptx_relationships(read_zip_entry(&exported, &rels).as_bytes(), slide, &rels)
+                    .unwrap();
+            let chart = relationships
+                .iter()
+                .find(|item| item.kind.ends_with("/chart"))
+                .unwrap()
+                .target
+                .clone()
+                .unwrap();
+            let note = relationships
+                .iter()
+                .find(|item| item.kind.ends_with("/notesSlide"))
+                .unwrap()
+                .target
+                .clone()
+                .unwrap();
+            let chart_rels = copy_resources::relationship_part(&chart).unwrap();
+            let chart_relationships = read_pptx_relationships(
+                read_zip_entry(&exported, &chart_rels).as_bytes(),
+                &chart,
+                &chart_rels,
+            )
+            .unwrap();
+            let book = chart_relationships
+                .iter()
+                .find(|item| item.kind.ends_with("/package"))
+                .unwrap()
+                .target
+                .clone()
+                .unwrap();
+            let note_rels = copy_resources::relationship_part(&note).unwrap();
+            let note_relationships = read_pptx_relationships(
+                read_zip_entry(&exported, &note_rels).as_bytes(),
+                &note,
+                &note_rels,
+            )
+            .unwrap();
+            assert!(
+                note_relationships
+                    .iter()
+                    .any(|item| item.kind.ends_with("/slide")
+                        && item.target.as_deref() == Some(slide))
+            );
+            let chart_bytes = read_zip_bytes(&exported, &chart);
+            let book_bytes = read_zip_bytes(&exported, &book);
+            assert_eq!(
+                original_chart.get_or_insert_with(|| chart_bytes.clone()),
+                &chart_bytes
+            );
+            assert_eq!(
+                original_book.get_or_insert_with(|| book_bytes.clone()),
+                &book_bytes
+            );
+            assert!(charts.insert(chart));
+            assert!(books.insert(book));
+            assert!(notes.insert(note));
+        }
+        assert_eq!((charts.len(), books.len(), notes.len()), (3, 3, 3));
+        let reopened = temp.path().join("reopened.hcd");
+        import_pptx(
+            &exported,
+            &reopened,
+            &ImportOptions::new("reopened"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(
+            validate_bundle(&Bundle::open(reopened).unwrap())
+                .unwrap()
+                .valid
+        );
+    }
+
+    #[test]
+    fn copied_slide_retains_root_level_chart_and_notes_after_source_deletion() {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/hdoc/embed-host/fixtures/notes-chart.pptx");
+        let source = temp.path().join("root-resources.pptx");
+        let mut original = zip::ZipArchive::new(File::open(fixture).unwrap()).unwrap();
+        let mut rewritten = zip::ZipWriter::new(File::create(&source).unwrap());
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for index in 0..original.len() {
+            let mut entry = original.by_index(index).unwrap();
+            let old = entry.name().to_string();
+            let name = match old.as_str() {
+                "ppt/charts/chart1.xml" => "chart1.xml",
+                "ppt/charts/_rels/chart1.xml.rels" => "_rels/chart1.xml.rels",
+                "ppt/notesSlides/notesSlide1.xml" => "notesSlide1.xml",
+                "ppt/notesSlides/_rels/notesSlide1.xml.rels" => "_rels/notesSlide1.xml.rels",
+                _ => &old,
+            };
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            if matches!(
+                old.as_str(),
+                "[Content_Types].xml"
+                    | "ppt/slides/_rels/slide1.xml.rels"
+                    | "ppt/charts/_rels/chart1.xml.rels"
+                    | "ppt/notesSlides/_rels/notesSlide1.xml.rels"
+            ) {
+                bytes = String::from_utf8(bytes)
+                    .unwrap()
+                    .replace("/ppt/charts/chart1.xml", "/chart1.xml")
+                    .replace("/ppt/notesSlides/notesSlide1.xml", "/notesSlide1.xml")
+                    .replace("../charts/chart1.xml", "/chart1.xml")
+                    .replace("../notesSlides/notesSlide1.xml", "/notesSlide1.xml")
+                    .replace(
+                        "../embeddings/Microsoft_Excel_Sheet1.xlsx",
+                        "ppt/embeddings/Microsoft_Excel_Sheet1.xlsx",
+                    )
+                    .replace(
+                        "../notesMasters/notesMaster1.xml",
+                        "ppt/notesMasters/notesMaster1.xml",
+                    )
+                    .replace("../slides/slide1.xml", "ppt/slides/slide1.xml")
+                    .into_bytes();
+            }
+            rewritten.start_file(name, options).unwrap();
+            rewritten.write_all(&bytes).unwrap();
+        }
+        rewritten.finish().unwrap();
+        let bundle_path = temp.path().join("source.hcd");
+        let exported = temp.path().join("copied.pptx");
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("root-resources"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let first = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide1.xml");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &first, 0),
+            0,
+        )
+        .unwrap();
+        let delete = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_42.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "delete-original".into(),
+            base_revision: 1,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![PatchOperation::PptxSlideDelete { chunk_id: first }],
+        };
+        apply_patch(&bundle, &delete, 1).unwrap();
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let slide = "ppt/slides/slide3.xml";
+        let rels = slide_relationships_part(slide).unwrap();
+        let relationships =
+            read_pptx_relationships(read_zip_entry(&exported, &rels).as_bytes(), slide, &rels)
+                .unwrap();
+        let chart = relationships
+            .iter()
+            .find(|item| item.kind.ends_with("/chart"))
+            .unwrap()
+            .target
+            .as_deref()
+            .unwrap();
+        let note = relationships
+            .iter()
+            .find(|item| item.kind.ends_with("/notesSlide"))
+            .unwrap()
+            .target
+            .as_deref()
+            .unwrap();
+        assert_ne!(chart, "chart1.xml");
+        assert_ne!(note, "notesSlide1.xml");
+        assert!(!has_zip_entry(&exported, "notesSlide1.xml"));
+        let chart_rels = copy_resources::relationship_part(chart).unwrap();
+        let chart_relationships = read_pptx_relationships(
+            read_zip_entry(&exported, &chart_rels).as_bytes(),
+            chart,
+            &chart_rels,
+        )
+        .unwrap();
+        let book = chart_relationships
+            .iter()
+            .find(|item| item.kind.ends_with("/package"))
+            .unwrap()
+            .target
+            .as_deref()
+            .unwrap();
+        assert_ne!(book, "ppt/embeddings/Microsoft_Excel_Sheet1.xlsx");
+        assert_eq!(
+            read_zip_bytes(&exported, book),
+            read_zip_bytes(&source, "ppt/embeddings/Microsoft_Excel_Sheet1.xlsx")
+        );
+        let note_rels = copy_resources::relationship_part(note).unwrap();
+        let note_relationships = read_pptx_relationships(
+            read_zip_entry(&exported, &note_rels).as_bytes(),
+            note,
+            &note_rels,
+        )
+        .unwrap();
+        assert!(note_relationships
+            .iter()
+            .any(|item| item.kind.ends_with("/slide") && item.target.as_deref() == Some(slide)));
+    }
+
+    #[test]
+    fn unknown_slide_owned_relationships_are_not_silently_shared() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("unknown-resource.pptx");
+        let mut parts = Vec::new();
+        for part in styled_fixture_parts() {
+            if part.0 == "ppt/slides/_rels/slide2.xml.rels" {
+                parts.push((part.0, r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/><Relationship Id="rIdOther" Type="http://example.test/relationships/unique" Target="../customXml/item1.xml"/></Relationships>"#));
+            } else {
+                parts.push(part);
+            }
+        }
+        parts.push(("ppt/customXml/item1.xml", "<item/>"));
+        write_zip_fixture(&source, &parts);
+        let path = temp.path().join("bundle");
+        let output = temp.path().join("refused.pptx");
+        let manifest = import_pptx(
+            &source,
+            &path,
+            &ImportOptions::new("unknown-resource"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&path).unwrap();
+        let chunk = slide_page_chunk(&bundle, &manifest, "ppt/slides/slide2.xml");
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &chunk, 0),
+            0,
+        )
+        .unwrap();
+        let error = export_pptx(&bundle, &source, &output, &ExportOptions::default()).unwrap_err();
+        assert!(
+            error.to_string().contains("cannot safely be copied"),
+            "{error}"
+        );
+        assert!(!output.exists());
+    }
+
     fn create_styled_fixture(path: &Path) {
+        write_zip_fixture(path, &styled_fixture_parts());
+    }
+
+    /// The same presentation with the layout a real editor carries: the slide
+    /// that shows last draws its master from `ppt/slideLayouts/slideLayout1.xml`,
+    /// so a slide HCD appends has a layout to point at as well.
+    fn create_layout_fixture(path: &Path) {
+        let mut parts: Vec<(&str, &str)> = Vec::new();
+        for part in styled_fixture_parts() {
+            match part.0 {
+                "[Content_Types].xml" => parts.push((part.0, LAYOUTED_TYPES_XML)),
+                "ppt/slides/_rels/slide2.xml.rels" => {
+                    parts.push((part.0, LAYOUTED_SLIDE2_RELS_XML))
+                }
+                _ => parts.push(part),
+            }
+            if part.0 == "ppt/slides/slide1.xml" {
+                parts.push(("ppt/slideLayouts/slideLayout1.xml", SLIDE_LAYOUT_XML));
+            }
+        }
+        write_zip_fixture(path, &parts);
+    }
+
+    /// `create_layout_fixture` with a speaker note on the page that shows last,
+    /// written the way PowerPoint writes notes: the page points at the notes part
+    /// and the notes part points back at the page.
+    fn create_notes_fixture(path: &Path) {
+        let mut parts: Vec<(&str, &str)> = Vec::new();
+        for part in styled_fixture_parts() {
+            match part.0 {
+                "[Content_Types].xml" => parts.push((part.0, NOTES_TYPES_XML)),
+                "ppt/slides/_rels/slide2.xml.rels" => parts.push((part.0, NOTES_SLIDE2_RELS_XML)),
+                _ => parts.push(part),
+            }
+            if part.0 == "ppt/slides/slide1.xml" {
+                parts.push(("ppt/slideLayouts/slideLayout1.xml", SLIDE_LAYOUT_XML));
+                parts.push(("ppt/notesSlides/notesSlide1.xml", NOTES_SLIDE_XML));
+                parts.push((
+                    "ppt/notesSlides/_rels/notesSlide1.xml.rels",
+                    NOTES_SLIDE_RELS_XML,
+                ));
+            }
+        }
+        write_zip_fixture(path, &parts);
+    }
+
+    fn write_zip_fixture(path: &Path, parts: &[(&str, &str)]) {
         let file = File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        let parts = [
+        for (name, contents) in parts {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    fn styled_fixture_parts() -> Vec<(&'static str, &'static str)> {
+        vec![
             (
                 "[Content_Types].xml",
                 r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>"#,
@@ -4582,11 +11906,553 @@ mod tests {
                 "ppt/media/image2.png",
                 "not-a-real-png-but-streamed-as-an-asset",
             ),
+        ]
+    }
+
+    /// `styled_fixture_parts` with the layout declared and the second slide
+    /// bound to it, which is how PowerPoint and WPS write a saved presentation.
+    const LAYOUTED_TYPES_XML: &str = concat!(
+        r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/>"#,
+        r#"<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>"#,
+        r#"<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>"#,
+        r#"<Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>"#,
+        r#"<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>"#,
+        "</Types>",
+    );
+
+    const LAYOUTED_SLIDE2_RELS_XML: &str = concat!(
+        r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rIdImage1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>"#,
+        r#"<Relationship Id="rIdLayout1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>"#,
+        "</Relationships>",
+    );
+
+    const SLIDE_LAYOUT_XML: &str = concat!(
+        r#"<?xml version="1.0"?><p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" type="title">"#,
+        "<p:cSld><p:spTree>",
+        r#"<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>"#,
+        "<p:grpSpPr/>",
+        "</p:spTree></p:cSld>",
+        "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>",
+        "</p:sldLayout>",
+    );
+
+    const NOTES_TYPES_XML: &str = concat!(
+        r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/>"#,
+        r#"<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>"#,
+        r#"<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>"#,
+        r#"<Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>"#,
+        r#"<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>"#,
+        r#"<Override PartName="/ppt/notesSlides/notesSlide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>"#,
+        "</Types>",
+    );
+
+    /// The page gains the notes relationship PowerPoint writes for it.
+    const NOTES_SLIDE2_RELS_XML: &str = concat!(
+        r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rIdImage1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>"#,
+        r#"<Relationship Id="rIdLayout1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>"#,
+        r#"<Relationship Id="rIdNotes1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/>"#,
+        "</Relationships>",
+    );
+
+    const NOTES_SLIDE_XML: &str = concat!(
+        r#"<?xml version="1.0"?><p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
+        "<p:cSld><p:spTree>",
+        r#"<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>"#,
+        "<p:grpSpPr/>",
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Slide Image"/><p:cNvSpPr/><p:nvPr><p:ph type="sldImg"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>"#,
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="3" name="Notes Placeholder"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="zh-CN" sz="1200"/><a:t>讲稿 😀</a:t></a:r></a:p></p:txBody></p:sp>"#,
+        "</p:spTree></p:cSld>",
+        "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>",
+        "</p:notes>",
+    );
+
+    /// The notes' own list, and the back-reference that makes a deleted page leave
+    /// a relationship pointing at a part the package no longer has.
+    const NOTES_SLIDE_RELS_XML: &str = concat!(
+        r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rIdSlide1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="../slides/slide2.xml"/>"#,
+        "</Relationships>",
+    );
+    /// One slide whose paragraph carries two runs, then two more runs of their own:
+    /// a run with theme-referenced script fonts plus a `a:sym`, a run with a literal
+    /// face, a run with no run properties at all, and a run with a self-closed one.
+    /// Source-backed export has to pin a patched face onto exactly one of them.
+    fn create_font_fixture(path: &Path) {
+        let file = File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let slide = concat!(
+            r#"<?xml version="1.0"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp>"#,
+            r#"<p:nvSpPr><p:cNvPr id="7" name="Font Box"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>"#,
+            r#"<p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="4572000" cy="1143000"/></a:xfrm></p:spPr>"#,
+            r#"<p:txBody><a:bodyPr/><a:lstStyle/>"#,
+            r#"<a:p><a:r><a:rPr lang="en-US" sz="1800" b="1"><a:latin typeface="+mn-lt" pitchFamily="34" charset="0"/><a:ea typeface="+mn-ea"/><a:sym typeface="+mn-cs"/></a:rPr><a:t>Latin one</a:t></a:r>"#,
+            r#"<a:r><a:rPr lang="zh-CN" sz="1200"><a:latin typeface="Arial"/></a:rPr><a:t>第二 run</a:t></a:r></a:p>"#,
+            r#"<a:p><a:r><a:t>no properties</a:t></a:r></a:p>"#,
+            r#"<a:p><a:r><a:rPr lang="en-US" i="1"/><a:t>empty props</a:t></a:r></a:p>"#,
+            r#"</p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+        );
+        let parts = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#,
+            ),
+            (
+                "ppt/presentation.xml",
+                r#"<?xml version="1.0"?><p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldSz cx="12192000" cy="6858000"/><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#,
+            ),
+            (
+                "ppt/_rels/presentation.xml.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
+            ),
+            ("ppt/slides/slide1.xml", slide),
         ];
         for (name, contents) in parts {
             zip.start_file(name, options).unwrap();
             zip.write_all(contents.as_bytes()).unwrap();
         }
         zip.finish().unwrap();
+    }
+
+    #[test]
+    fn source_export_pins_a_patched_face_onto_one_slide_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("document.hcd");
+        let exported = temp.path().join("exported.pptx");
+        create_font_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("pptx-font"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let entries = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| (entry.text.clone(), entry.source.text_ordinal, entry))
+            .collect::<Vec<_>>();
+        // one mapped node per `<a:t>`, so a patch reaches exactly one run
+        let ordinals = entries
+            .iter()
+            .map(|(text, ordinal, _)| (text.as_str(), *ordinal))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordinals,
+            vec![
+                ("Latin one", 1),
+                ("第二 run", 2),
+                ("no properties", 3),
+                ("empty props", 4),
+            ]
+        );
+        let lookup = |wanted: &str| -> hcd_core::TextExtractEntry {
+            entries
+                .iter()
+                .find(|(text, _, _)| text == wanted)
+                .expect("fixture run")
+                .2
+                .clone()
+        };
+        let themed = lookup("Latin one");
+        let literal = lookup("第二 run");
+        let bare = lookup("no properties");
+        let self_closed = lookup("empty props");
+
+        let face = |node: &hcd_core::TextExtractEntry, font: hcd_core::FontPatch| {
+            PatchOperation::TextFont {
+                node_id: node.node_id.clone(),
+                font,
+                precondition: NodePrecondition {
+                    node_hash: node.node_hash.clone(),
+                },
+            }
+        };
+        let patch = PatchBatch {
+            schema_version: HCD_PATCH_SCHEMA_VERSION_37.to_string(),
+            document_id: manifest.document_id.clone(),
+            patch_id: "pptx-font-pin".to_string(),
+            base_revision: 0,
+            actor: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            operations: vec![
+                face(
+                    &themed,
+                    pinned(
+                        Some("Brand Serif"),
+                        Some("Brand Gothic"),
+                        Some("Brand Naskh"),
+                    ),
+                ),
+                face(&bare, pinned(Some("Brand Serif"), None, None)),
+                face(&self_closed, pinned(None, Some("Brand Gothic"), None)),
+            ],
+        };
+        assert_eq!(apply_patch(&bundle, &patch, 0).unwrap().revision, 1);
+
+        let report = export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        assert_eq!(report.level, FidelityLevel::High);
+        assert!(
+            report
+                .preserved
+                .iter()
+                .any(|line| line == "run fonts pinned by text.font on 3 mapped node(s)"),
+            "{:?}",
+            report.preserved
+        );
+        let slide = read_zip_entry(&exported, "ppt/slides/slide1.xml");
+        // the theme-referenced slots are replaced where they stood, and the new
+        // `a:cs` lands before `a:sym`, which the patch never named
+        assert!(
+            slide.contains(
+                r#"<a:rPr lang="en-US" sz="1800" b="1"><a:latin typeface="Brand Serif"/><a:ea typeface="Brand Gothic"/><a:cs typeface="Brand Naskh"/><a:sym typeface="+mn-cs"/></a:rPr>"#
+            ),
+            "{slide}"
+        );
+        // a theme reference and the metrics that came with it are gone
+        assert!(!slide.contains("+mn-lt"), "{slide}");
+        assert!(!slide.contains("+mn-ea"), "{slide}");
+        assert!(!slide.contains("pitchFamily"), "{slide}");
+        assert!(!slide.contains("charset"), "{slide}");
+        // the run this patch never touched keeps its literal face
+        assert!(slide.contains(r#"<a:latin typeface="Arial"/>"#), "{slide}");
+        // a run without properties gains them, and a self-closed one keeps its own
+        assert!(
+            slide.contains(r#"<a:r><a:rPr><a:latin typeface="Brand Serif"/></a:rPr><a:t>no properties</a:t></a:r>"#),
+            "{slide}"
+        );
+        assert!(
+            slide.contains(r#"<a:rPr lang="en-US" i="1"><a:ea typeface="Brand Gothic"/></a:rPr><a:t>empty props</a:t>"#),
+            "{slide}"
+        );
+        assert_eq!(slide.matches("<a:latin").count(), 3, "{slide}");
+        assert_eq!(slide.matches("<a:ea ").count(), 2, "{slide}");
+        assert_eq!(slide.matches("<a:cs").count(), 1, "{slide}");
+        // every run still says what it said
+        for text in ["Latin one", "第二 run", "no properties", "empty props"] {
+            assert!(slide.contains(text), "{slide}");
+        }
+        assert!(literal.node_id != themed.node_id);
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn integrated_copy_fonts_format_and_alignment_survive_export_delete_and_restore() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.pptx");
+        let bundle_path = temp.path().join("bundle");
+        create_layout_fixture(&source);
+        let manifest = import_pptx(
+            &source,
+            &bundle_path,
+            &ImportOptions::new("copy-font-format"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let bundle = Bundle::open(&bundle_path).unwrap();
+        let original = "ppt/slides/slide2.xml";
+        let copy = "ppt/slides/slide3.xml";
+        let chunk_id = slide_page_chunk(&bundle, &manifest, original);
+        apply_patch(
+            &bundle,
+            &copy_slide_patch(&manifest.document_id, &chunk_id, 0),
+            0,
+        )
+        .unwrap();
+        let node = extract_text_page(&bundle, None, 100)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|entry| entry.source.part == copy && entry.text == "样式 😀")
+            .unwrap();
+        let precondition = NodePrecondition {
+            node_hash: node.node_hash.clone(),
+        };
+        let operations = [
+            (
+                HCD_PATCH_SCHEMA_VERSION_37,
+                PatchOperation::TextFont {
+                    node_id: node.node_id.clone(),
+                    font: pinned(Some("Brand Serif"), Some("Brand Gothic"), None),
+                    precondition: precondition.clone(),
+                },
+            ),
+            (
+                HCD_PATCH_SCHEMA_VERSION_30,
+                PatchOperation::PptxRunFormat {
+                    node_id: node.node_id.clone(),
+                    format: PptxRunFormat {
+                        bold: Some(false),
+                        font_size_pt: Some(32.0),
+                        color: Some("#00aa00".to_string()),
+                        ..Default::default()
+                    },
+                    precondition,
+                },
+            ),
+        ];
+        for (offset, (schema, operation)) in operations.into_iter().enumerate() {
+            let base = offset as u64 + 1;
+            apply_patch(
+                &bundle,
+                &PatchBatch {
+                    schema_version: schema.to_string(),
+                    document_id: manifest.document_id.clone(),
+                    patch_id: format!("copy-style-{base}"),
+                    base_revision: base,
+                    actor: BTreeMap::new(),
+                    metadata: BTreeMap::new(),
+                    operations: vec![operation],
+                },
+                base,
+            )
+            .unwrap();
+        }
+        apply_patch(
+            &bundle,
+            &shape_align(
+                &manifest.document_id,
+                node.node_id.clone(),
+                node.node_hash,
+                Some("right"),
+                Some("bottom"),
+                3,
+            ),
+            3,
+        )
+        .unwrap();
+        let exported = temp.path().join("styled-copy.pptx");
+        export_pptx(&bundle, &source, &exported, &ExportOptions::default()).unwrap();
+        let slide = read_zip_entry(&exported, copy);
+        assert!(slide.contains("sz=\"3200\""), "{slide}");
+        assert!(slide.contains("b=\"0\""), "{slide}");
+        assert!(slide.contains("algn=\"r\""), "{slide}");
+        assert!(slide.contains("anchor=\"b\""), "{slide}");
+        assert!(slide.contains("typeface=\"Brand Serif\""), "{slide}");
+        assert!(slide.contains("typeface=\"Brand Gothic\""), "{slide}");
+        assert_eq!(slide.matches("<a:solidFill>").count(), 1, "{slide}");
+        assert!(!slide.contains("112233"), "{slide}");
+        assert!(slide.find("00AA00").unwrap() < slide.find("Brand Serif").unwrap());
+        assert_eq!(
+            read_zip_entry(&exported, original),
+            read_zip_entry(&source, original)
+        );
+        let reopened_path = temp.path().join("reopened");
+        import_pptx(
+            &exported,
+            &reopened_path,
+            &ImportOptions::new("reopened"),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(
+            validate_bundle(&Bundle::open(&reopened_path).unwrap())
+                .unwrap()
+                .valid
+        );
+
+        // Deleting the original does not remove the copy's font or format requests.
+        let head = bundle.manifest().unwrap();
+        let original_chunk = slide_page_chunk(&bundle, &head, original);
+        apply_patch(
+            &bundle,
+            &drop_slide_patch(&manifest.document_id, &original_chunk, 4),
+            4,
+        )
+        .unwrap();
+        let deleted = temp.path().join("deleted-original.pptx");
+        export_pptx(&bundle, &source, &deleted, &ExportOptions::default()).unwrap();
+        assert!(!has_zip_entry(&deleted, original));
+        assert_eq!(read_zip_entry(&deleted, copy), slide);
+
+        // Restoring the pre-style copy recovers both the page and its original face.
+        hcd_core::restore_revision(&bundle, 1, 5).unwrap();
+        let restored = temp.path().join("restored-copy.pptx");
+        export_pptx(&bundle, &source, &restored, &ExportOptions::default()).unwrap();
+        assert_eq!(
+            read_zip_entry(&restored, copy),
+            read_zip_entry(&source, original)
+        );
+        assert!(has_zip_entry(&restored, original));
+        assert!(validate_bundle(&bundle).unwrap().valid);
+    }
+
+    #[test]
+    fn integrated_inserted_text_box_combines_font_format_and_alignment() {
+        let source =
+            br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree></p:spTree></p:cSld></p:sld>"#;
+        let shape = InsertedPptxShape {
+            node_id: "n_00000000000000000000000000000000".to_string(),
+            x_emu: 0,
+            y_emu: 0,
+            width_emu: 914_400,
+            height_emu: 457_200,
+            font_size_hundredths: 2_400,
+            text: "Brand text".to_string(),
+            font: Some(html_face(Some("Brand Serif"), None, Some("Brand Naskh"))),
+            format: PptxRunFormat {
+                bold: Some(true),
+                color: Some("#00aa00".to_string()),
+                ..Default::default()
+            },
+            align: PptxShapeAlignPatch {
+                horizontal: Some("center".to_string()),
+                vertical: Some("bottom".to_string()),
+            },
+            primitive: None,
+        };
+        let mut output = Vec::new();
+        rewrite_text_part(
+            &mut source.as_slice(),
+            &mut output,
+            &BTreeMap::new(),
+            &[shape],
+            &BTreeMap::new(),
+            &PptxRunEdits::default(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let xml = String::from_utf8(output).unwrap();
+        assert!(xml.contains("sz=\"2400\" b=\"1\""), "{xml}");
+        assert!(xml.contains("anchor=\"b\""), "{xml}");
+        assert!(xml.contains("algn=\"ctr\""), "{xml}");
+        assert!(xml.contains("typeface=\"Brand Naskh\""), "{xml}");
+        assert!(xml.contains("00AA00"), "{xml}");
+        assert!(xml.find("00AA00").unwrap() < xml.find("Brand Serif").unwrap());
+    }
+
+    fn html_face(latin: Option<&str>, ea: Option<&str>, cs: Option<&str>) -> HtmlFontNode {
+        HtmlFontNode {
+            latin: latin.map(str::to_string),
+            east_asia: ea.map(str::to_string),
+            bidi: cs.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn an_inserted_box_writes_its_pinned_face_into_the_shape_it_creates() {
+        let source = br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:extLst/></p:spTree></p:cSld></p:sld>"#;
+        let shape = InsertedPptxShape {
+            node_id: "n_00000000000000000000000000000000".to_string(),
+            x_emu: 0,
+            y_emu: 0,
+            width_emu: 914_400,
+            height_emu: 457_200,
+            font_size_hundredths: 1_200,
+            text: "new".to_string(),
+            font: Some(html_face(Some("Brand Serif"), Some("Brand Gothic"), None)),
+            format: PptxRunFormat::default(),
+            align: PptxShapeAlignPatch::default(),
+            primitive: None,
+        };
+        let mut output = Vec::new();
+        rewrite_text_part(
+            &mut source.as_slice(),
+            &mut output,
+            &BTreeMap::new(),
+            &[shape],
+            &BTreeMap::new(),
+            &PptxRunEdits::default(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let xml = String::from_utf8(output).unwrap();
+        assert!(
+            xml.contains(
+                r#"<a:rPr lang="en-US" sz="1200"><a:latin typeface="Brand Serif"/><a:ea typeface="Brand Gothic"/></a:rPr>"#
+            ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_face_reaches_a_field_run_and_its_self_closed_properties() {
+        let source = br#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:fld id="{AB}" type="slidenum"><a:rPr lang="en-US" sz="1000"/><a:t/></a:fld></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#;
+        let mut output = Vec::new();
+        rewrite_text_part(
+            &mut source.as_slice(),
+            &mut output,
+            &BTreeMap::from([(1, "12".to_string())]),
+            &[],
+            &BTreeMap::new(),
+            &PptxRunEdits {
+                fonts: BTreeMap::from([(1, html_face(None, None, Some("Brand Naskh")))]),
+                ..Default::default()
+            },
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let xml = String::from_utf8(output).unwrap();
+        assert!(
+            xml.contains(
+                r#"<a:rPr lang="en-US" sz="1000"><a:cs typeface="Brand Naskh"/></a:rPr><a:t>12</a:t></a:fld>"#
+            ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_face_with_no_writable_run_stops_the_slide_export() {
+        // text the source map points at, but that no `a:r` or `a:fld` owns
+        let source = br#"<p:sld xmlns:p="p" xmlns:a="a"><a:p><a:t>orphan</a:t></a:p></p:sld>"#;
+        let mut output = Vec::new();
+        let error = rewrite_text_part(
+            &mut source.as_slice(),
+            &mut output,
+            &BTreeMap::from([(1, "orphan".to_string())]),
+            &[],
+            &BTreeMap::new(),
+            &PptxRunEdits {
+                fonts: BTreeMap::from([(1, html_face(Some("Brand Serif"), None, None))]),
+                ..Default::default()
+            },
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("has no writable run for; omit --source"),
+            "{error}"
+        );
+        assert!(!String::from_utf8_lossy(&output).contains("Brand Serif"));
+    }
+
+    #[test]
+    fn a_run_left_open_at_the_end_of_a_part_is_broken() {
+        let source = br#"<p:sld xmlns:p="p" xmlns:a="a"><a:r><a:rPr lang="en-US"/>"#;
+        let mut output = Vec::new();
+        let error = rewrite_text_part(
+            &mut source.as_slice(),
+            &mut output,
+            &BTreeMap::new(),
+            &[],
+            &BTreeMap::new(),
+            &PptxRunEdits::default(),
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("ends inside an unclosed run"),
+            "{error}"
+        );
+    }
+
+    fn pinned(latin: Option<&str>, ea: Option<&str>, cs: Option<&str>) -> hcd_core::FontPatch {
+        hcd_core::FontPatch {
+            latin: latin.map(str::to_string),
+            east_asia: ea.map(str::to_string),
+            bidi: cs.map(str::to_string),
+        }
     }
 }

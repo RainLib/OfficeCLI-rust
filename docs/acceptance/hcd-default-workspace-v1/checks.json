@@ -1,0 +1,44 @@
+{
+  "status": "passed",
+  "node": "v26.13.0",
+  "checks": [
+    {
+      "command": "npm run build --prefix examples/hdoc/admin-app",
+      "status": "passed"
+    },
+    {
+      "command": "npm run build --prefix examples/hdoc/editor",
+      "status": "passed",
+      "note": "standalone/embed builds; final sidecar additionally checked with tsc --noEmit"
+    },
+    {
+      "command": "node apps/workspace/scripts/build.mjs",
+      "status": "passed"
+    },
+    {
+      "command": "npm test --prefix apps/workspace",
+      "status": "passed",
+      "passed": 5
+    },
+    {
+      "command": "cargo test -p officecli --bin officecli hdoc_server:: --offline",
+      "status": "passed",
+      "passed": 85
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "status": "passed"
+    },
+    {
+      "command": "npm run test:acceptance --prefix apps/workspace",
+      "status": "passed",
+      "browserVerified": true
+    },
+    {
+      "command": "npm run test:provider --prefix examples/hdoc/editor",
+      "status": "passed",
+      "browserVerified": true
+    }
+  ],
+  "offlineReleaseVerified": false
+}

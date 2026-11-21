@@ -1,11 +1,12 @@
 use clap::{Args, Subcommand, ValueEnum};
 use handler_common::{HandlerError, OutputFormat};
 use hcd_core::{
-    hash_file, manifest_at_revision, render_standalone_html_with_transform, Bundle, FidelityLevel,
-    FidelityReport, FidelityWarning, HcdError, HcdManifest, HtmlPresentationOptions, PatchBatch,
-    StorageCodec, HCD_SCHEMA_VERSION,
+    hash_bytes, hash_file, manifest_at_revision, render_standalone_html_with_transform,
+    theme_font_plan, Bundle, DiskCatalog, FidelityLevel, FidelityReport, FidelityWarning, HcdError,
+    HcdManifest, HtmlPresentationOptions, PatchBatch, StorageCodec, ThemeEmbedKind,
+    ThemeFontDecision, HCD_SCHEMA_VERSION,
 };
-use hcd_formats::{ExportOptions, ImportOptions, PdfRasterMode};
+use hcd_formats::{apply_theme_fonts, ExportOptions, ImportOptions, PdfFaceOptions, PdfRasterMode};
 use std::collections::HashMap;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -58,6 +59,8 @@ pub enum HdocSubcommand {
     RenderHtml(HdocRenderHtmlCommand),
     /// Apply a text/annotation patch and append a revision
     Apply(HdocApplyCommand),
+    /// Read a native canvas scene or apply an object transaction
+    Canvas(HdocCanvasCommand),
     /// Create a revision that enables semantic block editing while preserving the original view
     ProjectEditor(HdocProjectEditorCommand),
     /// Read bounded semantic blocks and precondition hashes for an editor
@@ -73,8 +76,21 @@ pub enum HdocSubcommand {
 }
 
 #[derive(Args)]
+pub struct HdocCanvasCommand {
+    #[arg(long)]
+    pub bundle: String,
+    /// JSON canvas transaction; omit to read the scene
+    #[arg(long)]
+    pub patch: Option<String>,
+    #[arg(long)]
+    pub revision: Option<u64>,
+    #[arg(long)]
+    pub author: Option<String>,
+}
+
+#[derive(Args)]
 pub struct HdocImportCommand {
-    /// Immutable source DOCX, XLSX, PPTX, PDF, HTML, UTF-8 Markdown, or UTF-8 TXT
+    /// Immutable source DOCX, XLSX, PPTX, PDF, HTML, or UTF-8 CSV, TSV, Markdown or TXT
     pub source: String,
     /// New HCD directory; must not already exist
     #[arg(short, long)]
@@ -327,6 +343,15 @@ pub struct HdocServeCommand {
     /// Optional S3-compatible endpoint environment variable
     #[arg(long, default_value = "HCD_S3_ENDPOINT")]
     pub s3_endpoint_env: String,
+    /// Font catalog directory. Defaults to <root>/catalog on the same machine.
+    #[arg(long)]
+    pub catalog: Option<PathBuf>,
+    /// Theme revision id pinned onto newly imported documents. Unset leaves imports unpinned.
+    #[arg(long, value_name = "themeRevisionId")]
+    pub default_theme: Option<String>,
+    /// Registered business Provider configuration; secrets are read from named environment variables
+    #[arg(long)]
+    pub integration_config: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -361,6 +386,9 @@ pub enum HdocTokenScope {
     Read,
     Write,
     Upload,
+    /// Font catalog administrator. Pairs with `--document-id '*'` and unlocks
+    /// the `/v1/catalog` write API used by the management console.
+    Admin,
 }
 
 #[derive(Args)]
@@ -372,12 +400,42 @@ pub struct HdocExportCommand {
     #[arg(short, long)]
     pub output: String,
     /// Semantic target format; inferred from --output when omitted
-    #[arg(long, value_name = "docx|xlsx|pptx|pdf|html|md|txt")]
+    #[arg(long, value_name = "docx|xlsx|csv|tsv|pptx|pdf|html|md|txt")]
     pub to: Option<String>,
+    /// Export one page or an inclusive page range from a PDF revision.
+    #[arg(long, value_name = "START[-END]")]
+    pub pdf_pages: Option<PdfPageRange>,
+    /// Exact worksheet name for CSV or TSV export.
+    #[arg(long, value_name = "NAME")]
+    pub sheet: Option<String>,
     #[arg(long)]
     pub revision: Option<u64>,
     #[arg(long)]
     pub fidelity_report: Option<PathBuf>,
+    /// Font catalog used to embed or register the document's pinned theme.
+    #[arg(long)]
+    pub catalog: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PdfPageRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl std::str::FromStr for PdfPageRange {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (start, end) = value.split_once('-').unwrap_or((value, value));
+        let invalid = "PDF pages must be a positive page number or an inclusive range such as 2-5";
+        let start = start.trim().parse().map_err(|_| invalid)?;
+        let end = end.trim().parse().map_err(|_| invalid)?;
+        if start == 0 || end < start {
+            return Err(invalid);
+        }
+        Ok(Self { start, end })
+    }
 }
 
 pub fn handle_hdoc(
@@ -429,6 +487,7 @@ pub fn handle_hdoc(
         HdocSubcommand::PutAsset(command) => put_asset(command, format),
         HdocSubcommand::RenderHtml(command) => render_html(command, format),
         HdocSubcommand::Apply(command) => apply(command, format),
+        HdocSubcommand::Canvas(command) => canvas(command, format),
         HdocSubcommand::ProjectEditor(command) => project_editor(command, format),
         HdocSubcommand::EditorState(command) => editor_state(command, format),
         HdocSubcommand::Serve(command) => {
@@ -1147,19 +1206,41 @@ fn percent_encode_href_component(value: &str) -> String {
 
 fn deterministic_document_id(source: &str) -> Result<String, HandlerError> {
     let source_hash = hash_file(source).map_err(handler_error)?;
-    Ok(format!("doc-{}", &source_hash[..32]))
+    let extension = Path::new(source)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    Ok(source_document_id(&source_hash, &extension))
+}
+
+pub(crate) fn source_document_id(source_hash: &str, extension: &str) -> String {
+    // Identical bytes may produce different cells depending on the separator.
+    let hash = if matches!(extension, "csv" | "tsv") {
+        hash_bytes(format!("{extension}:{source_hash}").as_bytes())
+    } else {
+        source_hash.to_string()
+    };
+    format!("doc-{}", &hash[..32])
 }
 
 fn apply(command: HdocApplyCommand, format: OutputFormat) -> Result<(String, bool), HandlerError> {
     let patch_json = read_patch_json(&command.patch)?;
     let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
     let header: serde_json::Value = serde_json::from_str(&patch_json)?;
-    let result = if header["schemaVersion"] == hcd_core::HCD_PATCH_SCHEMA_VERSION_4 {
+    let result = if matches!(
+        header["schemaVersion"].as_str(),
+        Some(hcd_core::HCD_PATCH_SCHEMA_VERSION_4 | hcd_core::HCD_PATCH_SCHEMA_VERSION_67)
+    ) {
         let patch: hcd_core::StructurePatchBatch = serde_json::from_str(&patch_json)?;
         hcd_core::apply_structure_patch(&bundle, &patch, command.expected_revision)
     } else {
         let patch: PatchBatch = serde_json::from_str(&patch_json)?;
-        hcd_core::apply_patch(&bundle, &patch, command.expected_revision)
+        hcd_formats::worksheet_pivots::apply_workbook_patch(
+            &bundle,
+            &patch,
+            command.expected_revision,
+        )
     }
     .map_err(handler_error)?;
     render(
@@ -1172,6 +1253,46 @@ fn apply(command: HdocApplyCommand, format: OutputFormat) -> Result<(String, boo
             result.dirty_chunk_ids.len()
         ),
     )
+}
+
+fn canvas(
+    command: HdocCanvasCommand,
+    format: OutputFormat,
+) -> Result<(String, bool), HandlerError> {
+    let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
+    if let Some(path) = command.patch {
+        if command.revision.is_some() {
+            return Err(HandlerError::InvalidArgument(
+                "--revision is read-only; a patch carries baseRevision".into(),
+            ));
+        }
+        let bytes = std::fs::read(&path)?;
+        if bytes.len() > 34 * 1024 * 1024 {
+            return Err(HandlerError::InvalidArgument(
+                "canvas patch exceeds size limit".into(),
+            ));
+        }
+        let batch = serde_json::from_slice(&bytes)?;
+        let mut author = std::collections::BTreeMap::new();
+        if let Some(id) = command.author {
+            author.insert("id".into(), id);
+        }
+        let result =
+            hcd_core::canvas::apply_batch(&bundle, &batch, None, &author).map_err(handler_error)?;
+        render(
+            &result,
+            format,
+            format!("Canvas committed at revision {}", result.revision),
+        )
+    } else {
+        let scene =
+            hcd_core::canvas::read_scene(&bundle, command.revision).map_err(handler_error)?;
+        render(
+            &scene,
+            format,
+            format!("Canvas contains {} elements", scene.elements.len()),
+        )
+    }
 }
 
 fn project_editor(
@@ -1236,26 +1357,214 @@ fn export(
 ) -> Result<(String, bool), HandlerError> {
     let bundle = Bundle::open(&command.bundle).map_err(handler_error)?;
     let head = bundle.manifest().map_err(handler_error)?;
+    if head.source.format == "excalidraw"
+        && Path::new(&command.output)
+            .extension()
+            .and_then(|s| s.to_str())
+            == Some("excalidraw")
+    {
+        if command
+            .to
+            .as_deref()
+            .is_some_and(|format| format != "excalidraw")
+        {
+            return Err(HandlerError::InvalidArgument(
+                "canvas output format mismatch".into(),
+            ));
+        }
+        let report = hcd_formats::export_document(
+            &command.bundle,
+            command.source.as_deref().unwrap_or(""),
+            &command.output,
+            &hcd_formats::ExportOptions {
+                revision: command.revision,
+                fidelity_report: command.fidelity_report.clone(),
+            },
+        )
+        .map_err(handler_error)?;
+        if let Some(path) = command.fidelity_report.as_deref() {
+            write_semantic_fidelity_report(path, &report)?;
+        }
+        return render(
+            &report,
+            format,
+            format!("Exported canvas to {}", command.output),
+        );
+    }
     let target = semantic_target(&command.output, command.to.as_deref())?;
+    if hcd_formats::images::is_image_format(&head.source.format)
+        && hcd_formats::images::is_image_format(&target)
+    {
+        let report = hcd_formats::images::export_image(
+            &bundle,
+            Path::new(&command.output),
+            &hcd_formats::ExportOptions {
+                revision: command.revision,
+                fidelity_report: command.fidelity_report.clone(),
+            },
+        )
+        .map_err(handler_error)?;
+        if let Some(path) = command.fidelity_report.as_deref() {
+            write_semantic_fidelity_report(path, &report)?;
+        }
+        return render(
+            &report,
+            format,
+            format!("Exported image to {}", command.output),
+        );
+    }
+    if target == "pdf" && head.source.format == "docx" {
+        if let Some(source) = command.source.as_ref() {
+            if hash_file(Path::new(source)).map_err(handler_error)? != head.source.sha256 {
+                return Err(handler_error(HcdError::SourceMismatch(
+                    "immutable Word source does not match the imported document".into(),
+                )));
+            }
+        }
+        let revision = command.revision.unwrap_or(head.revision);
+        let theme_stylesheet = command
+            .catalog
+            .as_ref()
+            .map(|path| {
+                hcd_core::DiskCatalog::open(path).and_then(|catalog| {
+                    hcd_core::theme_presentation_css(&catalog, &bundle, Some(revision))
+                })
+            })
+            .transpose()
+            .map_err(handler_error)?
+            .flatten();
+        let pages = super::hdoc_word_pdf::export(
+            &bundle,
+            revision,
+            theme_stylesheet,
+            Path::new(&command.output),
+        )?;
+        let report=FidelityReport{schema_version:HCD_SCHEMA_VERSION.into(),level:FidelityLevel::High,preserved:vec![format!("{pages} pages from the same Word paginator as the editor"),"source section geometry, running headers and footers, table widths, fonts, colors and embedded media".into(),"extractable text and vector PDF output".into()],flattened:vec!["Word-specific objects outside the canonical preview remain subject to the preview fidelity boundary".into()],dropped:vec![],warnings:vec![]};
+        if let Some(path) = command.fidelity_report.as_deref() {
+            write_semantic_fidelity_report(path, &report)?;
+        }
+        return render(
+            &report,
+            format,
+            format!("Exported {pages} preview pages to {}", command.output),
+        );
+    }
+    if target == "html"
+        && !(command.source.is_some() && normalize_format(&head.source.format) == "html")
+    {
+        let theme_stylesheet = command
+            .catalog
+            .as_deref()
+            .map(|path| {
+                let catalog = DiskCatalog::open(path).map_err(handler_error)?;
+                hcd_core::theme_presentation_css(&catalog, &bundle, command.revision)
+                    .map_err(handler_error)
+            })
+            .transpose()?
+            .flatten();
+        let path = Path::new(&command.output);
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        office_engine::render_hcd_html(
+            &bundle,
+            &HtmlPresentationOptions {
+                revision: command.revision,
+                theme_stylesheet,
+                ..Default::default()
+            },
+            temporary.as_file_mut(),
+        )
+        .map_err(handler_error)?;
+        temporary
+            .persist(path)
+            .map_err(|error| HandlerError::IoError(error.error))?;
+        let report = FidelityReport {
+            schema_version: HCD_SCHEMA_VERSION.to_string(),
+            level: FidelityLevel::High,
+            preserved: vec!["canonical HCD layout, text, styles and embedded assets".into()],
+            flattened: vec![],
+            dropped: vec![],
+            warnings: vec![],
+        };
+        if let Some(path) = command.fidelity_report.as_deref() {
+            write_semantic_fidelity_report(path, &report)?;
+        }
+        return render(
+            &report,
+            format,
+            format!("Exported standalone HTML to {}", command.output),
+        );
+    }
     let source_format = normalize_format(&head.source.format);
+    let delimited = matches!(target.as_str(), "csv" | "tsv");
+    if command.sheet.is_some() && !delimited {
+        return Err(HandlerError::InvalidArgument(
+            "--sheet requires CSV or TSV output".to_string(),
+        ));
+    }
+    if command.pdf_pages.is_some() && (target != "pdf" || source_format != "pdf") {
+        return Err(HandlerError::InvalidArgument(
+            "--pdf-pages requires PDF-to-PDF export".to_string(),
+        ));
+    }
     let options = ExportOptions {
         revision: command.revision,
         fidelity_report: command.fidelity_report.clone(),
     };
-    let report = match command.source.as_deref() {
+    let theme_plan = theme_faces(
+        &bundle,
+        command.revision,
+        command.catalog.as_deref(),
+        &target,
+    )?;
+    let mut theme = ThemeExport {
+        plan: &theme_plan,
+        pdf: PdfFaceOptions::default(),
+    };
+    let mut report = match command.source.as_deref() {
+        source if delimited => hcd_formats::export_delimited_grid(
+            &bundle,
+            source.filter(|_| target == source_format).map(Path::new),
+            Path::new(&command.output),
+            &target,
+            &options,
+            command.sheet.as_deref(),
+        )
+        .map_err(handler_error)?,
         Some(source) if target == source_format => {
-            hcd_formats::export_document(&command.bundle, source, &command.output, &options)
+            theme.pdf.retarget_existing_text = target == "pdf";
+            if let Some(range) = command.pdf_pages {
+                hcd_formats::export_pdf_pages(
+                    &bundle,
+                    Path::new(source),
+                    Path::new(&command.output),
+                    &options,
+                    range.start..=range.end,
+                )
                 .map_err(handler_error)?
+            } else {
+                hcd_formats::export_document(&command.bundle, source, &command.output, &options)
+                    .map_err(handler_error)?
+            }
         }
         _ => semantic_export(
             &bundle,
             &head,
             &command.output,
             &target,
-            command.revision,
-            command.fidelity_report.as_deref(),
+            &options,
+            &mut theme,
+            command.pdf_pages,
         )?,
     };
+    attach_theme_fonts(&theme, Path::new(&command.output), &target, &mut report)?;
+    if let Some(path) = command.fidelity_report.as_deref() {
+        write_semantic_fidelity_report(path, &report)?;
+    }
     render(
         &report,
         format,
@@ -1264,6 +1573,72 @@ fn export(
             command.output, report.level
         ),
     )
+}
+
+/// The faces a pinned theme contributes to an export of this target, or an
+/// empty plan when there is nothing to pin.
+///
+/// Resolved *before* the export runs, because the semantic PDF path needs the
+/// bytes to lay its own body text out with, and the same plan is what
+/// [`attach_theme_fonts`] writes into the file afterwards. One resolution is
+/// what keeps the downloaded file and the fidelity report agreeing about which
+/// face is this document's.
+fn theme_faces(
+    bundle: &Bundle,
+    revision: Option<u64>,
+    catalog: Option<&Path>,
+    target: &str,
+) -> Result<Vec<ThemeFontDecision>, HandlerError> {
+    let Some(kind) = (match target {
+        "docx" | "pptx" => Some(ThemeEmbedKind::Ooxml),
+        "pdf" => Some(ThemeEmbedKind::Pdf),
+        "xlsx" => Some(ThemeEmbedKind::Spreadsheet),
+        _ => None,
+    }) else {
+        return Ok(Vec::new());
+    };
+    let Some(catalog) = catalog else {
+        return Ok(Vec::new());
+    };
+    let catalog = DiskCatalog::open(catalog).map_err(handler_error)?;
+    theme_font_plan(&catalog, bundle, revision, kind).map_err(handler_error)
+}
+
+/// A pinned theme's faces for one export, and what the writer did with them.
+///
+/// The plan is resolved once, before the file is written: the semantic PDF path
+/// lays its body text out in one of these faces, and the same plan is what
+/// [`apply_theme_fonts`] writes into the file's font tables afterwards.
+/// What the writer already did with the faces, and what it may do next, rides
+/// along as [`PdfFaceOptions`].
+#[derive(Default)]
+struct ThemeExport<'a> {
+    plan: &'a [ThemeFontDecision],
+    pdf: PdfFaceOptions,
+}
+
+/// Write the pinned theme's faces into the file that was just exported.
+fn attach_theme_fonts(
+    theme: &ThemeExport,
+    output: &Path,
+    target: &str,
+    report: &mut FidelityReport,
+) -> Result<(), HandlerError> {
+    if theme.plan.is_empty() {
+        return Ok(());
+    }
+    let applied =
+        apply_theme_fonts(output, target, theme.plan, theme.pdf).map_err(handler_error)?;
+    report.preserved.extend(applied.preserved);
+    report
+        .warnings
+        .extend(applied.warnings.into_iter().map(|message| FidelityWarning {
+            code: "HCD_THEME_FONT".to_string(),
+            message,
+            node_id: None,
+            source_part: None,
+        }));
+    Ok(())
 }
 
 fn semantic_target(output: &str, requested: Option<&str>) -> Result<String, HandlerError> {
@@ -1281,39 +1656,49 @@ fn semantic_target(output: &str, requested: Option<&str>) -> Result<String, Hand
         }
     }
     let target = requested.unwrap_or(extension);
-    if !matches!(
-        target.as_str(),
-        "docx" | "xlsx" | "pptx" | "pdf" | "html" | "md" | "txt"
-    ) {
+    if !office_engine::registry::capabilities()
+        .iter()
+        .any(|format| {
+            format.format == target
+                && (format.html_conversion
+                    || format.canonical_html_export
+                    || format.raster_image
+                    || format.delimited_grid_export)
+        })
+    {
         return Err(HandlerError::UnsupportedMode(format!(
-            "HCD export supports .docx, .xlsx, .pptx, .pdf, .html, .md/.markdown, or .txt; found .{target}"
+            "HCD export supports .docx, .xlsx, .csv, .tsv, .pptx, .pdf, .html, .md/.markdown, or .txt; found .{target}"
         )));
     }
     Ok(target)
 }
 
 fn normalize_format(value: &str) -> String {
-    match value
-        .trim()
-        .trim_start_matches('.')
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "htm" => "html".to_string(),
-        "markdown" => "md".to_string(),
-        format => format.to_string(),
-    }
+    let value = value.trim().trim_start_matches('.').to_ascii_lowercase();
+    office_engine::registry::format_for_extension(&value)
+        .map(|format| format.id)
+        .or_else(|| hcd_formats::registry::format_for_extension(&value).map(|format| format.id))
+        .unwrap_or(&value)
+        .to_string()
 }
 
+/// Rebuild a revision as an Office or PDF file from its canonical HCD HTML.
+///
+/// `theme` carries the plan resolved by [`theme_faces`] for this target; the
+/// PDF path draws its body text in the face the theme pins and reports back
+/// which one it used, so the caller can carry those bytes once.
 fn semantic_export(
     bundle: &Bundle,
     head: &HcdManifest,
     output: &str,
     target: &str,
-    requested_revision: Option<u64>,
-    fidelity_report: Option<&Path>,
+    options: &ExportOptions,
+    theme: &mut ThemeExport,
+    pdf_pages: Option<PdfPageRange>,
 ) -> Result<FidelityReport, HandlerError> {
-    if !matches!(target, "docx" | "xlsx" | "pptx" | "pdf" | "md" | "txt") {
+    if !office_engine::registry::format_for_extension(target)
+        .is_some_and(|format| format.can_convert_html())
+    {
         return Err(HandlerError::UnsupportedMode(format!(
             "source-free semantic export supports .docx, .xlsx, .pptx, .pdf, .md, or .txt; .{target} requires its immutable source"
         )));
@@ -1326,7 +1711,24 @@ fn semantic_export(
         )));
     }
     let (manifest, revision) =
-        manifest_at_revision(bundle, head, requested_revision).map_err(handler_error)?;
+        manifest_at_revision(bundle, head, options.revision).map_err(handler_error)?;
+    let mut saved_filter = false;
+    if target == "xlsx" && manifest.source.format == "xlsx" {
+        for page in 0..manifest.index_page_count {
+            let index = bundle
+                .read_index_page(&manifest, page)
+                .map_err(handler_error)?;
+            if index.chunks.iter().any(|descriptor| {
+                descriptor
+                    .grid
+                    .as_ref()
+                    .is_some_and(|grid| grid.auto_filter.is_some())
+            }) {
+                saved_filter = true;
+                break;
+            }
+        }
+    }
     let output_path = Path::new(output);
     let parent = output_path
         .parent()
@@ -1334,29 +1736,40 @@ fn semantic_export(
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
     if target == "pdf" && manifest.profile == "fixed-layout" && manifest.source.format == "pdf" {
-        let pages = super::hdoc_raster_pdf::export(bundle, &manifest, revision, output_path)?;
+        let raster =
+            super::hdoc_raster_pdf::export(bundle, &manifest, revision, output_path, pdf_pages)?;
+        hcd_formats::append_created_images(bundle, output_path, Some(revision))
+            .map_err(handler_error)?;
+        let mut preserved = vec![format!(
+            "{} HCD page rasters and physical page dimensions",
+            raster.pages
+        )];
+        if raster.edited_text {
+            preserved.push("edited text boxes are redrawn over their original page images".into());
+        }
+        if raster.ocr_pages > 0 {
+            preserved.push(format!(
+                "searchable, visually transparent OCR text on {} pages",
+                raster.ocr_pages
+            ));
+        }
         let report = FidelityReport {
             schema_version: HCD_SCHEMA_VERSION.to_string(),
             level: FidelityLevel::Visual,
-            preserved: if revision == 0 {
-                vec![format!("{pages} HCD page rasters and physical page dimensions")]
-            } else {
-                vec![format!("{pages} HCD page rasters and physical page dimensions"),
-                    "edited text boxes are redrawn over their original page images".to_string()]
-            },
-            flattened: vec!["original PDF page text and vector structure are represented by page images".to_string()],
-            dropped: vec!["original selectable PDF text layer and object metadata".to_string()],
+            preserved,
+            flattened: vec!["original visible PDF text and vector structure are represented by page images".to_string()],
+            dropped: vec!["original visible PDF text structure and object metadata".to_string()],
             warnings: vec![FidelityWarning {
                 code: if revision == 0 { "HCD_PDF_RASTER_ONLY_EXPORT" } else { "HCD_PDF_EDITED_VISUAL_EXPORT" }.to_string(),
-                message: if revision == 0 {
-                    "source-free PDF export embeds final HCD page images without decoding all pages at once; use the immutable source for selectable text and exact PDF structure"
-                } else {
+                message: if raster.edited_text {
                     "edited text is drawn over bounded white masks on the original page rasters; placement and font metrics are approximate, so inspect the exported PDF preview before delivery"
+                } else {
+                    "source-free PDF export embeds final HCD page images without decoding all pages at once; use the immutable source for the original visible text and exact PDF structure"
                 }.to_string(),
                 node_id: None, source_part: None,
             }],
         };
-        if let Some(path) = fidelity_report {
+        if let Some(path) = options.fidelity_report.as_deref() {
             write_semantic_fidelity_report(path, &report)?;
         }
         return Ok(report);
@@ -1384,15 +1797,42 @@ fn semantic_export(
     let chunk_count = presentation.chunk_count;
     materialized.as_file_mut().flush()?;
     let assets = semantic_assets(bundle, revision).map_err(handler_error)?;
-    let summary = super::html_convert::convert_html_with_assets(
+    let word_formats = if target == "docx"
+        && manifest.profile == "semantic-flow"
+        && manifest.capabilities.structure_patch
+    {
+        hcd_core::editor_projection(bundle, Some(revision))
+            .map_err(handler_error)?
+            .blocks
+            .into_iter()
+            .filter(|block| {
+                !block.read_only
+                    && (block.content.alignment.is_some()
+                        || block
+                            .content
+                            .inlines
+                            .iter()
+                            .any(|inline| !inline.format.is_empty()))
+            })
+            .map(|block| (block.block_id, block.content))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let summary = office_engine::convert_html_with_word_formats(
         materialized.path(),
         output_path,
         target,
         assets,
+        theme.plan,
+        word_formats,
     )?;
+    hcd_formats::apply_office_features(bundle, output_path, Some(revision))
+        .map_err(handler_error)?;
     let image_count = summary.image_count;
     let embedded_image_count = summary.embedded_image_count;
     let conversion_engine = summary.engine;
+    theme.pdf.drawn_by_writer = summary.pdf_body_face;
 
     let mut warnings = vec![FidelityWarning {
         code: "HCD_CROSS_FORMAT_SEMANTIC_EXPORT".to_string(),
@@ -1409,6 +1849,25 @@ fn semantic_export(
         node_id: None,
         source_part: None,
     }));
+    // A theme face the file carries but the body was not drawn in is the case
+    // an operator is most likely to ask about, so it says why in the same
+    // `HCD_THEME_FONT` stream the exporter's own font sentences use.
+    if let Some(note) = summary.pdf_body_face_note {
+        warnings.push(FidelityWarning {
+            code: "HCD_THEME_FONT".to_string(),
+            message: note,
+            node_id: None,
+            source_part: None,
+        });
+    }
+    if saved_filter {
+        warnings.push(FidelityWarning {
+            code: "HCD_XLSX_AUTOFILTER_REQUIRES_SOURCE".to_string(),
+            message: "Use --source with the original XLSX to include the saved worksheet AutoFilter and filtered row visibility".to_string(),
+            node_id: None,
+            source_part: None,
+        });
+    }
     let mut preserved = vec![
         format!("canonical HCD revision {revision} text in chunk sequence order"),
         format!(
@@ -1425,6 +1884,16 @@ fn semantic_export(
     if embedded_image_count > 0 {
         preserved.push(format!(
             "{embedded_image_count} of {image_count} content-addressed HCD image assets embedded in the target artifact; bounded source dimensions and direct slide coordinates are applied when present and target-compatible"
+        ));
+    }
+    if summary.pinned_font_paragraphs > 0 {
+        let split = match summary.pinned_font_split_paragraphs {
+            0 => String::new(),
+            splits => format!("; {splits} slide paragraph(s) were split by line to carry them"),
+        };
+        preserved.push(format!(
+            "block fonts pinned by text.font on {} generated paragraph(s){split}",
+            summary.pinned_font_paragraphs
         ));
     }
     let report = FidelityReport {
@@ -1452,10 +1921,14 @@ fn semantic_export(
                 "source-format opaque parts, annotations and unsupported active content are not embedded in the cross-format artifact".to_string(),
             ]
         },
-        dropped: Vec::new(),
+        dropped: if saved_filter {
+            vec!["saved worksheet AutoFilter".to_string()]
+        } else {
+            Vec::new()
+        },
         warnings,
     };
-    if let Some(path) = fidelity_report {
+    if let Some(path) = options.fidelity_report.as_deref() {
         write_semantic_fidelity_report(path, &report)?;
     }
     Ok(report)
@@ -1464,7 +1937,7 @@ fn semantic_export(
 fn semantic_assets(
     bundle: &Bundle,
     revision: u64,
-) -> Result<HashMap<String, super::html_convert::SemanticAsset>, HcdError> {
+) -> Result<HashMap<String, office_engine::SemanticAsset>, HcdError> {
     let records = bundle.read_asset_index_for_revision(revision)?;
     let mut total = 0u64;
     let mut assets = HashMap::with_capacity(records.len());
@@ -1501,7 +1974,7 @@ fn semantic_assets(
         let format = semantic_asset_format(&path)?;
         assets.insert(
             format!("asset://sha256/{}", record.hash),
-            super::html_convert::SemanticAsset { path, format },
+            office_engine::SemanticAsset { path, format },
         );
     }
     Ok(assets)
@@ -1579,7 +2052,7 @@ fn handler_error(error: HcdError) -> HandlerError {
         HcdError::InvalidBundle(message) | HcdError::SourceMismatch(message) => {
             HandlerError::ValidationError(message)
         }
-        HcdError::NodeNotFound(node) => HandlerError::PathNotFound(node),
+        HcdError::NodeNotFound(node) | HcdError::NotFound(node) => HandlerError::PathNotFound(node),
         HcdError::Unsupported(message) => HandlerError::UnsupportedMode(message),
         HcdError::Io(error) => HandlerError::IoError(error),
         other => HandlerError::OperationFailed(other.to_string()),

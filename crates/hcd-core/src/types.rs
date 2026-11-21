@@ -9,6 +9,12 @@ pub struct SourceDescriptor {
     pub size_bytes: u64,
 }
 
+impl SourceDescriptor {
+    pub fn is_spreadsheet(&self) -> bool {
+        matches!(self.format.as_str(), "xlsx" | "csv" | "tsv")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssetDescriptor {
@@ -60,6 +66,10 @@ pub struct HcdManifest {
     pub index_page_count: usize,
     pub chunk_count: usize,
     pub styles_href: String,
+    /// Immutable font-catalog theme pinned to this head.
+    /// Historical revisions keep the id stored on their own revision record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_revision_id: Option<String>,
     pub capabilities: HcdCapabilities,
     /// Import-time fidelity contract for the canonical HTML representation.
     /// A source-backed export can still preserve opaque package parts exactly.
@@ -112,6 +122,213 @@ pub struct GridChunkAddress {
     pub default_column_width_emu: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_row_height_emu: Option<u32>,
+    /// OOXML worksheet part backing this sheet. Cell-window descriptors carry
+    /// it so a sheet-scoped edit can still find its source part when the
+    /// worksheet has no mapped cells at all, which is the case for an empty
+    /// worksheet and for a worksheet a patch just created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_part: Option<String>,
+    /// Saved worksheet-wide filter, carried by the first cell chunk only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_filter: Option<GridAutoFilter>,
+    /// Authored charts live on the first cell window or their imported drawing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub charts: Vec<WorksheetChart>,
+    /// Conditional formatting rules carried by the first cell chunk only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<WorksheetCondition>,
+    /// Pivot definitions and their last refreshed output, on the first cell chunk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pivots: Vec<WorksheetPivot>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub enum PivotAggregate {
+    Sum,
+    Count,
+    Average,
+    Min,
+    Max,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PivotMeasure {
+    /// Source column offset from the first column of sourceRange, zero-based.
+    pub field: u32,
+    pub aggregate: PivotAggregate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorksheetPivotConfig {
+    pub name: String,
+    pub source_sheet_id: String,
+    pub source_range: WorksheetChartRange,
+    pub anchor_row: u32,
+    pub anchor_column: u32,
+    pub rows: Vec<u32>,
+    pub columns: Vec<u32>,
+    pub values: Vec<PivotMeasure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(
+    tag = "type",
+    content = "value",
+    rename_all = "camelCase",
+    deny_unknown_fields
+)]
+pub enum PivotCell {
+    Blank,
+    Text(String),
+    Number(String),
+    Boolean(bool),
+    Error(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PivotReport {
+    pub header_rows: u32,
+    pub label_columns: u32,
+    pub cells: Vec<Vec<PivotCell>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PivotSnapshot {
+    pub source_revision: u64,
+    /// Pin the source coordinates at refresh, even when the live range moves.
+    pub source_config: WorksheetPivotConfig,
+    pub report: PivotReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PivotOrigin {
+    pub part: String,
+    pub range: WorksheetChartRange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorksheetPivot {
+    pub id: String,
+    pub config: WorksheetPivotConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<PivotSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<PivotOrigin>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub removed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorksheetConditionOperator {
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
+    Equal,
+    NotEqual,
+    Between,
+    NotBetween,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorksheetConditionConfig {
+    pub range: WorksheetChartRange,
+    pub operator: WorksheetConditionOperator,
+    pub values: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stop_if_true: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorksheetCondition {
+    pub id: String,
+    pub config: WorksheetConditionConfig,
+    /// Priority of the source rule, when this rule replaces one in the original.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_priority: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub edited: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub removed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorksheetChartKind {
+    Column,
+    Bar,
+    Line,
+    Pie,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorksheetChartRange {
+    pub start_row: u32,
+    pub end_row: u32,
+    pub start_column: u32,
+    pub end_column: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorksheetChartConfig {
+    pub kind: WorksheetChartKind,
+    pub title: String,
+    /// The first row names the series and the first column contains categories.
+    pub range: WorksheetChartRange,
+    pub anchor_row: u32,
+    pub anchor_column: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorksheetChart {
+    pub id: String,
+    pub config: WorksheetChartConfig,
+    /// Retains the last selection when a structural edit removes its source.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub source_missing: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub imported: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub edited: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub removed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GridAutoFilter {
+    pub start_row: u32,
+    pub end_row: u32,
+    pub start_column: u32,
+    pub end_column: u32,
+    pub column: u32,
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_criteria: Vec<GridFilterCriterion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GridFilterCriterion {
+    pub column: u32,
+    pub query: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,6 +364,19 @@ pub struct ChunkDescriptor {
     /// visible worksheet windows without downloading every HTML fragment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<GridChunkAddress>,
+    /// Viewed page order and clockwise rotation relative to the source PDF.
+    /// Only the first chunk carries this immutable revision metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pdf_layout: Vec<PdfPagePlacement>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PdfPagePlacement {
+    /// An omitted source page creates a blank A4 page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_page: Option<u32>,
+    pub rotation: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,8 +443,18 @@ pub struct Annotation {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AnnotationSet {
+    #[serde(
+        default,
+        skip_serializing_if = "crate::office_features::OfficeFeatures::is_empty"
+    )]
+    pub office_features: crate::office_features::OfficeFeatures,
     pub schema_version: String,
     pub annotations: Vec<Annotation>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::docx_review::DocxReview::is_empty"
+    )]
+    pub docx_review: crate::docx_review::DocxReview,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,6 +478,99 @@ pub struct PptxShapeGeometry {
     pub y_emu: u64,
     pub width_emu: u64,
     pub height_emu: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PptxPreset {
+    Rect,
+    RoundRect,
+    Ellipse,
+}
+
+impl PptxPreset {
+    pub fn drawingml(self) -> &'static str {
+        match self {
+            Self::Rect => "rect",
+            Self::RoundRect => "roundRect",
+            Self::Ellipse => "ellipse",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PptxObjectMove {
+    pub node_id: String,
+    pub before: PptxShapeGeometry,
+    pub geometry: PptxShapeGeometry,
+}
+
+/// Direct DrawingML run formatting. Absent fields keep the run's current value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PptxRunFormat {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size_pt: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// Paragraph alignment of one slide text shape and how its text sits in it.
+/// Absent fields keep the shape's current value; a shape is aligned as a whole
+/// the way selecting its frame does in a desktop editor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PptxShapeAlignPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizontal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<String>,
+}
+
+/// Direct spreadsheet cell formatting. Absent fields keep the cell's current value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct XlsxCellFormatPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size_pt: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+}
+
+/// Direct spreadsheet alignment and borders. Absent fields keep the cell's current value.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct XlsxCellLayoutPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizontal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<String>,
+}
+
+/// Direct spreadsheet number format. The format code is an Excel format string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct XlsxCellNumberFormatPatch {
+    pub format_code: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -266,12 +599,46 @@ pub struct PptxShapePrecondition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", deny_unknown_fields)]
 pub enum PatchOperation {
+    #[serde(rename = "pdf.page-layout.set", rename_all = "camelCase")]
+    PdfPageLayoutSet { pages: Vec<PdfPagePlacement> },
+    #[serde(rename = "xlsx.auto-filter.set", rename_all = "camelCase")]
+    XlsxAutoFilterSet {
+        sheet_id: String,
+        filter: Option<GridAutoFilter>,
+    },
     #[serde(rename = "text.splice", rename_all = "camelCase")]
     TextSplice {
         node_id: String,
         start: usize,
         delete_count: usize,
         insert_text: String,
+        precondition: NodePrecondition,
+    },
+    /// Assign a font family to the whole editable text node (paragraph/run block),
+    /// by script slot. This writes the canonical `data-hcd-font*` attributes and an
+    /// inline `font-family` style onto the node so HCD preview and pure-Rust semantic
+    /// export use the chosen face; it does not change the node's extracted text, so
+    /// the precondition node hash is the unchanged text hash. Source-backed
+    /// (`--source`) DOCX export writes the slots onto the mapped run's `w:rFonts`,
+    /// and PPTX export onto its `a:latin` / `a:ea` / `a:cs`. XLSX and PDF source
+    /// export still reject a revision that carries this change rather than silently
+    /// dropping the font, mirroring the `node.style` contract.
+    #[serde(rename = "text.font", rename_all = "camelCase")]
+    TextFont {
+        node_id: String,
+        font: FontPatch,
+        precondition: NodePrecondition,
+    },
+    /// Remove a `text.font` pin from one canonical text node. Omitting a slot in
+    /// `text.font` cannot do this, because that operation always pins at least one
+    /// face; this one drops the whole pin, so the node falls back to the face it
+    /// had before: its source run font on a `--source` export, the theme slots
+    /// otherwise. Only a node carrying `data-hcd-font-patched` can be cleared, so
+    /// a face that came from the source document is never rewritten. The node's
+    /// text is unchanged, so the precondition stays the unchanged text hash.
+    #[serde(rename = "text.font.clear", rename_all = "camelCase")]
+    TextFontClear {
+        node_id: String,
         precondition: NodePrecondition,
     },
     /// Add a positioned editable text box to a raster-backed PDF page.
@@ -299,6 +666,11 @@ pub enum PatchOperation {
         node_id: String,
         precondition: NodePrecondition,
     },
+    /// Add positioned, selectable OCR text to physical PDF pages.
+    #[serde(rename = "pdf.ocr.apply", rename_all = "camelCase")]
+    PdfOcrApply {
+        pages: Vec<crate::pdf_ocr::PdfOcrPage>,
+    },
     /// Add an editable text shape at slide coordinates measured in EMU.
     #[serde(rename = "pptx.text.insert", rename_all = "camelCase")]
     PptxTextInsert {
@@ -318,10 +690,118 @@ pub enum PatchOperation {
         geometry: PptxShapeGeometry,
         precondition: PptxShapePrecondition,
     },
+    /// Create an editable DrawingML primitive, with its own slide-object ID.
+    #[serde(rename = "pptx.shape.insert", rename_all = "camelCase")]
+    PptxShapeInsert {
+        chunk_id: String,
+        geometry: PptxShapeGeometry,
+        preset: PptxPreset,
+        fill: String,
+        stroke: String,
+    },
+    /// Move or resize objects in one slide fragment as a single revision.
+    #[serde(rename = "pptx.objects.transform", rename_all = "camelCase")]
+    PptxObjectsTransform {
+        chunk_id: String,
+        objects: Vec<PptxObjectMove>,
+    },
+    #[serde(rename = "pptx.group.create", rename_all = "camelCase")]
+    PptxGroupCreate {
+        chunk_id: String,
+        node_ids: Vec<String>,
+    },
+    #[serde(rename = "pptx.group.ungroup", rename_all = "camelCase")]
+    PptxGroupUngroup { chunk_id: String, group_id: String },
+    /// Replace a slide's ordered animation track in a single revision.
+    #[serde(rename = "pptx.animations.set", rename_all = "camelCase")]
+    PptxAnimationsSet {
+        chunk_id: String,
+        effects: Vec<crate::pptx_animation::PptxAnimation>,
+    },
+    /// Change the native master shared by the selected slide.
+    #[serde(rename = "pptx.master.background", rename_all = "camelCase")]
+    PptxMasterBackgroundSet { chunk_id: String, color: String },
+    /// Edit one shared master text style while retaining higher-priority overrides.
+    #[serde(rename = "pptx.master.text-style", rename_all = "camelCase")]
+    PptxMasterTextStyleSet {
+        chunk_id: String,
+        style: crate::pptx_design::PptxMasterTextStyle,
+    },
+    /// Add, update, or remove a range-linked native worksheet chart.
+    #[serde(rename = "xlsx.chart.set", rename_all = "camelCase")]
+    XlsxChartSet {
+        sheet_id: String,
+        chart_id: String,
+        config: Option<WorksheetChartConfig>,
+    },
+    /// Add, update, or remove a worksheet conditional formatting rule.
+    #[serde(rename = "xlsx.condition.set", rename_all = "camelCase")]
+    XlsxConditionSet {
+        sheet_id: String,
+        condition_id: String,
+        config: Option<WorksheetConditionConfig>,
+    },
+    /// Set a native pivot configuration and refresh from the base revision.
+    #[serde(rename = "xlsx.pivot.set", rename_all = "camelCase")]
+    XlsxPivotSet {
+        sheet_id: String,
+        pivot_id: String,
+        config: Option<WorksheetPivotConfig>,
+    },
     /// Remove one HCD-created slide text box from the current revision.
     #[serde(rename = "pptx.text.delete", rename_all = "camelCase")]
     PptxTextDelete {
         node_id: String,
+        precondition: NodePrecondition,
+    },
+    /// Set direct bold, italic, underline, size, or color on one DrawingML run.
+    #[serde(rename = "pptx.run.format", rename_all = "camelCase")]
+    PptxRunFormat {
+        node_id: String,
+        format: PptxRunFormat,
+        precondition: NodePrecondition,
+    },
+    /// Align every paragraph of one slide text shape and anchor its text body.
+    #[serde(rename = "pptx.shape.align", rename_all = "camelCase")]
+    PptxShapeAlign {
+        node_id: String,
+        align: PptxShapeAlignPatch,
+        precondition: NodePrecondition,
+    },
+    /// Set direct font and solid fill formatting on one worksheet cell.
+    #[serde(rename = "xlsx.cell.format", rename_all = "camelCase")]
+    XlsxCellFormat {
+        node_id: String,
+        format: XlsxCellFormatPatch,
+        precondition: NodePrecondition,
+    },
+    /// Replace the text and font runs of an existing worksheet string cell.
+    #[serde(rename = "xlsx.richText.set", rename_all = "camelCase")]
+    XlsxRichTextSet {
+        node_id: String,
+        runs: Vec<crate::XlsxInlineRun>,
+        precondition: NodePrecondition,
+    },
+    /// Create a string cell with native font runs at an empty worksheet address.
+    #[serde(rename = "xlsx.richText.create", rename_all = "camelCase")]
+    XlsxRichTextCreate {
+        sheet_id: String,
+        row: u32,
+        column: u32,
+        runs: Vec<crate::XlsxInlineRun>,
+    },
+    /// Set direct alignment, wrap, or borders on one worksheet cell.
+    #[serde(rename = "xlsx.cell.layout", rename_all = "camelCase")]
+    XlsxCellLayout {
+        node_id: String,
+        layout: XlsxCellLayoutPatch,
+        precondition: NodePrecondition,
+    },
+    /// Set the Excel number format code on one worksheet cell.
+    #[serde(rename = "xlsx.cell.numberFormat", rename_all = "camelCase")]
+    XlsxCellNumberFormat {
+        node_id: String,
+        number_format: XlsxCellNumberFormatPatch,
         precondition: NodePrecondition,
     },
     /// Merge a rectangle of existing XLSX cells. Covered cells must be empty.
@@ -364,6 +844,14 @@ pub enum PatchOperation {
         row: u32,
         column: u32,
         text: String,
+    },
+    /// Clear a literal introduced by a specific revision into an empty cell.
+    #[serde(rename = "xlsx.cell.clear", rename_all = "camelCase")]
+    XlsxCellClear {
+        node_id: String,
+        sheet_id: String,
+        created_revision: u64,
+        precondition: NodePrecondition,
     },
     /// Set a native formula in an existing editable literal or ordinary formula cell.
     #[serde(rename = "xlsx.formula.set", rename_all = "camelCase")]
@@ -449,6 +937,62 @@ pub enum PatchOperation {
         row: u32,
         height_points: f64,
     },
+    /// Rename a worksheet tab. Cell coordinates, values, and styles are
+    /// untouched; formulas that reference the sheet follow the new name.
+    #[serde(rename = "xlsx.sheet.rename", rename_all = "camelCase")]
+    XlsxSheetRename { sheet_id: String, name: String },
+    /// Add a worksheet tab after the last one. HCD mints the tab's grid
+    /// identity, its worksheet part name, and one empty window for it, so the
+    /// tab is editable straight away.
+    #[serde(rename = "xlsx.sheet.add", rename_all = "camelCase")]
+    XlsxSheetAdd { name: String },
+    /// Delete a worksheet tab. Every chunk of that worksheet leaves the index,
+    /// and a formula that named the tab breaks the way Excel breaks it: the
+    /// reference collapses to `#REF!`. A workbook is never left without a
+    /// visible worksheet.
+    #[serde(rename = "xlsx.sheet.delete", rename_all = "camelCase")]
+    XlsxSheetDelete { sheet_id: String },
+    /// Freeze the first `rows` rows and the first `columns` columns of one
+    /// worksheet, the way Excel's Freeze Panes does. Every window of that
+    /// worksheet gets the same split, so the frozen band stays put whichever
+    /// window it is read in; `0`/`0` unfreezes the worksheet. Cells, widths,
+    /// heights, and styles are untouched.
+    #[serde(rename = "xlsx.sheet.freeze", rename_all = "camelCase")]
+    XlsxSheetFreeze {
+        sheet_id: String,
+        rows: u32,
+        columns: u32,
+    },
+    /// Append one blank slide after the last one. HCD mints the slide part the
+    /// page will need in the package and one empty page chunk carrying it, so
+    /// the new slide is there to type into with the normal text box right away.
+    #[serde(rename = "pptx.slide.add", rename_all = "camelCase")]
+    PptxSlideAdd {},
+    /// Drop one slide page, named by the chunk that holds it. The page and every
+    /// text node it carries leave the document, and a source-backed export loses
+    /// the slide part with them. A presentation cannot drop its last slide.
+    #[serde(rename = "pptx.slide.delete", rename_all = "camelCase")]
+    PptxSlideDelete { chunk_id: String },
+    /// Move one slide page through the deck, named by a chunk that holds it.
+    /// Version 43 moves one place; version 48 names the final zero-based index.
+    /// A page that spans chunks moves as a whole. HCD keeps order on the index, so a
+    /// source-backed export writes the presentation's slide list to match it.
+    #[serde(rename = "pptx.slide.reorder", rename_all = "camelCase")]
+    PptxSlideReorder {
+        chunk_id: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        direction: String,
+        /// Final zero-based slide position, accepted by hcd-patch/48 only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_index: Option<usize>,
+    },
+    /// Duplicate one slide page, named by a chunk that holds it. The copy is a
+    /// page of its own, carrying its own chunks under a slide part the source
+    /// package does not have yet, and it stands immediately behind the page it
+    /// was copied from. Its text nodes are new nodes: the copy is edited on its
+    /// own and never reaches back at the original.
+    #[serde(rename = "pptx.slide.copy", rename_all = "camelCase")]
+    PptxSlideCopy { chunk_id: String },
     /// Presentation-layer styling for one canonical editable text node.
     /// This changes HCD HTML and its root hash. Source-backed exporters must
     /// either support the style or reject the export before writing output.
@@ -457,6 +1001,14 @@ pub enum PatchOperation {
         node_id: String,
         style: NodeStylePatch,
         precondition: NodePrecondition,
+    },
+    /// Insert a staged image with an explicit, format-native rectangle.
+    #[serde(rename = "image.insert", rename_all = "camelCase")]
+    ImageInsert {
+        chunk_id: String,
+        asset_hash: String,
+        geometry: ImageGeometry,
+        alt: String,
     },
     /// Replace the content-addressed payload displayed by one mapped image
     /// node. The asset must already be indexed or have been staged with the
@@ -474,6 +1026,22 @@ pub enum PatchOperation {
         geometry: ImageGeometry,
         precondition: VisualPrecondition,
     },
+    /// Save an editable raster stack and render the image node in one revision.
+    #[serde(rename = "image.layers.set", rename_all = "camelCase")]
+    ImageLayersSet {
+        node_id: String,
+        stack: crate::image_layers::ImageLayerStack,
+        precondition: VisualPrecondition,
+    },
+    /// Change the native placement of an existing Word picture.
+    #[serde(rename = "docx.picture.layout", rename_all = "camelCase")]
+    DocxPictureLayoutSet {
+        node_id: String,
+        /// Null removes the override for this picture and restores its source layout.
+        #[serde(deserialize_with = "required_picture_layout")]
+        layout: Option<DocxPictureLayout>,
+        precondition: VisualPrecondition,
+    },
     #[serde(rename = "annotation.upsert", rename_all = "camelCase")]
     AnnotationUpsert { annotation: Annotation },
     #[serde(rename = "annotation.remove", rename_all = "camelCase")]
@@ -484,11 +1052,21 @@ impl PatchOperation {
     pub fn node_id(&self) -> Option<&str> {
         match self {
             Self::TextSplice { node_id, .. }
+            | Self::TextFont { node_id, .. }
+            | Self::TextFontClear { node_id, .. }
             | Self::NodeStyle { node_id, .. }
             | Self::ImageReplace { node_id, .. }
             | Self::ImageGeometry { node_id, .. }
+            | Self::ImageLayersSet { node_id, .. }
+            | Self::DocxPictureLayoutSet { node_id, .. }
             | Self::PptxShapeGeometry { node_id, .. }
             | Self::PptxTextDelete { node_id, .. }
+            | Self::PptxRunFormat { node_id, .. }
+            | Self::PptxShapeAlign { node_id, .. }
+            | Self::XlsxCellFormat { node_id, .. }
+            | Self::XlsxRichTextSet { node_id, .. }
+            | Self::XlsxCellLayout { node_id, .. }
+            | Self::XlsxCellNumberFormat { node_id, .. }
             | Self::PdfTextGeometry { node_id, .. }
             | Self::PdfTextDelete { node_id, .. }
             | Self::XlsxMerge { node_id, .. }
@@ -496,12 +1074,28 @@ impl PatchOperation {
             Self::XlsxFormulaSet { node_id, .. }
             | Self::XlsxFormulaToValue { node_id, .. }
             | Self::XlsxFormulaToNumber { node_id, .. } => Some(node_id),
-            Self::XlsxNumberSet { node_id, .. } => Some(node_id),
+            Self::XlsxNumberSet { node_id, .. } | Self::XlsxCellClear { node_id, .. } => {
+                Some(node_id)
+            }
             Self::AnnotationUpsert { annotation } => Some(&annotation.node_id),
             Self::AnnotationRemove { .. }
+            | Self::ImageInsert { .. }
             | Self::PdfTextInsert { .. }
+            | Self::PdfPageLayoutSet { .. }
+            | Self::PdfOcrApply { .. }
             | Self::PptxTextInsert { .. }
+            | Self::PptxShapeInsert { .. }
+            | Self::PptxObjectsTransform { .. }
+            | Self::PptxGroupCreate { .. }
+            | Self::PptxGroupUngroup { .. }
+            | Self::PptxAnimationsSet { .. }
+            | Self::PptxMasterBackgroundSet { .. }
+            | Self::PptxMasterTextStyleSet { .. }
+            | Self::XlsxChartSet { .. }
+            | Self::XlsxConditionSet { .. }
+            | Self::XlsxPivotSet { .. }
             | Self::XlsxCellSet { .. }
+            | Self::XlsxRichTextCreate { .. }
             | Self::XlsxFormulaCreate { .. }
             | Self::XlsxRowAppend { .. }
             | Self::XlsxRowInsert { .. }
@@ -509,10 +1103,19 @@ impl PatchOperation {
             | Self::XlsxColumnInsert { .. }
             | Self::XlsxColumnDelete { .. }
             | Self::XlsxGridRange { .. }
+            | Self::XlsxAutoFilterSet { .. }
             | Self::XlsxMergeBlank { .. }
             | Self::XlsxRowRemoveLast { .. }
             | Self::XlsxColumnWidth { .. }
-            | Self::XlsxRowHeight { .. } => None,
+            | Self::XlsxRowHeight { .. }
+            | Self::XlsxSheetRename { .. }
+            | Self::XlsxSheetAdd { .. }
+            | Self::XlsxSheetDelete { .. }
+            | Self::XlsxSheetFreeze { .. }
+            | Self::PptxSlideAdd {}
+            | Self::PptxSlideDelete { .. }
+            | Self::PptxSlideReorder { .. }
+            | Self::PptxSlideCopy { .. } => None,
         }
     }
 
@@ -520,15 +1123,39 @@ impl PatchOperation {
         matches!(
             self,
             Self::TextSplice { .. }
+                | Self::TextFont { .. }
+                | Self::TextFontClear { .. }
+                | Self::ImageInsert { .. }
+                | Self::DocxPictureLayoutSet { .. }
                 | Self::PdfTextInsert { .. }
+                | Self::PdfPageLayoutSet { .. }
+                | Self::PdfOcrApply { .. }
                 | Self::PptxTextInsert { .. }
+                | Self::PptxShapeInsert { .. }
+                | Self::PptxObjectsTransform { .. }
+                | Self::PptxGroupCreate { .. }
+                | Self::PptxGroupUngroup { .. }
+                | Self::PptxAnimationsSet { .. }
+                | Self::PptxMasterBackgroundSet { .. }
+                | Self::PptxMasterTextStyleSet { .. }
+                | Self::XlsxChartSet { .. }
+                | Self::XlsxConditionSet { .. }
+                | Self::XlsxPivotSet { .. }
                 | Self::PptxShapeGeometry { .. }
                 | Self::PptxTextDelete { .. }
+                | Self::PptxRunFormat { .. }
+                | Self::PptxShapeAlign { .. }
+                | Self::XlsxCellFormat { .. }
+                | Self::XlsxRichTextSet { .. }
+                | Self::XlsxRichTextCreate { .. }
+                | Self::XlsxCellLayout { .. }
+                | Self::XlsxCellNumberFormat { .. }
                 | Self::PdfTextGeometry { .. }
                 | Self::PdfTextDelete { .. }
                 | Self::XlsxMerge { .. }
                 | Self::XlsxUnmerge { .. }
                 | Self::XlsxCellSet { .. }
+                | Self::XlsxCellClear { .. }
                 | Self::XlsxFormulaSet { .. }
                 | Self::XlsxFormulaToValue { .. }
                 | Self::XlsxFormulaToNumber { .. }
@@ -540,13 +1167,23 @@ impl PatchOperation {
                 | Self::XlsxColumnInsert { .. }
                 | Self::XlsxColumnDelete { .. }
                 | Self::XlsxGridRange { .. }
+                | Self::XlsxAutoFilterSet { .. }
                 | Self::XlsxMergeBlank { .. }
                 | Self::XlsxRowRemoveLast { .. }
                 | Self::XlsxColumnWidth { .. }
                 | Self::XlsxRowHeight { .. }
+                | Self::XlsxSheetRename { .. }
+                | Self::XlsxSheetAdd { .. }
+                | Self::XlsxSheetDelete { .. }
+                | Self::XlsxSheetFreeze { .. }
+                | Self::PptxSlideAdd { .. }
+                | Self::PptxSlideDelete { .. }
+                | Self::PptxSlideReorder { .. }
+                | Self::PptxSlideCopy { .. }
                 | Self::NodeStyle { .. }
                 | Self::ImageReplace { .. }
                 | Self::ImageGeometry { .. }
+                | Self::ImageLayersSet { .. }
         )
     }
 }
@@ -582,10 +1219,98 @@ pub struct ImageGeometry {
     pub unit: ImageGeometryUnit,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DocxPictureWrap {
+    Inline,
+    Square,
+    TopAndBottom,
+    Behind,
+    InFront,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DocxPictureAlignment {
+    Left,
+    Center,
+    Right,
+}
+
+impl DocxPictureAlignment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Center => "center",
+            Self::Right => "right",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DocxPictureWrapSide {
+    BothSides,
+    Left,
+    Right,
+    Largest,
+}
+
+impl DocxPictureWrapSide {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BothSides => "bothSides",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Largest => "largest",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DocxPictureLayout {
+    pub wrap: DocxPictureWrap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizontal_alignment: Option<DocxPictureAlignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizontal_offset_emu: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical_offset_emu: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_distance_emu: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap_side: Option<DocxPictureWrapSide>,
+}
+
+fn required_picture_layout<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<DocxPictureLayout>, D::Error> {
+    Option::<DocxPictureLayout>::deserialize(deserializer)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VisualPrecondition {
     pub visual_hash: String,
+}
+
+/// Font family slots requested by a `text.font` operation. At least one slot
+/// must be present. Values are validated to a plain, safe CSS font-family token
+/// (no quotes, semicolons, `<`, `>`, or control characters) before they reach the
+/// node's inline style. `latin` is the primary face written to `font-family`.
+///
+/// The same three slots describe the face an editor block carries, so a block
+/// font and a pinned run font travel through the code as one type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FontPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub east_asia: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bidi: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -653,7 +1378,18 @@ pub struct ApplyResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CanvasRewriteReceipt {
+    pub owner: String,
+    pub epoch: u64,
+    pub cursor: canvas_core::spec::SpecCursor,
+    pub inverse_href: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RevisionRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_rewrite: Option<CanvasRewriteReceipt>,
     pub schema_version: String,
     pub document_id: String,
     pub revision: u64,
@@ -670,6 +1406,9 @@ pub struct RevisionRecord {
     pub author_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_name: Option<String>,
+    /// Catalog theme pinned when this revision was written. Older records omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_revision_id: Option<String>,
     pub root_hash: String,
     pub annotation_root_hash: String,
     pub index_prefix: String,
@@ -683,6 +1422,11 @@ pub struct RevisionRecord {
     /// field and resolve to the original `assets/index.json`.
     #[serde(default = "default_asset_index_href")]
     pub asset_index_href: String,
+    /// Stylesheet committed into this revision's body root. Documents written
+    /// before theme pinning and content-only revisions keep `styles.css`; a
+    /// theme pin records a pinned stylesheet here so history stays verifiable.
+    #[serde(default = "default_styles_href")]
+    pub styles_href: String,
     pub created_at_epoch_ms: u128,
     #[serde(default)]
     pub dirty_node_ids: Vec<String>,
@@ -699,6 +1443,16 @@ pub struct RevisionRecord {
     /// Formula cells converted to literal values in this revision.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub converted_formula_node_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub grid_values_reordered: bool,
+    /// A saved worksheet filter changed the index without editing cells.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub grid_filter_changed: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pdf_layout_changed: bool,
+    /// Native scene metadata can change without changing a mapped text node.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pptx_scene_changed: bool,
     /// Sequential row insertions, expressed in the worksheet coordinates at each revision.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grid_row_insertions: Vec<GridRowInsertion>,
@@ -709,8 +1463,83 @@ pub struct RevisionRecord {
     pub grid_column_insertions: Vec<GridColumnInsertion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grid_column_deletions: Vec<GridColumnDeletion>,
+    /// Sequential worksheet tab renames in worksheet-part coordinates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sheet_renames: Vec<SheetRename>,
+    /// Worksheets this revision created. Their part is not in the source
+    /// workbook, so a source-backed export has to add it rather than rewrite it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sheet_additions: Vec<SheetAddition>,
+    /// Worksheets this revision deleted. A source-backed export drops the part
+    /// they carried and rewrites whatever named them in the same pass.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sheet_removals: Vec<SheetRemoval>,
+    /// Slides this revision created. Their part is not in the source package,
+    /// so a source-backed export has to add it rather than rewrite it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slide_additions: Vec<SlideAddition>,
+    /// Slides this revision dropped, named by the part their page pointed at.
+    /// The export takes that part, its relationship, its entry in the slide list,
+    /// and its content-type override out of the package.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slide_removals: Vec<SlideRemoval>,
+    /// Slides this revision moved against a neighbour. The order itself is on the
+    /// index, which every revision keeps as its own copy, so a source-backed
+    /// export only needs to know that a page moved before it reads the deck's
+    /// order out of that index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slide_reorders: Vec<SlideReorder>,
+    /// Slides this revision copied, as the part the copy now points at and the
+    /// part it was copied from. A copy has no page in the source package, so a
+    /// source-backed export writes the part the original's part says to copy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slide_copies: Vec<SlideCopy>,
+    /// A topology edit is replayed after the native leaf shapes and media have been written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide_group_edit: Option<crate::pptx_group::SlideGroupEdit>,
+    /// Explicit shared master fills pinned to this snapshot.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pptx_master_backgrounds: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pptx_master_text_styles: crate::pptx_design::PptxMasterTextStyles,
     #[serde(default, skip_serializing_if = "is_false")]
     pub structural_change: bool,
+}
+
+/// Slide moved at one revision, named by the part its page points at. Which way
+/// it went is not recorded: the index this revision wrote already answers that,
+/// and a second record of the same fact could only disagree with it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SlideReorder {
+    pub slide_part: String,
+}
+
+/// Slide copied at one revision. Two parts travel: the page the copy stands for
+/// now, which the source package does not hold yet, and the page it was drawn
+/// from, which is where a source-backed export reads the content to write.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SlideCopy {
+    pub slide_part: String,
+    pub source_slide_part: String,
+}
+
+/// Slide removed at one revision. Only the part travels: the page, its text
+/// nodes, and their history are already recorded elsewhere in the revision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SlideRemoval {
+    pub slide_part: String,
+}
+
+/// Slide created at one revision, named by the part its page points at. The
+/// page itself lives on the chunks, so a later edit of the slide is not copied
+/// into this record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SlideAddition {
+    pub slide_part: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -718,6 +1547,37 @@ pub struct RevisionRecord {
 pub struct GridRowInsertion {
     pub sheet_part: String,
     pub before_row: u32,
+}
+
+/// Worksheet tab rename recorded at one revision. Source-backed export replays
+/// these in revision order, so a chain of renames lands on the final name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SheetRename {
+    pub sheet_part: String,
+    pub old_name: String,
+    pub new_name: String,
+}
+
+/// Worksheet created at one revision, addressed by the part it needs in the
+/// package and by the tab position it took. The display name lives on the
+/// worksheet chunks, so a later rename is not copied into this record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SheetAddition {
+    pub sheet_part: String,
+    pub sheet_index: usize,
+}
+
+/// Worksheet deleted at one revision, named by the part its tab pointed at and
+/// by the tab name references still carry. A worksheet HCD created and later
+/// deleted has no part in the source workbook at all, so the export drops the
+/// addition rather than removing anything.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SheetRemoval {
+    pub sheet_part: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -749,6 +1609,10 @@ fn is_false(value: &bool) -> bool {
 
 fn default_asset_index_href() -> String {
     "assets/index.json".to_string()
+}
+
+fn default_styles_href() -> String {
+    "styles.css".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -822,6 +1686,8 @@ pub struct TextNodeLookup {
     pub revision: u64,
     #[serde(flatten)]
     pub node: TextExtractEntry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xlsx_runs: Option<Vec<crate::XlsxInlineRun>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -833,6 +1699,10 @@ pub struct ImageNodeState {
     pub asset_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub geometry: Option<ImageGeometry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docx_drawing_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docx_picture_layout: Option<DocxPictureLayout>,
     pub source: SourceAnchor,
 }
 

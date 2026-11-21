@@ -129,8 +129,8 @@ fn format_nodes_compact(
         let mut line = node.path.clone();
         let rows = node_format(node, "rows");
         let cols = node_format(node, "cols");
-        if node.element_type == "table" && rows.is_some() && cols.is_some() {
-            line.push_str(&format!("\t[table {}x{}]", rows.unwrap(), cols.unwrap()));
+        if let ("table", Some(rows), Some(cols)) = (node.element_type.as_str(), rows, cols) {
+            line.push_str(&format!("\t[table {rows}x{cols}]"));
         } else {
             let label = compact_label(handler, node);
             line.push_str(&format!(

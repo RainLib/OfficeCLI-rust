@@ -1,0 +1,572 @@
+{
+  "date": "2026-11-15",
+  "branch": "feature/hcd-font-format-integration",
+  "baseCommit": "ccb5fd5",
+  "worktree": "uncommitted changes included",
+  "overallGoal": "incomplete",
+  "rust": {
+    "toolchain": "1.90.0",
+    "command": "cargo +1.90.0 test --workspace",
+    "passed": 1052,
+    "failed": 0,
+    "agentSubsetPassed": 15,
+    "clippy": "passed --all-targets -- -D warnings; final DOCX inline fidelity phase",
+    "format": "passed --all -- --check; final DOCX inline fidelity phase",
+    "debugBuild": "passed",
+    "firstPhasePassed": 1024,
+    "workflowSubsetPassed": 6
+  },
+  "frontend": {
+    "standaloneEditorBuild": "passed",
+    "embeddedEditorBuild": "passed",
+    "adminBuild": "passed earlier; not rerun in DOCX inline fidelity phase",
+    "unitTestsPassed": 15,
+    "latestBuildAndUnitPhase": "docxInlineFidelitySupplement; final frontend source"
+  },
+  "nativeFormulaProbe": {
+    "passed": 5,
+    "mismatches": 0
+  },
+  "extendedBrowserRegression": {
+    "passed": 46,
+    "failed": 0,
+    "durationReported": "2.9m",
+    "browser": "locally installed Google Chrome",
+    "files": [
+      "workspace.spec.ts",
+      "agent-harness.spec.ts",
+      "agent-run-status.spec.ts"
+    ],
+    "modelResponses": "scripted local provider, not a live OpenAI model certification",
+    "services": "real isolated API, collaboration sidecar, MCP and editor",
+    "coverage": [
+      "checked scalar formula caches, actual cell clipboard values, dependency updates and native export readback",
+      "all seven semantic/fixed/grid formats: harness editing, verification and export",
+      "full PPT rebuild and a repaired ten-page illustrated pronunciation presentation",
+      "semantic offline journals after page closure and browser SIGKILL, identity and generation isolation",
+      "journal storage failures, active-writer maintenance and corrupt journal download",
+      "API SIGKILL: interrupted tasks, owner isolation, preserved receipts and released leases",
+      "conflict replanning, cancellation, table collaboration, viewport preservation and bounded undo"
+    ]
+  },
+  "finalFrontendRoomGuardRegression": {
+    "passed": 6,
+    "failed": 0,
+    "durationReported": "19.1s",
+    "purpose": "after guarding detached-room save responses from acknowledging a newer room"
+  },
+  "ci": "workflow configured; no remote run certified",
+  "referenceDocuments": {
+    "pdfAndDocxVersionRelation": "user unsure or not the same version",
+    "sameSourceOfficeWpsFidelityCertified": false
+  },
+  "remaining": [
+    "native rich-text/multi-cell and cross-device input recovery; undownloaded image conversion result blobs and one-click remote mask resubmission",
+    "continuation of legacy records lacking private execution data, changed spreadsheet addresses and PPT queues interrupted by human writes; standalone image uncertain writes remain guarded",
+    "task/workflow history pagination and archival, target remapping; illustration retention boundaries and provider-side billing uncertainty",
+    "verified natural-language dependency planning, changed-source replanning and object-level compensation preserving intervening human edits",
+    "distributed worker fencing, external direct-bundle writer coordination and long-running scale verification",
+    "traceable same-source Office/WPS layout references and complex object editing",
+    "clean-checkout and remote CI verification",
+    "broader formula/date/precision/array semantics and dedicated literal type creation; reimport legacy bundles for type metadata"
+  ],
+  "literalTypesSupplement": {
+    "status": "targeted-validation-passed; final-cargo-check-passed; latest-concurrent-integration-snapshot-needs-aggregate-gates",
+    "date": "2026-11-15",
+    "rustFullSuiteEarlierThisPhase": {
+      "passed": 1026,
+      "failed": 0
+    },
+    "rustClippyEarlierThisPhase": "passed with latest literal metadata changes, before concurrent integration module",
+    "changedRustFilesFormat": "passed",
+    "frontendBuild": "standalone and embedded passed after final popup fix",
+    "frontendUnitTests": {
+      "passed": 8,
+      "failed": 0
+    },
+    "nativeFormulaProbe": {
+      "passed": 5,
+      "mismatches": 0
+    },
+    "extendedBrowser": {
+      "passed": 8,
+      "failed": 0,
+      "durationReported": "1.0m"
+    },
+    "finalPopupRegression": {
+      "passed": 1,
+      "failed": 0,
+      "durationReported": "27.1s"
+    },
+    "browserApiBinary": "built before concurrent host integration changes; frontend uses latest source",
+    "resolved": [
+      "typed boolean/error/empty-string imports, including empty shared and inline strings",
+      "literal versus formula error counting; standard Excel error caches synchronized to grid",
+      "literal type metadata updated by text, numeric and formula conversion operations",
+      "no duplicate text patch after rejecting a native boolean edit",
+      "stale formula error hover removed after remote recalculation without moving pointer",
+      "legacy imports without complete literal metadata cannot report guessed results as verified"
+    ],
+    "aggregateRecheck": {
+      "status": "final-check-passed; latest-workspace-full-suite-clippy-and-format-not-recertified",
+      "command": "cargo +1.90.0 check -p officecli",
+      "durationReported": "4.75s",
+      "earlierFailures": "concurrent integration module initially incomplete, then private Decision return type; both subsequently resolved by parallel changes",
+      "concurrentFilesWereNotOverwritten": true
+    },
+    "screenshot": "calculation-native-types.png"
+  },
+  "uncommittedInputSupplement": {
+    "date": "2026-11-15",
+    "status": "targeted-validation-passed; aggregate-rust-tests-passed; aggregate-clippy-and-format-failed",
+    "browser": {
+      "passed": 20,
+      "failed": 0,
+      "durationReported": "1.4m",
+      "newInputJournalTests": 10,
+      "apiBinary": "rebuilt in this phase",
+      "services": "isolated real API, collaboration, editor and MCP; scripted agents for model regression"
+    },
+    "rustWorkspaceTests": {
+      "status": "passed",
+      "observedTotalIncludingDoctests": 1031,
+      "toolchain": "1.90.0"
+    },
+    "frontendBuild": "standalone and embedded passed",
+    "frontendUnitTests": {
+      "passed": 8,
+      "failed": 0
+    },
+    "aggregateClippy": "failed: integration/policy.rs:143 collapsible_if",
+    "aggregateFormat": "failed: host integration modules, exports.rs and hdoc_server.rs",
+    "diffCheck": "passed",
+    "resolved": [
+      "fixed-layout text and new-box placement input recovery",
+      "unapplied grid formula bar and native unconfirmed cell input recovery",
+      "fresh auth, service/user/document/epoch/revision and node guards before recovery",
+      "separate streams for active windows and compare-before-delete protection",
+      "restoration never submits or replays arithmetic; explicit save is required",
+      "native grid focus waits for Rendered lifecycle; current selection stays independent from draft target"
+    ],
+    "report": "../hcd-uncommitted-input-recovery.zh.md",
+    "ci": "input journal selector added; no remote CI success certified",
+    "remaining": [
+      "image edit/mask/candidate persistence",
+      "authorized Agent continuation and cross-document dependencies/compensation",
+      "same-source Office/WPS fidelity",
+      "remaining formula/date/precision/array semantics",
+      "aggregate lint/format and clean-checkout/remote CI"
+    ],
+    "finalGridPresentationRegression": {
+      "passed": 2,
+      "failed": 0,
+      "durationReported": "17.5s",
+      "scope": "human-readable sheet name, bounded target label and usable formula width; native unconfirmed recovery and normal confirmation"
+    }
+  },
+  "latestValidation": "docxInlineFidelitySupplement",
+  "imageRecoverySupplement": {
+    "date": "2026-11-15",
+    "status": "local-aggregate-gates-and-targeted-browser-validation-passed; overall-goal-incomplete",
+    "browser": {
+      "passed": 9,
+      "failed": 0,
+      "durationReported": "1.1m",
+      "newRecoveryTests": 6,
+      "file": "image-workspace.spec.ts",
+      "services": "isolated real API and editor, scripted provider; own Chrome processes for SIGKILL"
+    },
+    "finalStatusAndMaskRegression": {
+      "passed": 2,
+      "failed": 0,
+      "durationReported": "10.9s"
+    },
+    "rustWorkspaceTests": {
+      "passed": 1036,
+      "failed": 0,
+      "includingDoctests": true,
+      "toolchain": "1.90.0"
+    },
+    "clippy": "passed --all-targets -- -D warnings",
+    "format": "passed --all -- --check",
+    "diffCheck": "passed",
+    "frontendBuild": "standalone and embedded passed after final UI update",
+    "frontendUnitTests": {
+      "passed": 10,
+      "failed": 0
+    },
+    "resolved": [
+      "image edit/crop/rotation/adjustment, vector-mask, prompt, agent and conversion parameter input journals",
+      "close/offline/browser-SIGKILL recovery without automatic generation or document commit",
+      "fresh identity/epoch/revision/dimension and bounded-data recovery checks; stale drafts retained for download",
+      "private atomic checkpoints for both illustration generation and standalone inpaint jobs",
+      "API-SIGKILL preserves candidate and mask bytes, ownership and receipts; interrupts active/queued jobs and releases leases without replay",
+      "deterministic apply intents reconciled from immutable revisions; repeat apply returns its receipt",
+      "checkpoint write failure fences workers and rejects further writes; corrupt checkpoint retained",
+      "task interruption shown in workspace; image regression suite added to PR workflow"
+    ],
+    "report": "../hcd-image-recovery.zh.md",
+    "screenshots": "../hcd-image-recovery/",
+    "ci": "configured; no remote workflow or clean checkout certification",
+    "limitations": [
+      "no cross-device local drafts, undownloaded conversion Blob/result-panel recovery or restored local undo stack",
+      "no automatic provider-request resumption, task continuation, distributed leases or cross-document compensation",
+      "same-source Word/WPS fidelity and complex-object coverage remain unverified",
+      "scripted provider tests do not certify live model quality or availability"
+    ]
+  },
+  "agentContinuationSupplement": {
+    "date": "2026-11-15",
+    "status": "local-aggregate-gates-and-targeted-browser-validation-passed; overall-goal-incomplete",
+    "rustWorkspaceTests": {
+      "passed": 1041,
+      "failed": 0,
+      "includingDoctests": true,
+      "toolchain": "1.90.0"
+    },
+    "clippy": "passed --all-targets -- -D warnings",
+    "format": "passed --all -- --check",
+    "diffCheck": "passed",
+    "frontendBuild": "standalone and embedded passed after final status update",
+    "frontendUnitTests": {
+      "passed": 10,
+      "failed": 0
+    },
+    "nativeFormulaProbe": {
+      "passed": 5,
+      "mismatches": 0
+    },
+    "combinedBrowser": {
+      "passed": 19,
+      "failed": 0,
+      "durationReported": "2.3m",
+      "file": "agent-harness.spec.ts",
+      "coverage": [
+        "API SIGKILL and authorized continuation; arithmetic before-write, missing-receipt and saved-result windows",
+        "PPT partial queue continuation and rejection after intervening human edits",
+        "seven-format harness edits, verified readback and export; real conflict replanning",
+        "four-worker spreadsheet team and full PPT/ten-page illustrated production",
+        "HTTP and stdio MCP review/resume; ready illustration reuse"
+      ],
+      "snapshot": "before final spreadsheet address guard, continuation status wording and image retention changes"
+    },
+    "finalPositionAndStatusRegression": {
+      "passed": 13,
+      "failed": 0,
+      "durationReported": "50.7s",
+      "files": [
+        "agent-harness.spec.ts",
+        "agent-run-status.spec.ts"
+      ],
+      "coverage": [
+        "spreadsheet structural address change guard",
+        "API SIGKILL and arithmetic continuation",
+        "ready image reuse",
+        "HTTP/stdio MCP",
+        "authorized continuation status and prior errors"
+      ]
+    },
+    "finalImageAdjacentRegression": {
+      "passed": 10,
+      "failed": 0,
+      "durationReported": "1.1m",
+      "coverage": [
+        "all nine image-workspace tests",
+        "Agent continuation ready image reuse"
+      ],
+      "snapshot": "binary includes final image record retention changes"
+    },
+    "browserCountsOverlap": true,
+    "services": "isolated real API, collaboration sidecar, MCP and editor; random test credentials and own Chrome processes",
+    "modelResponses": "scripted local provider; no new live model or provider availability certification",
+    "failureWindowMethod": "actual edits, API SIGKILL and restart; selected before-write and missing-response windows reconstructed from captured complete tool outputs and fixed document baselines; not random instruction-boundary failure certification",
+    "resolved": [
+      "private atomic model/tool execution cursors; model output persisted before side effects",
+      "canonical patch hash, exact ID/base revision/document/author receipt reconciliation without replaying arithmetic",
+      "owner-only fresh authorization, revision/epoch/process/model/protocol fingerprints and one-use continuation approval",
+      "per-attempt worker fencing, preserved team findings/completed units and new remaining leases",
+      "native-export-verified PPT queue persistence and reuse without additional production model requests",
+      "document illustration tool-call deduplication, ready-resource reuse, explicit retry and stale callback fencing",
+      "spreadsheet structural address change guard and conservative historical revision limit",
+      "HTTP and stdio MCP review/resume plus capability-negotiated UI and latest-authorization status"
+    ],
+    "limits": {
+      "maxAgentsPerProcess": 4,
+      "maxContinuationAttemptsPerRun": 16,
+      "maxPrivateCheckpointBytes": 33554432,
+      "maxExecutionCursorsPerRun": 40,
+      "taskEventsRetained": 512,
+      "recentRunsLoaded": 128,
+      "illustrationHotRecords": 128,
+      "illustrationTerminalRecordCleanupAfterSeconds": 3600,
+      "oldRunWithoutMatchingImageRecord": "conservatively refuse image creation even for a new image request; inspect candidates and create a new task",
+      "providerExactlyOnceBilling": false
+    },
+    "report": "../hcd-agent-continuation.zh.md",
+    "screenshots": [
+      "../hcd-agent-continuation/agent-continuation-review.png",
+      "../hcd-agent-continuation/agent-continuation-completed.png"
+    ],
+    "ci": "workflow selectors configured; no remote workflow or clean checkout certification",
+    "limitations": [
+      "legacy tasks without execution data, standalone image uncertain writes and moved spreadsheet targets cannot be directly replayed",
+      "intervening human writes block reuse of an old PPT queue; submitted revisions remain, without atomic rollback",
+      "finished team execution with no actual patch may fail again and requires replanning; continuation is not a universal planning repair",
+      "historical task pagination, target remapping, cross-device drafts and distributed fencing remain incomplete",
+      "cross-document facts/dependencies/compensation and same-source Word/WPS fidelity remain incomplete",
+      "three browser groups overlap and have distinct snapshots; their counts must not be summed"
+    ],
+    "dailyDemoServicesRestarted": false,
+    "committed": false
+  },
+  "crossDocumentWorkflowSupplement": {
+    "date": "2026-11-15",
+    "status": "local-aggregate-gates-and-combined-browser-validation-passed; overall-goal-incomplete",
+    "protocolVersion": "hcd-agent-workflow/1",
+    "rustWorkspaceTests": {
+      "passed": 1046,
+      "failed": 0,
+      "includingDoctests": true,
+      "toolchain": "1.90.0",
+      "newWorkflowTests": 5
+    },
+    "debugBuild": "passed",
+    "clippy": "passed --all-targets -- -D warnings",
+    "format": "passed --all -- --check",
+    "diffCheck": "passed",
+    "frontendBuild": "not rerun; no runtime frontend source changes; previous standalone/embed builds remain recorded in agentContinuationSupplement",
+    "browser": {
+      "passed": 24,
+      "failed": 0,
+      "durationReported": "1.6m",
+      "newWorkflowTests": 7,
+      "file": "agent-harness.spec.ts",
+      "snapshot": "final binary includes private shared-fact context; displayed task remains original user step",
+      "coverage": [
+        "actual readonly XLSX values carried through DOCX and PPTX, source provenance, native exports and reverse-order compensation to original roots",
+        "HTTP and stdio MCP workflow read/review/compensate with transport-specific credential handling",
+        "failed dependent step continuation without restarting its completed predecessor",
+        "API SIGKILL after a real commit preserves child ID and avoids duplicate work; standalone child resume denied",
+        "human intervening edits invalidate fingerprints and prevent whole-document compensation",
+        "independent document Agents have overlapping live lifecycles and distinct identities",
+        "source changes stop target and downstream writes",
+        "real compensation commit with reconstructed missing receipt survives restart without another revision or epoch reset",
+        "seven-format Harness edits/readback/export, arithmetic continuation, worksheet address guard, ready image reuse, PPT queue/human guard, MCP session and unsaved human draft regression"
+      ]
+    },
+    "services": "isolated real API, collaboration sidecar, MCP, Vite editor and Chrome; random test credentials and own processes",
+    "models": "scripted local provider only; no new live model or provider availability certification",
+    "compensationFaultWindowMethod": "execute a real restore; after API SIGKILL reconstruct its matching pre-commit intent without result, restart and reconcile. Selected durable window, not random instruction-boundary or multi-host failure certification.",
+    "limits": {
+      "maxDocuments": 16,
+      "minDocuments": 2,
+      "maxSteps": 32,
+      "maxFacts": 64,
+      "maxFactValueBytes": 8192,
+      "maxPlanBytes": 262144,
+      "maxCheckpointBytes": 8388608,
+      "maxWorkflows": 128,
+      "maxAuthorizationRounds": 32,
+      "maxAgentsPerProcess": 4,
+      "atomicAcrossDocuments": false
+    },
+    "resolved": [
+      "immutable explicit dependency plans, per-document same-principal read/write grants and source revision/epoch snapshots",
+      "server-read JSON Pointer facts with value/root/revision provenance; no fabricated model-published values",
+      "private persisted shared-fact model context with original user task retained for chat display",
+      "automatic ready-step scheduling, existing Harness teams and shared Agent budget",
+      "durable exact child intent before launch, original child checkpoint continuation and completed-step preservation",
+      "workflow write guard checks source, target, facts, current workflow state and pending human drafts",
+      "restore and theme mutation serialized with API collaboration writes",
+      "explicit fingerprinted reverse dependency compensation, durable restore intents and exact receipt reconciliation",
+      "stdio/HTTP MCP workflow tool, shared complete plan schema, CLI protocol preflight and create fingerprint check",
+      "private atomic checkpoints, startup interruption, save-failure fencing, bounded store and lightweight child status polling"
+    ],
+    "report": "../hcd-cross-document-workflow.zh.md",
+    "schema": "../../contracts/hcd-agent-workflow-1.schema.json",
+    "screenshot": "../hcd-cross-document-workflow/cross-document-report.png",
+    "screenshotViewed": true,
+    "ci": "workflow selector includes all seven new cases; no remote workflow or clean checkout certification",
+    "limitations": [
+      "no cross-document plan UI or certified general natural-language planning; external MCP Agent/application supplies the explicit plan",
+      "human or unrelated source/target commits stop continuation/compensation; object-level inverse edits and target remapping remain incomplete",
+      "single API root, no distributed fencing or cross-document atomic transaction; external direct bundle writers are not coordinated",
+      "host integration sessions and standalone image documents are not accepted by this coordinator",
+      "bounded history with no archive/pagination yet; legacy child checkpoint and image generation limitations still apply",
+      "same-source Office/WPS fidelity, complex object coverage and broader formulas remain incomplete"
+    ],
+    "dailyDemoServicesRestarted": false,
+    "committed": false
+  },
+  "crossDocumentWorkflowUiSupplement": {
+    "date": "2026-11-15",
+    "status": "local-aggregate-gates-and-final-targeted-browser-validation-passed; overall-goal-incomplete",
+    "protocolVersion": "hcd-agent-workflow/1",
+    "selectionIdentityGuard": true,
+    "rustWorkspaceTests": {
+      "passed": 1048,
+      "failed": 0,
+      "includingDoctests": true,
+      "toolchain": "1.90.0",
+      "newTests": 2
+    },
+    "clippy": "passed --all-targets -- -D warnings",
+    "format": "passed --all -- --check",
+    "debugBuild": "passed",
+    "diffCheck": "passed",
+    "frontendBuild": "standalone and embedded passed on final source and CSS",
+    "frontendUnitTests": {
+      "passed": 14,
+      "failed": 0,
+      "newTests": 4
+    },
+    "broadBrowser": {
+      "passed": 39,
+      "failed": 0,
+      "durationReported": "3.3m",
+      "files": [
+        "agent-harness.spec.ts",
+        "workspace.spec.ts",
+        "agent-run-status.spec.ts"
+      ],
+      "snapshot": "before final stdio optional-identity preflight, scoped dark-mode styles and PPT rebuild-mode output-picker cleanup; all other UI actions and text rendering present",
+      "coverage": [
+        "seven-format Harness edits and readonly shells",
+        "single-document continuation and PPT queue guards",
+        "Codex chat, IME, collapse and retained drafts",
+        "cross-document workflow UI and API/MCP, API SIGKILL and compensation receipts",
+        "document tab state, table hover and bounded undo"
+      ]
+    },
+    "finalBrowser": {
+      "passed": 15,
+      "failed": 0,
+      "durationReported": "1.3m",
+      "file": "agent-harness.spec.ts",
+      "snapshot": "final API/client binary, frontend source and CSS",
+      "newUiTests": 6,
+      "coverage": [
+        "real UI-built readonly XLSX to DOCX to PPTX content chain with guarded paragraph/cell facts",
+        "save-only plans, per-step dependencies and team settings, explicit review/authorization",
+        "editor instance and collapsed draft preservation, light/dark screenshots, source contents shown without technical JSON",
+        "page refresh, non-secret bookmarks and reverse compensation restoring original roots",
+        "hidden grid input blocks plan creation; other-principal documents excluded",
+        "stale content selections and approvals refuse writes; human edits remain",
+        "failed child returns to coordinator; resume does not repeat completed predecessor",
+        "old capability preflight sends no plan POST",
+        "whole-plan cancellation stops children",
+        "all seven previous backend workflow cases, including HTTP/stdio MCP, API SIGKILL, source/human guards and missing compensation receipts",
+        "MCP owner/session and team controls",
+        "switching a PPT step into rebuild mode removes its incompatible old-node output picker; returning to edit does not revive it"
+      ]
+    },
+    "browserCountsOverlap": true,
+    "services": "isolated real API, sidecar, Vite, MCP and own Chrome with random credentials",
+    "models": "scripted local provider; no new live-model quality or availability certification",
+    "resolved": [
+      "collapsible multi-document plan editor using the existing mounted workspace tabs",
+      "same-service/same-principal document and live credential selection; all-document preparation including hidden editors",
+      "real content selection without user-authored pointers or hashes; calculated cells, body paragraphs and mapped fixed text",
+      "optional stable-object identity guard rejects shifted fact positions while preserving text edits",
+      "capability/schema/fingerprint agreement; UI and stdio preflight optional identity support",
+      "per-step agents, image settings and PPT rebuild mode with ordered same-document writes",
+      "saved plan review, explicit execute/continue/compensate, stop and per-document progress",
+      "owner/service-scoped bookmarks containing only workflow/name/document IDs; fresh grant checks on read",
+      "workflow-child navigation replaces invalid standalone continuation controls"
+    ],
+    "report": "../hcd-cross-document-workflow-ui.zh.md",
+    "screenshots": [
+      "../hcd-cross-document-workflow-ui/workflow-ui-human-guard.png",
+      "../hcd-cross-document-workflow-ui/workflow-ui-compensated.png",
+      "../hcd-cross-document-workflow-ui/workflow-ui-completed.png",
+      "../hcd-cross-document-workflow-ui/workflow-ui-review-dark.png",
+      "../hcd-cross-document-workflow-ui/workflow-ui-review.png",
+      "../hcd-cross-document-workflow-ui/workflow-ui-continued.png",
+      "../hcd-cross-document-workflow-ui/workflow-ui-running.png"
+    ],
+    "screenshotsViewed": [
+      "workflow-ui-review.png",
+      "workflow-ui-review-dark.png",
+      "workflow-ui-completed.png"
+    ],
+    "knownFidelityGap": "project-proposal.docx cover title style and position change after structure editing; workflow correctness is not layout fidelity certification",
+    "limits": [
+      "no verified general natural-language planning or target remapping",
+      "single API root and four-agent process budget; no distributed fencing or cross-document atomic transaction",
+      "host integration and standalone image documents excluded",
+      "paragraph/cell/mapped-text picker is not an arbitrary complex-object browser; rebuild outputs cannot reuse old nodes",
+      "unsaved plan drafts survive collapse, not refresh; saved plans persist on server; bookmarks not cross-device",
+      "no object-level inverse compensation preserving intervening human changes",
+      "task/workflow archive and pagination, richer inputs, broader formulas and same-source Office/WPS fidelity remain incomplete"
+    ],
+    "ci": "existing workflow selector includes all six UI cases; no remote run or clean checkout certified",
+    "dailyDemoServicesRestarted": false,
+    "committed": false,
+    "knownFidelityGapResolvedBy": "docxInlineFidelitySupplement; mapped same-shape paragraph text and bold/italic edits only; original screenshot is historical evidence"
+  },
+  "docxInlineFidelitySupplement": {
+    "date": "2026-11-15",
+    "status": "local-aggregate-gates-and-final-browser-validation-passed; overall-goal-incomplete",
+    "protocolCapability": "docxInlineEdits: hcd-docx-inline/1; participates in fingerprint",
+    "rustWorkspaceTests": {
+      "passed": 1052,
+      "failed": 0,
+      "includingDoctests": true,
+      "newTests": 4,
+      "toolchain": "1.90.0"
+    },
+    "clippy": "passed --all-targets -- -D warnings",
+    "format": "passed --all -- --check",
+    "debugBuild": "passed",
+    "diffCheck": "passed",
+    "frontendBuild": "standalone and embedded passed; no frontend runtime source changes afterward",
+    "frontendUnitTests": {
+      "passed": 15,
+      "failed": 0,
+      "newTests": 1
+    },
+    "finalBrowser": {
+      "passed": 29,
+      "failed": 0,
+      "durationReported": "2.8m",
+      "files": [
+        "workspace.spec.ts",
+        "agent-harness.spec.ts"
+      ],
+      "coverage": [
+        "mixed-mark source DOCX title edits retain original size, colour, paragraph layout, canonical anchors, iframe document and scrolled viewport",
+        "native source export verifies paragraph XML, inherited run properties, explicit bold/normal and all untouched package entries",
+        "human unsaved Chinese/emoji formatting preview and subsequent checkpoint, repeated rich edits and exact Unicode node splices",
+        "all seven format Harness edits, DOCX animation areas, cross-document workflow UI/API/HTTP and stdio MCP, SIGKILL/continuation/compensation receipts",
+        "Word pagination and source grid fonts, local preview DOM/scroll preservation, table character collaboration, row/column hover, insertion and bounded undo"
+      ]
+    },
+    "realFileProbe": "../hcd-docx-inline-fidelity/real-file-results.json",
+    "realFiles": {
+      "showcaseDocx": "mixed inline edit, source export and native properties/package/reimport passed",
+      "contractDocx": "same checks on first editable body block passed; not full-object/layout certification",
+      "contractPdf": "independent import/HTML/validation and unchanged source export byte-equal; no edited visual export claim",
+      "originalsUnmodified": true,
+      "sameSourceOfficeWpsReference": false
+    },
+    "services": "isolated real API, sidecar, Vite, MCP and own Chrome with random credentials",
+    "models": "scripted provider only; no live quality or availability certification",
+    "report": "../hcd-docx-inline-fidelity.zh.md",
+    "screenshots": [
+      "../hcd-docx-inline-fidelity/word-cover-before.png",
+      "../hcd-docx-inline-fidelity/word-cover-agent-edited.png",
+      "../hcd-docx-inline-fidelity/word-cover-local-draft.png"
+    ],
+    "screenshotsViewed": true,
+    "limitations": [
+      "same source-mapped editable paragraph kind/level/font and unchanged hyperlink relationship only; structural changes can still rebuild semantics",
+      "already-flattened historical styles do not auto-recover; restore an earlier revision or reimport the original",
+      "source-backed DOCX export needs an updated CLI/service; semantic cross-format CSS/style simplification remains",
+      "complex objects and traceable same-source Office/WPS page comparisons remain incomplete",
+      "all previously listed broader formula, recovery, distributed coordination and workflow planning/compensation limitations remain"
+    ],
+    "ci": "new regression selector configured; no remote run or clean checkout certified",
+    "dailyDemoServicesRestarted": false,
+    "committed": false
+  }
+}

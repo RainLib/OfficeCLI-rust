@@ -1,0 +1,12 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test e2e/agent-harness.spec.ts -g Rank formulas --output=/tmp/officecli-agent-final-live-rank-v4
+
+
+Running 1 test using 1 worker
+
+(node:47337) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  1 e2e/agent-harness.spec.ts:323:1 › Rank formulas double, total recalculates, and automatic canvas cursors survive model latency (37.8s)
+
+  1 passed (41.4s)

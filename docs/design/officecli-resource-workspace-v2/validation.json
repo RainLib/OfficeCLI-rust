@@ -1,0 +1,213 @@
+{
+  "nativeBytes": 1594053,
+  "nativeSHA256": "da5385ddf35a015b5aa9aff34bad34ca50ef8b4d519e39802b03cd76e179148f",
+  "flowScreens": 30,
+  "supportingFrames": 2,
+  "totalFrames": 32,
+  "newPrototypeLinks": 610,
+  "missingFonts": 0,
+  "allNewTargetsExist": true,
+  "sourceV1Preserved": true,
+  "scope": "Editable design and clickable prototype; no application implementation changes.",
+  "totalPrototypeLinks": 699,
+  "allNavigationDestinationsExist": true,
+  "nativeReopenVerified": true,
+  "sharedGlobalAIInstances": 28,
+  "pngFiles": [
+    {
+      "file": "00-foundations.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 213383
+    },
+    {
+      "file": "01-board.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 290117
+    },
+    {
+      "file": "02-insert.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 264310
+    },
+    {
+      "file": "03-doc-preview.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 255223
+    },
+    {
+      "file": "04-doc-edit.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 243607
+    },
+    {
+      "file": "05-range.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 223186
+    },
+    {
+      "file": "06-range-board.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 301414
+    },
+    {
+      "file": "07-sheet-edit.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 217552
+    },
+    {
+      "file": "08-ai.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 290373
+    },
+    {
+      "file": "09-states.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 169617
+    },
+    {
+      "file": "10-library.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 287066
+    },
+    {
+      "file": "11-word.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 274668
+    },
+    {
+      "file": "12-review.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 274782
+    },
+    {
+      "file": "13-excel.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 252676
+    },
+    {
+      "file": "14-data.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 260601
+    },
+    {
+      "file": "15-image.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 651808
+    },
+    {
+      "file": "16-crop.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 642853
+    },
+    {
+      "file": "17-adjust.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 641692
+    },
+    {
+      "file": "18-mask.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 663119
+    },
+    {
+      "file": "19-progress.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 650991
+    },
+    {
+      "file": "20-compare.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 659606
+    },
+    {
+      "file": "21-convert.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 650618
+    },
+    {
+      "file": "22-jpeg.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 653356
+    },
+    {
+      "file": "23-done.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 646869
+    },
+    {
+      "file": "24-history.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 645035
+    },
+    {
+      "file": "25-focus.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 1015376
+    },
+    {
+      "file": "26-mobile.png",
+      "width": 390,
+      "height": 844,
+      "bytes": 188747
+    },
+    {
+      "file": "27-ppt.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 233039
+    },
+    {
+      "file": "28-pdf.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 248078
+    },
+    {
+      "file": "29-find.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 259047
+    },
+    {
+      "file": "30-excel_find.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 255525
+    },
+    {
+      "file": "31-png.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 654802
+    }
+  ],
+  "sourceV1SHA256": "bf72a16f8fbbd0724596c65da99a7ea75606f80e77fed870ee1f0fd75a54a2dd",
+  "sourceV1Unchanged": true,
+  "fontMissing": 0
+}

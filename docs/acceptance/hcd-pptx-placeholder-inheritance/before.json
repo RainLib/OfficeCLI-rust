@@ -1,0 +1,18 @@
+{
+  "sourceSha256": "4e7fbc870321cec5419d5292b82f962e8ab6ac8f4e25d56463563a6e9bf6a743",
+  "observed": {
+    "x": null,
+    "y": null,
+    "width": null,
+    "height": null,
+    "text": "Master-led layout",
+    "runs": [
+      {
+        "font": "Arial, \"Helvetica Neue\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif",
+        "size": "16px",
+        "color": "rgb(0, 0, 0)",
+        "weight": "400"
+      }
+    ]
+  }
+}

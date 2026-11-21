@@ -356,7 +356,7 @@ fn relationship_id_of(node: &roxmltree::Node<'_, '_>) -> Option<String> {
 }
 
 fn remove_xml_ranges(xml: &str, mut ranges: Vec<Range<usize>>) -> String {
-    ranges.sort_by(|left, right| right.start.cmp(&left.start));
+    ranges.sort_by_key(|range| std::cmp::Reverse(range.start));
     let mut result = xml.to_string();
     let mut last_start = xml.len();
     for range in ranges {

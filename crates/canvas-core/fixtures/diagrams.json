@@ -1,0 +1,332 @@
+{
+  "flowchart": {
+    "title": "把审核流程说清楚",
+    "layout": "flowchart",
+    "items": [],
+    "diagram": {
+      "nodes": [
+        {
+          "id": "start",
+          "title": "收到申请",
+          "body": "确认申请材料齐全。",
+          "kind": "terminal",
+          "group": null
+        },
+        {
+          "id": "check",
+          "title": "是否符合条件？",
+          "body": "依据已明确的审核规则判断。",
+          "kind": "decision",
+          "group": null
+        },
+        {
+          "id": "yes",
+          "title": "通过审核",
+          "body": "通知申请人并进入办理。",
+          "kind": "process",
+          "group": null
+        },
+        {
+          "id": "no",
+          "title": "补充材料",
+          "body": "说明缺失项，再次提交。",
+          "kind": "process",
+          "group": null
+        },
+        {
+          "id": "end",
+          "title": "完成办理",
+          "body": "记录本次办理结果。",
+          "kind": "terminal",
+          "group": null
+        }
+      ],
+      "edges": [
+        {
+          "from": "start",
+          "to": "check",
+          "label": "",
+          "kind": "arrow"
+        },
+        {
+          "from": "check",
+          "to": "yes",
+          "label": "符合",
+          "kind": "arrow"
+        },
+        {
+          "from": "check",
+          "to": "no",
+          "label": "需补充",
+          "kind": "arrow"
+        },
+        {
+          "from": "yes",
+          "to": "end",
+          "label": "",
+          "kind": "arrow"
+        },
+        {
+          "from": "no",
+          "to": "end",
+          "label": "结束本次审核",
+          "kind": "arrow"
+        }
+      ],
+      "groups": []
+    }
+  },
+  "architecture": {
+    "title": "AI 学习平台 · 概念架构",
+    "layout": "architecture",
+    "items": [],
+    "diagram": {
+      "nodes": [
+        {
+          "id": "web",
+          "title": "学生工作台",
+          "body": "课程、练习与学习反馈。",
+          "kind": "service",
+          "group": "access"
+        },
+        {
+          "id": "teacher",
+          "title": "教师工作台",
+          "body": "教学设计与学情查看。",
+          "kind": "service",
+          "group": "access"
+        },
+        {
+          "id": "api",
+          "title": "课程服务",
+          "body": "管理学习内容与学习记录。",
+          "kind": "service",
+          "group": "app"
+        },
+        {
+          "id": "ai",
+          "title": "AI 辅导服务",
+          "body": "基于课程上下文生成讲解。",
+          "kind": "service",
+          "group": "app"
+        },
+        {
+          "id": "data",
+          "title": "学习数据库",
+          "body": "保存结构化学习记录。",
+          "kind": "database",
+          "group": "data"
+        },
+        {
+          "id": "files",
+          "title": "课程资料库",
+          "body": "保存文档与教学资源。",
+          "kind": "database",
+          "group": "data"
+        }
+      ],
+      "edges": [
+        {
+          "from": "web",
+          "to": "api",
+          "label": "课程请求",
+          "kind": "arrow"
+        },
+        {
+          "from": "teacher",
+          "to": "api",
+          "label": "内容管理",
+          "kind": "arrow"
+        },
+        {
+          "from": "api",
+          "to": "ai",
+          "label": "辅导任务",
+          "kind": "arrow"
+        },
+        {
+          "from": "api",
+          "to": "data",
+          "label": "读写记录",
+          "kind": "arrow"
+        },
+        {
+          "from": "ai",
+          "to": "files",
+          "label": "读取资料",
+          "kind": "arrow"
+        }
+      ],
+      "groups": [
+        {
+          "id": "access",
+          "title": "访问层"
+        },
+        {
+          "id": "app",
+          "title": "应用层"
+        },
+        {
+          "id": "data",
+          "title": "数据层"
+        }
+      ]
+    }
+  },
+  "mindmap": {
+    "title": "让阅读更有趣",
+    "layout": "mindmap",
+    "items": [],
+    "diagram": {
+      "nodes": [
+        {
+          "id": "root",
+          "title": "让阅读更有趣",
+          "body": "从真实体验中发现新可能。",
+          "kind": "topic",
+          "group": null
+        },
+        {
+          "id": "motivation",
+          "title": "阅读动机",
+          "body": "连接个人兴趣与目标。",
+          "kind": "concept",
+          "group": null
+        },
+        {
+          "id": "content",
+          "title": "内容选择",
+          "body": "适合程度，也保留探索空间。",
+          "kind": "concept",
+          "group": null
+        },
+        {
+          "id": "social",
+          "title": "共同参与",
+          "body": "让阅读成为可分享的体验。",
+          "kind": "concept",
+          "group": null
+        },
+        {
+          "id": "feedback",
+          "title": "及时反馈",
+          "body": "看得见自己的理解与成长。",
+          "kind": "concept",
+          "group": null
+        },
+        {
+          "id": "choice",
+          "title": "自主选书",
+          "body": "提供不同主题与难度的选择。",
+          "kind": "process",
+          "group": null
+        },
+        {
+          "id": "club",
+          "title": "故事共读",
+          "body": "轮流讲述最喜欢的片段。",
+          "kind": "process",
+          "group": null
+        }
+      ],
+      "edges": [
+        {
+          "from": "root",
+          "to": "motivation",
+          "label": "",
+          "kind": "association"
+        },
+        {
+          "from": "root",
+          "to": "content",
+          "label": "",
+          "kind": "association"
+        },
+        {
+          "from": "root",
+          "to": "social",
+          "label": "",
+          "kind": "association"
+        },
+        {
+          "from": "root",
+          "to": "feedback",
+          "label": "",
+          "kind": "association"
+        },
+        {
+          "from": "content",
+          "to": "choice",
+          "label": "",
+          "kind": "association"
+        },
+        {
+          "from": "social",
+          "to": "club",
+          "label": "",
+          "kind": "association"
+        }
+      ],
+      "groups": []
+    }
+  },
+  "lesson": {
+    "title": "一元一次方程 · 从理解到应用",
+    "layout": "lesson",
+    "items": [],
+    "diagram": {
+      "nodes": [
+        {
+          "id": "goal",
+          "title": "今天要学会什么",
+          "body": "理解等式两边同时加减同一个数，等式仍成立。",
+          "kind": "concept",
+          "group": "understand"
+        },
+        {
+          "id": "idea",
+          "title": "为什么可以移项",
+          "body": "移项来自等式性质。把一边的项移到另一边时符号改变。",
+          "kind": "concept",
+          "group": "understand"
+        },
+        {
+          "id": "example",
+          "title": "例题：2x + 3 = 11",
+          "body": "① 两边同时减 3：2x = 8\n② 两边同时除以 2：x = 4\n③ 代回验证：2 × 4 + 3 = 11",
+          "kind": "example",
+          "group": "practice"
+        },
+        {
+          "id": "try",
+          "title": "轮到你试一试",
+          "body": "解方程：3x − 2 = 10。\n先说明每一步对等式两边做了什么，再验证答案。",
+          "kind": "question",
+          "group": "practice"
+        },
+        {
+          "id": "summary",
+          "title": "把方法带走",
+          "body": "先去掉常数项，再把未知数系数化为 1，最后代回检验。",
+          "kind": "summary",
+          "group": "review"
+        }
+      ],
+      "edges": [],
+      "groups": [
+        {
+          "id": "understand",
+          "title": "理解概念"
+        },
+        {
+          "id": "practice",
+          "title": "示范与练习"
+        },
+        {
+          "id": "review",
+          "title": "回顾方法"
+        }
+      ]
+    }
+  }
+}

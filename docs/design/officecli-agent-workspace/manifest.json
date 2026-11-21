@@ -1,0 +1,103 @@
+{
+  "source": "../officecli-workspace-v2.pen",
+  "edition": "Soft Canvas · Pen-style agent operations",
+  "screens": [
+    {
+      "id": "QGj0f",
+      "file": "previews/15-context-menu.png",
+      "name": "右键 / 选区与 AI"
+    },
+    {
+      "id": "uCRe7",
+      "file": "previews/16-slash-command.png",
+      "name": "斜杠 / 插入与 Agent"
+    },
+    {
+      "id": "jY4py",
+      "file": "previews/17-multi-agent.png",
+      "name": "人与多 Agent / 任务与冲突"
+    },
+    {
+      "id": "lXwcg",
+      "file": "previews/18-xlsx-agent-menu.png",
+      "name": "XLSX / 选区 Agent 菜单"
+    },
+    {
+      "id": "ILghu",
+      "file": "previews/19-pptx-agent-menu.png",
+      "name": "PPTX / 文字框 Agent 菜单"
+    },
+    {
+      "id": "m2IZRG",
+      "file": "previews/20-pdf-agent-menu.png",
+      "name": "PDF / 映射文字 Agent 菜单"
+    },
+    {
+      "id": "bwffw",
+      "file": "previews/23-draft-compare.png",
+      "name": "断线重连 / 草稿保留与对照"
+    },
+    {
+      "id": "HRzgj",
+      "file": "HRzgj.png",
+      "name": "AI 工作台 / 公式编辑与画布协同"
+    },
+    {
+      "id": "HHKaL",
+      "file": "HHKaL.png",
+      "name": "AI 工作台 / 手机抽屉"
+    },
+    {
+      "id": "lmDrg",
+      "file": "lmDrg.png",
+      "name": "Pen 风格协作 / 无框柔光与队列"
+    },
+    {
+      "id": "a57uW",
+      "file": "a57uW.png",
+      "name": "Agent 操作过程 / 手机抽屉"
+    }
+  ],
+  "runtimeBrowserNodes": [
+    {
+      "id": "g1gx5o",
+      "name": "Agent 工作区 · 桌面运行",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "id": "uo4S8",
+      "name": "Agent 工作区 · 手机运行",
+      "width": 390,
+      "height": 1040
+    },
+    {
+      "id": "W2lt7n",
+      "name": "Pen 式协作 · 桌面运行",
+      "width": 1600,
+      "height": 1040
+    },
+    {
+      "id": "upnCD",
+      "name": "Pen 式协作 · 手机运行",
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "runtimeNote": "Local demo uses public fixtures. Restart npm run dev:agent and update browser URLs if its ephemeral port changes.",
+  "browserCaptureNote": "Browser DOM and navigation verified using Pen CDP; native browser capture timed out. Actual app screenshots are in docs/acceptance/hcd-openai-agent-harness/. No placeholder browser capture is used as visual evidence.",
+  "runtimeUrl": "http://127.0.0.1:50976/?locale=zh-CN",
+  "activeRuntimeBrowserNodes": [
+    "W2lt7n",
+    "upnCD"
+  ],
+  "operationFeedback": {
+    "borderless": true,
+    "pointerTravelMs": 480,
+    "pendingPlan": "Authenticated hcd_activity status=planning targets",
+    "submission": "Actual whole patch outcome",
+    "replay": "Explicitly labeled; no document writes",
+    "visibleTargetsPerBatch": 128,
+    "recentTraceRetentionSeconds": 60
+  }
+}

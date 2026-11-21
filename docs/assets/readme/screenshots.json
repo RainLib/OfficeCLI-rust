@@ -1,0 +1,74 @@
+{
+  "sourceCommit": "0159339070d094655755492c9dc269843f328af1",
+  "capturedOn": "2026-11-21",
+  "content": "Locally generated example files, not private user documents. Screenshots are unmodified captures. Logo and banner are original SVG artwork adapted from the existing workspace mark.",
+  "screenshots": [
+    {
+      "file": "workspace-home.png",
+      "source": "/tmp/canvas-input-workbench-regression/home.png",
+      "kind": "verified workbench browser run",
+      "sha256": "c7abb371313a88e69b9991b10a46cbab6d833d45244160bc7a212efadd0d3d59",
+      "syntheticProductScreenshot": false
+    },
+    {
+      "file": "word-editor.png",
+      "source": "docs/design/officecli-office-ribbon/implementation/word-expanded.png",
+      "kind": "verified ribbon browser run",
+      "sha256": "adb26e985560a35eec1232516a39e2335b1b2346f50d850b59c82796b8c1f156",
+      "syntheticProductScreenshot": false
+    },
+    {
+      "file": "sheet-editor.png",
+      "source": "docs/design/officecli-office-ribbon/implementation/sheet-compact.png",
+      "kind": "verified ribbon browser run",
+      "sha256": "1100cc75c32639d77c715a1a8124dc37113a183990c60be3739c56615a4f6e41",
+      "syntheticProductScreenshot": false
+    },
+    {
+      "file": "ai-collaboration.jpg",
+      "source": "isolated demo at /workbench/; three explicit file targets; pending review",
+      "kind": "current in-app browser capture",
+      "sha256": "bd9aa9b76ab48e380eacd0da6ddbe4865af6fd1453c5d793e2012fb6fd817dd5",
+      "syntheticProductScreenshot": false
+    },
+    {
+      "file": "whiteboard.jpg",
+      "source": "isolated demo at /workbench/; native flow layout, 16 editable objects",
+      "kind": "current in-app browser capture",
+      "sha256": "330e3bbd427136093de454ca0daadc161c7a7e9079465b53855153476d9c4ebb",
+      "syntheticProductScreenshot": false
+    },
+    {
+      "file": "slides-editor.jpg",
+      "source": "isolated demo at /workbench/; team retrospective PPTX",
+      "kind": "current in-app browser capture",
+      "sha256": "2f8e4e8367c7e9669856df3fec789bdbe7a8765c84e8cd390ac25d4f3e08cd2f",
+      "syntheticProductScreenshot": false
+    }
+  ],
+  "mcpExample": {
+    "passed": true,
+    "source": "README.md JavaScript block executed unchanged except resolving the installed SDK imports",
+    "documentKind": "document",
+    "selectedSpans": 1,
+    "beforeRevision": 1,
+    "afterRevision": 2,
+    "readBackVerified": true,
+    "grantRevoked": true
+  },
+  "cliExamples": {
+    "passed": true,
+    "commands": [
+      "create",
+      "add",
+      "extract-text --with-offsets",
+      "view --mode annotated",
+      "help docx paragraph"
+    ]
+  },
+  "relatedVerification": [
+    "../../design/officecli-office-ribbon/implementation/verification.json",
+    "../../design/officecli-office-ribbon/implementation/office-features/validation.json",
+    "../../design/officecli-office-ribbon/implementation/canvas-input/validation.json"
+  ]
+}

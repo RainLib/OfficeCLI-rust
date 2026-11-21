@@ -1,0 +1,11 @@
+{
+  "status": "passed",
+  "scope": "draft-contract-only",
+  "openapi": "3.1.0",
+  "paths": 9,
+  "schemas": 26,
+  "embeddedExamples": 3,
+  "validCases": 13,
+  "rejectedCases": 20,
+  "runtimeVerified": false
+}

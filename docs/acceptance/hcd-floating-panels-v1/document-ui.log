@@ -1,0 +1,23 @@
+
+> @officecli/hcd-reference-editor@0.1.0 test:workspace
+> playwright test workspace.spec.ts --output=/tmp/officecli-float-doc-results --grep floating panels stay|shared side panels match|mobile drawers dismiss|PPT shape properties|all seven formats use|workspace drawers, focus|workspace reload restores|appearance follows|dark workspace keeps
+
+(node:40626) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+Running 9 tests using 1 worker
+
+(node:40637) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:40637) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+  ✓  1 e2e/workspace.spec.ts:1520:1 › workspace reload restores multiple tabs, active document, preview and independent canvas zoom (2.0s)
+  ✓  2 e2e/workspace.spec.ts:2232:1 › workspace drawers, focus mode and export preserve document state (1.4s)
+  ✓  3 e2e/workspace.spec.ts:2285:1 › all seven formats use the content shell and enforce read-only preview (7.2s)
+  ✓  4 e2e/workspace.spec.ts:3160:1 › appearance follows the system, persists overrides and preserves the live editor (1.1s)
+  ✓  5 e2e/workspace.spec.ts:3195:1 › dark workspace keeps all seven document surfaces and native canvas instances (7.3s)
+  ✓  6 e2e/workspace.spec.ts:3246:1 › mobile drawers dismiss with Escape and a scrim while retaining the composer draft (1.0s)
+  ✓  7 e2e/workspace.spec.ts:3310:1 › floating panels stay below document tools and keep canvas size and instances unchanged (8.3s)
+  ✓  8 e2e/workspace.spec.ts:3464:1 › PPT shape properties follow the design and commit real typography and geometry (1.9s)
+  ✓  9 e2e/workspace.spec.ts:3514:1 › shared side panels match the latest Pen components across document formats (11.6s)
+
+  9 passed (56.4s)
