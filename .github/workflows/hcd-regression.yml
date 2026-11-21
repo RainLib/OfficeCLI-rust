@@ -110,9 +110,11 @@ jobs:
     timeout-minutes: 40
     env:
       OFFICECLI_BIN: ${{ github.workspace }}/target/debug/officecli
-      OFFICECLI_WORKSPACE_DIST: ${{ runner.temp }}/fold-workspace-dist
-      OFFICECLI_DESK_ARTIFACTS: ${{ runner.temp }}/fold-workbench-proof
     steps:
+      - name: Set workspace verification paths
+        run: |
+          echo "OFFICECLI_WORKSPACE_DIST=$RUNNER_TEMP/fold-workspace-dist" >> "$GITHUB_ENV"
+          echo "OFFICECLI_DESK_ARTIFACTS=$RUNNER_TEMP/fold-workbench-proof" >> "$GITHUB_ENV"
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
