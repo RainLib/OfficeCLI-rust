@@ -1,0 +1,19 @@
+{
+  "ctrlWheelPrevented": false,
+  "cameraBefore": {
+    "x": "153px",
+    "y": "124px",
+    "step": "16px"
+  },
+  "cameraAfterWheel": {
+    "x": "153px",
+    "y": "124px",
+    "step": "16px"
+  },
+  "cameraAfterBadgePan": {
+    "x": "153px",
+    "y": "124px",
+    "step": "16px"
+  },
+  "errors": []
+}

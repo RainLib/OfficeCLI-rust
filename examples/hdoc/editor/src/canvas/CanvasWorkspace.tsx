@@ -1,3 +1,4 @@
+import { installCanvasInput } from './canvasInput'
 import type { HcdEmbedSelection } from '../public'
 import { transferBoardDrop } from './specTransfers'
 import { carriedPositions, inPaintOrder } from './sceneGeometry'
@@ -305,6 +306,10 @@ export function CanvasWorkspace({ session, onClose }: { session: Session; onClos
     editor.scrollToContent(elements, { fitToViewport: true, viewportZoomFactor: 0.85, maxZoom: 1, animate: false })
   })
   const visible = !resourceWorkspace || resourceWorkspace.activeDocument === session.documentId
+  useEffect(() => {
+    const surface = workspaceRef.current?.querySelector<HTMLElement>('.canvas-surface')
+    if (surface && editor && visible) return installCanvasInput(surface)
+  }, [editor, visible])
   const openedLink=useRef('')
   const [linkedComment, setLinkedComment] = useState<{ rootId: string; messageId: string }>()
   const [copiedObject,setCopiedObject]=useState('')

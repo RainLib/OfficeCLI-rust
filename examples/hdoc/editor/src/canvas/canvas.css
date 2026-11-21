@@ -234,3 +234,11 @@
   max-width: 100%;
   margin-bottom: 64px;
 }
+/* Canvas gestures own hit-testing until release, even on engines whose pointer
+   capture can be lost when moving across HTML/SVG content overlays. */
+.hcd-surface .canvas-surface[data-canvas-gesture] > :not(.excalidraw),
+.hcd-surface .canvas-surface[data-canvas-gesture] > :not(.excalidraw) *,
+.hcd-surface .canvas-surface[data-canvas-gesture] .excalidraw :is(.excalidraw__embeddable-container, .layer-ui__wrapper),
+.hcd-surface .canvas-surface[data-canvas-gesture] .excalidraw :is(.excalidraw__embeddable-container, .layer-ui__wrapper) * { pointer-events: none !important; }
+/* This dialog is portaled to document.body, outside .hcd-surface. */
+.excalidraw.excalidraw-modal-container .HelpDialog__header { display: none; }

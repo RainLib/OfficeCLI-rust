@@ -1,0 +1,29 @@
+{
+  "status": "passed",
+  "scope": "Canvas DOM navigation and upstream help links",
+  "rootCause": "Custom HTML/SVG overlays were outside the drawing canvas event target path. Wheel zoom could fall through to browser zoom; panning could not start consistently from overlay content.",
+  "coverage": {
+    "navigationScenarios": 11,
+    "olderPreviewScenarios": 11,
+    "workbenchScenarios": 42
+  },
+  "builds": [
+    "npm run build --prefix examples/hdoc/editor",
+    "npm run build --prefix examples/hdoc/embed-host"
+  ],
+  "commands": [
+    "OFFICECLI_WORKSPACE_DIST=/tmp/office-features-dist OFFICECLI_INPUT_ARTIFACTS=/tmp/canvas-input-after HCD_BROWSER_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' node examples/hdoc/embed-host/verify-canvas-input.mjs",
+    "OFFICECLI_WORKSPACE_DIST=/tmp/office-ribbon-dist OFFICECLI_INPUT_ARTIFACTS=/tmp/canvas-input-older-preview HCD_BROWSER_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' node examples/hdoc/embed-host/verify-canvas-input.mjs",
+    "OFFICECLI_WORKSPACE_DIST=/tmp/office-features-dist OFFICECLI_DESK_ARTIFACTS=/tmp/canvas-input-workbench-regression HCD_BROWSER_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' node examples/hdoc/embed-host/verify-workbench.mjs"
+  ],
+  "browserVerification": "Existing 4457 canvas reloaded with the navigation-only compatibility update. Unified input binding was present; the help strip was absent from the accessible UI and screenshot. Help was then closed.",
+  "previewDelivery": "4458 received the rebuilt editor and host assets. 4457 retained its existing document API and main UI and received only the shared navigation controller and scoped CSS. No document services were restarted.",
+  "limits": [
+    "Safari gesture events were simulated in Chromium; physical Safari trackpad gestures were not tested."
+  ],
+  "sourceSha256": {
+    "examples/hdoc/editor/src/canvas/canvasInput.ts": "ed49be8dcd26ae1c9f680477beefa21502b436d17514dc16d506480698ae52d9",
+    "examples/hdoc/editor/src/canvas/canvas.css": "c5c33471659a50cd73736aa5531140f25b98fa79200ef3b3da4860dc01a200e1",
+    "examples/hdoc/editor/src/canvas/CanvasWorkspace.tsx": "c691e974b7c28ef665327e505147a6cd68432fbc372af4a6c03b9dfe048ebfb9"
+  }
+}

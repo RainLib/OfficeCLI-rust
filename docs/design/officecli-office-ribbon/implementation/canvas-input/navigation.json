@@ -1,0 +1,29 @@
+{
+  "checks": [
+    "Ctrl-wheel over a reaction badge changes only the drawing camera and cancels browser zoom.",
+    "Meta-wheel and unmodified trackpad panning over DOM content both reach the drawing camera.",
+    "Hand drag can begin on a reaction and continues across DOM layers without toggling a vote.",
+    "Unknown future DOM/SVG content inherits zoom and hand panning from the surface.",
+    "A drag beginning on the drawing continues through and beyond a DOM layer; hit testing is restored on release.",
+    "Space-drag and middle-button navigation also work when starting on DOM content.",
+    "Document-local scrolling is preserved, while modified wheel zoom still targets the board.",
+    "Zoom shortcuts on an embedded editor affect the board, while ordinary text input and spaces remain editable.",
+    "WebKit gesture streams are cancelled at the non-passive surface; browser viewport and device scale stay unchanged.",
+    "A normal selection-mode click still toggles the reaction.",
+    "Help retains keyboard shortcuts and removes the upstream documentation/blog/feedback/YouTube strip."
+  ],
+  "observation": {
+    "ctrlWheelPrevented": true,
+    "cameraBefore": {
+      "x": "153px",
+      "y": "124px",
+      "step": "16px"
+    },
+    "cameraAfter": {
+      "x": "608.5808674695884px",
+      "y": "173.5224026289933px",
+      "step": "20.897232px"
+    }
+  },
+  "errors": []
+}
