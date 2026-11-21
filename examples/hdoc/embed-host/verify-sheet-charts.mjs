@@ -61,7 +61,9 @@ export async function verifySheetCharts(page, output, checks) {
   await page.keyboard.press("Shift+ArrowRight");
   for (let row = 0; row < 3; row++) await page.keyboard.press("Shift+ArrowDown");
   await button("插入").click();
-  await button("图表").click();
+  const chartCommand = button("图表");
+  if (!await chartCommand.isVisible()) await button("展开功能区").click();
+  await chartCommand.click();
   await expect(dialog).toBeVisible();
   const newChart = dialog.getByRole("button", { name: "新建图表", exact: true });
   if (await newChart.isVisible()) await newChart.click();
