@@ -43,6 +43,7 @@ export async function verifyWordMargin(page, output, checks) {
   const marks = content.locator(`[data-word-comment-id="${id}"]`), mark = marks.first()
   const highlighted = () => marks.evaluateAll(elements => elements.map(element => element.textContent).join(''))
   await expect.poll(highlighted).toBe('Project Phoenix kickoff agenda')
+  await expect(editor.locator('.selection-menu')).not.toBeVisible()
   await mark.click()
   await expect(first).toHaveAttribute('data-active', 'true')
   await expect(mark).toHaveClass(/is-active/)
