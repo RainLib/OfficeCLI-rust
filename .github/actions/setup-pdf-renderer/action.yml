@@ -1,0 +1,25 @@
+name: Set up the PDF renderer
+description: Select and verify the runner's sandboxed Chrome for native Word PDF tests.
+runs:
+  using: composite
+  steps:
+    - name: Verify the installed Chrome sandbox
+      shell: bash
+      run: |
+        set -euo pipefail
+        browser=/opt/google/chrome/chrome
+        if [[ ! -x "$browser" ]]; then
+          browser="$(command -v google-chrome-stable || command -v google-chrome)"
+        fi
+        if [[ -x /opt/google/chrome/chrome-sandbox ]]; then
+          export CHROME_DEVEL_SANDBOX=/opt/google/chrome/chrome-sandbox
+          echo "CHROME_DEVEL_SANDBOX=$CHROME_DEVEL_SANDBOX" >> "$GITHUB_ENV"
+        fi
+        "$browser" --version
+        timeout 30s "$browser" --headless=new --disable-gpu --no-first-run \
+          --no-default-browser-check --disable-background-networking \
+          --user-data-dir="$RUNNER_TEMP/foldly-pdf-browser-probe" \
+          --dump-dom 'data:text/html,<title>Foldly PDF probe</title><p>renderer ready</p>' \
+          > "$RUNNER_TEMP/foldly-pdf-browser-probe.html"
+        grep -q 'renderer ready' "$RUNNER_TEMP/foldly-pdf-browser-probe.html"
+        echo "OFFICECLI_PDF_BROWSER=$browser" >> "$GITHUB_ENV"

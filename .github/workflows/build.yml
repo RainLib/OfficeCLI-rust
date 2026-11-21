@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-pdf-renderer
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -45,6 +46,7 @@ jobs:
   build:
     needs: ci
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
