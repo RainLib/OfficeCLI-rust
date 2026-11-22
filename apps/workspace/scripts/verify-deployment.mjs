@@ -155,6 +155,9 @@ try {
 
   const login = await call(api + "/login", { method: "POST", data: { username: "admin", password } });
   const account = { ...ok(login), cookie: login.cookie };
+  assert.equal(account.user.role, "admin");
+  assert.equal(ok(await call(api + "/users", { account })).users.length, 1);
+  checks.push("The server used its own administrator and admitted the team user management API.");
   const files = [];
   for (const name of ["部署演练.docx", "项目表.xlsx", "评审.pptx", "白板.excalidraw"])
     files.push(ok(await call(api + "/files", { account, method: "POST", data: { name } }), 201).file);

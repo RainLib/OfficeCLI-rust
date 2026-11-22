@@ -47,8 +47,11 @@ export async function installDeployment({ path, release, backup, init }) {
     for (const child of ["releases", "workspaces", "backups", "operations"]) await mkdir(join(root, child), { mode: 0o700 });
     const kit = await installRelease(root, verified);
     const active = { release: kit.manifest.id, data: randomUUID() };
-    if (backup) await restoreBackup(backup, dataRoot(root, active));
-    else {
+    if (backup) {
+      const target = dataRoot(root, active);
+      await restoreBackup(backup, target);
+      check(readWorkspace(target).config.mode !== "desktop", 409, "桌面备份不能用于托管部署。");
+    } else {
       const child = spawnSync(join(kit.root, "runtime/node"), [join(kit.root, "app/cli.mjs"), "init", "--root", dataRoot(root, active), ...init],
         { env: process.env, encoding: "utf8" });
       check(child.status === 0, 409, child.stderr?.trim() || "初始化托管工作区失败。");

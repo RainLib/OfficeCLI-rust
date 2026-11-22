@@ -89,7 +89,9 @@ export function verifySignature(store, request, body, secret, keyId) {
 }
 export function createProvider(store, config, keys, { modelIds = [] } = {}) {
   function permissions(user, file) {
-    return store.permissions(user, file).filter(op => op !== "document.ai" || modelIds.length > 0);
+    return store.permissions(user, file).filter(op =>
+      (op !== "document.ai" || modelIds.length > 0) &&
+      (op !== "document.publish" || config.mode !== "desktop"));
   }
   const binding = (data) =>
     check(
@@ -401,6 +403,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
             ),
           };
     }
+    check(config.mode !== "desktop", 403, "桌面工作区使用本地保存和导出。");
     if (action === "publications/status") {
       check(uuid(data.publicationId), 400, "发布 ID 无效。");
       const record = store.get(

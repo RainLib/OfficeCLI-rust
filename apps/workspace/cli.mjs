@@ -2,17 +2,11 @@
 import { parseArgs } from "node:util";
 import { resolve, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdirSync, existsSync } from "node:fs";
-import { randomUUID } from "node:crypto";
-import {
-  Store,
-  atomic,
-  check,
-  random,
-  passwordHash,
-  iso,
-} from "./src/store.mjs";
+import { existsSync } from "node:fs";
+import { check } from "./src/store.mjs";
 import { createRuntime, listen } from "./src/runtime.mjs";
+import { initializeWorkspace } from "./src/initialize.mjs";
+import { runDesktop } from "./src/desktop.mjs";
 import { requestOnlineBackup, restoreBackup, verifyBackup } from "./src/backup.mjs";
 import { connectDeploymentChild, deploymentCommand, installDeployment, isDeploymentChild, runDeployment } from "./src/deployment.mjs";
 import { verifyRelease } from "./src/release.mjs";
@@ -55,8 +49,7 @@ const { values, positionals } = parseArgs({
 });
 const command = positionals[0],
   root = values.root && resolve(values.root);
-let store,
-  gateway,
+let gateway,
   shutdown,
   started = false;
 const runtimes = [];
@@ -65,14 +58,16 @@ function stop(code = 0) {
     process.exitCode = code;
     gateway?.close();
     shutdown = Promise.all(runtimes.map((rt) => rt.stop())).finally(() => {
-      store?.close();
       if (isDeploymentChild()) process.disconnect();
     });
   }
   return shutdown;
 }
 try {
-  if (command === "release-info") {
+  if (command === "desktop") {
+    check(root && process.connected, 400, "桌面工作区只能由本机客户端通过进程通道启动。");
+    await runDesktop(root, join(here, "dist"));
+  } else if (command === "release-info") {
     const { manifest, root: path } = await verifyRelease(values.release || dirname(here));
     const { files, ...identity } = manifest;
     console.log(JSON.stringify({ ...identity, path, files: files.length }, null, 2));
@@ -94,14 +89,6 @@ try {
     console.log(JSON.stringify(await deploymentCommand(values.deployment, action, values.release && resolve(values.release), values.to), null, 2));
   } else if (command === "init") {
     check(root && !values.tenants, 400, "初始化工作空间需要 --root。");
-    mkdirSync(root, { recursive: true, mode: 0o700 });
-    check(
-      !existsSync(join(root, "config.json")) &&
-        !existsSync(join(root, "business.sqlite")) &&
-        !existsSync(join(root, "keys.json")),
-      409,
-      "此目录已初始化，请使用 start；已有数据不会覆盖。",
-    );
     const url = publicOrigin(values["public-url"] || "http://127.0.0.1:7400");
     const tenantId = values["tenant-id"] ?? "default",
       appId = values["app-id"] ?? "workspace";
@@ -130,17 +117,6 @@ try {
       400,
       "管理员账号需为 3–64 位小写字母、数字或 ._-。",
     );
-    const password = await passwordHash(
-      process.env[values["password-env"] || "OFFICECLI_BOOTSTRAP_PASSWORD"],
-    );
-    const keys = {
-      jwt: random(),
-      provider: random(),
-      service: random(),
-      events: random(),
-      objects: random(),
-      dummyPassword: await passwordHash(random()),
-    };
     const config = {
       schemaVersion: "officecli-workspace/1",
       name: values.name || "OfficeCLI 工作空间",
@@ -154,28 +130,12 @@ try {
       engineUrl: `http://${internalHost}:${enginePort}`,
       collabUrl: `http://${internalHost}:${collabPort}`,
     };
-    // The secrets file is written first; an interrupted init can be inspected
-    // without ever starting with an absent or regenerated signing identity.
-    atomic(join(root, "keys.json"), JSON.stringify(keys, null, 2) + "\n", {
-      exclusive: true,
+    await initializeWorkspace(root, config, {
+      username,
+      displayName: "工作空间管理员",
+      password: process.env[values["password-env"] || "OFFICECLI_BOOTSTRAP_PASSWORD"],
+      role: "admin",
     });
-    store = new Store(root);
-    store.transaction(() => {
-      const id = randomUUID();
-      store.run(
-        "INSERT INTO users VALUES(?,?,?,?,?,0,?)",
-        id,
-        username,
-        "工作空间管理员",
-        password,
-        "admin",
-        iso(),
-      );
-      store.audit(id, "workspace.initialized");
-    });
-    atomic(join(root, "config.json"), JSON.stringify(config, null, 2) + "\n");
-    store.close();
-    store = null;
     console.log(
       `工作空间已初始化：${url.origin}\n管理员：${username}\n使用 node apps/workspace/cli.mjs start --root <目录> 启动。`,
     );
@@ -204,6 +164,7 @@ try {
     const workspaces = values.tenants
       ? readTenantRegistry(resolve(values.tenants), port)
       : [readWorkspace(root)];
+    check(workspaces.every(({ config }) => config.mode !== "desktop"), 409, "桌面工作区只能由本机客户端启动。");
     const assets = resolve(values.assets || join(here, "dist"));
     const binary = resolve(
       values.officecli ||

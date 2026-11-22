@@ -21,6 +21,7 @@ export type Account = {
   user: { id: string; displayName: string; role: string }
   csrf: string
   workspace: {
+    mode?: 'desktop'
     name?: string
     tenantId: string
     appId: string

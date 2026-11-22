@@ -18,6 +18,12 @@ import { DeskHome } from './DeskHome'
 import { DeskMentions, type DeskMention } from './DeskMentions'
 import './office-desk.css'
 
+declare global {
+  interface Window {
+    foldlyPrepareToQuit?: () => Promise<void>
+  }
+}
+
 type Composer = { text: string; targets: string[]; selections: Record<string, string> }
 type Layout = {
   tabs: string[]
@@ -116,6 +122,7 @@ function DeskWorkspace({ account }: { account: Account }) {
     }
   }, [])
   const { preference, theme, setPreference } = useAppearance()
+  const desktop = account.workspace.mode === 'desktop'
   const ThemeIcon = preference === 'system' ? Monitor : theme === 'dark' ? Moon : Sun
   const key =
     'officecli:desk:v1:' +
@@ -135,6 +142,14 @@ function DeskWorkspace({ account }: { account: Account }) {
     [error, setError] = useState('')
   const [states, setStates] = useState<Record<string, PaneState>>({}),
     handles = useRef(new Map<string, PaneHandle>())
+  useEffect(() => {
+    if (!desktop) return
+    window.foldlyPrepareToQuit = async () => {
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+      await Promise.all([...handles.current.values()].map(pane => pane.prepare()))
+    }
+    return () => { delete window.foldlyPrepareToQuit }
+  }, [desktop])
   const catalogGeneration = useRef(0)
   const refreshFiles = useCallback(async () => {
     const generation = ++catalogGeneration.current
@@ -612,8 +627,8 @@ function DeskWorkspace({ account }: { account: Account }) {
             <option value="dark">深色</option>
           </select>
         </label>
-        <DeskMentions csrf={account.csrf} openFile={openMention} />
-        <button
+        {!desktop && <DeskMentions csrf={account.csrf} openFile={openMention} />}
+        {!desktop && <button
           className={'desk-global-toggle' + (layout.chat ? ' on' : '')}
           aria-pressed={layout.chat}
           onClick={() => setLayout((s) => ({ ...s, chat: !s.chat }))}
@@ -623,7 +638,7 @@ function DeskWorkspace({ account }: { account: Account }) {
             state={jobs.some((j) => !j.done) ? 'active' : 'still'}
           />
           全局 AI{editing.size > 0 && <b>{editing.size}</b>}
-        </button>
+        </button>}
         {menu && (
           <div ref={pop} className="desk-tab-menu">
             {menu === 'new' ? (
@@ -750,7 +765,7 @@ function DeskWorkspace({ account }: { account: Account }) {
               <p className="desk-loading">正在读取工作空间…</p>
             )}
           </div>
-          <EmbeddedWorkspace mentionable={mentionable} searchLocation={searchLocation} activeDocumentId={byId.get(layout.active)?.resourceDocumentId || null} files={resourceFiles}
+          <EmbeddedWorkspace mentionable={desktop ? undefined : mentionable} searchLocation={searchLocation} activeDocumentId={byId.get(layout.active)?.resourceDocumentId || null} files={resourceFiles}
             activate={docId => { const file = fileFor(docId); if (file) open(file.id) }} selection={resourceSelection} access={resourceAccess}
             organize={account.workspace.workbenchModel ? async (id, excerpts) => {
               const sources = [...new Set(excerpts.flatMap(s => s.documentId ? [fileFor(s.documentId)!.id] : []))]
@@ -785,7 +800,7 @@ function DeskWorkspace({ account }: { account: Account }) {
             </button>
           )}
         </div>
-        {layout.chat && (
+        {!desktop && layout.chat && (
           <DeskAgent
             account={account}
             active={layout.active}

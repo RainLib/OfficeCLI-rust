@@ -231,6 +231,7 @@ HCD 是可编辑文档层，提供有界 HTML 分片、稳定源映射、内容�
 | 入口 | 内容 |
 | --- | --- |
 | [工作台应用](apps/workspace/README.zh.md) | 账号、项目、权限、分享、多租户、部署和备份。 |
+| [工作台部署与桌面打包](docs/workspace-distribution.zh.md) | Linux 上线、macOS Electron 离线包和同版本验收。 |
 | [嵌入与外部 Agent](examples/hdoc/embed-host/README.md) | React 接入、选区授权、MCP 与可运行宿主。 |
 | [编辑器开发](examples/hdoc/editor/README.md) | 编辑器与协同服务开发。 |
 | [HCD 示例](examples/hdoc/README.md) | 导入、分片、补丁、源映射与导出。 |

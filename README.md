@@ -231,6 +231,7 @@ HCD is the editable document layer: bounded HTML chunks, stable source mappings,
 | Start here | Details |
 | --- | --- |
 | [Workspace application](apps/workspace/README.zh.md) | Accounts, projects, permissions, sharing, tenancy, deployment and backups. |
+| [Workspace deployment and desktop packaging](docs/workspace-distribution.zh.md) | Linux deployment, the offline macOS Electron package, and release verification. |
 | [Embedding and external agents](examples/hdoc/embed-host/README.md) | React integration, selection authorization, MCP and a runnable host. |
 | [Editor development](examples/hdoc/editor/README.md) | Editor and collaboration development workflows. |
 | [HCD examples](examples/hdoc/README.md) | Import, chunks, patches, source mapping and export. |

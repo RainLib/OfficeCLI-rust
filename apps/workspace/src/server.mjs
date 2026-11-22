@@ -37,6 +37,9 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 const COOKIE = "officecli_workspace";
+const DESKTOP_COOKIE = "foldly_desktop_session";
+const cloudWorkspacePath = /^\/(login|logout|users|projects|public|shared|mentions|embed|agent-[a-z-]+|publication-jobs|events|audit|service)(\/|$)/;
+const cloudFilePath = /^\/files\/[^/]+\/(acl|location|mentionable|sharing)(\/|$)/;
 const formats = {
   excalidraw: "application/vnd.excalidraw+json",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -120,6 +123,7 @@ export function createWorkspaceServer({
   captureBackup,
   publicAvailable = () => true,
 }) {
+  const desktop = config.mode === "desktop";
   const provider = createProvider(store, config, keys, { modelIds }),
     pending = new Map();
   const sharing = new Sharing(store, config, keys);
@@ -139,6 +143,7 @@ export function createWorkspaceServer({
   const admitted = new Set(), callbacks = new Set();
   const selectionTransport = () => createRequire(import.meta.url)(join(adminAssets, "../selection-mcp.cjs"));
   const workspace = {
+    ...(desktop && { mode: "desktop" }),
     tenantId: config.tenantId,
     name: config.name,
     workbenchModel: workbenchModel?.name ?? null,
@@ -147,7 +152,7 @@ export function createWorkspaceServer({
     aiEnabled: modelIds.length > 0,
     selectionMcp: config.selectionMcp === true,
   };
-  const cookie = (request, name = COOKIE) => {
+  const cookie = (request, name = desktop ? DESKTOP_COOKIE : COOKIE) => {
     const values = (request.headers.cookie || "")
       .split(";")
       .map((s) => s.trim())
@@ -161,12 +166,24 @@ export function createWorkspaceServer({
       hash(value),
     );
     if (record && record.expires > now()) return { ...record, user: store.user(record.user_id) };
+    check(!desktop, 401, "请通过折页桌面客户端打开本地工作空间。");
     const guest = sharing.account(cookie(request, GUEST_COOKIE));
     check(guest, 401, "请登录工作空间，或通过分享链接打开文档。");
     return guest;
   }
   const admin = (account) =>
     check(account.user.role === "admin", 403, "需要工作空间管理员权限。");
+  function createDesktopSession() {
+    check(desktop, 403, "仅本地工作空间支持桌面会话。");
+    const owner = store.get("SELECT id FROM users WHERE username='desktop' AND role='member' AND disabled=0");
+    check(owner, 409, "本机用户不存在。");
+    const value = random();
+    store.transaction(() => {
+      store.run("DELETE FROM sessions");
+      store.run("INSERT INTO sessions VALUES(?,?,?,?,?)", hash(value), owner.id, random(), now() + 30 * 86400, now());
+    });
+    return { name: DESKTOP_COOKIE, value };
+  }
   const origin = (request) =>
     check(request.headers.origin === config.publicUrl, 403, "请求来源不匹配。");
   const csrf = (request, account) => {
@@ -355,6 +372,7 @@ export function createWorkspaceServer({
   async function business(request, response, url) {
     const path = url.pathname.slice("/workspace/api".length),
       method = request.method;
+    check(!desktop || !(cloudWorkspacePath.test(path) || cloudFilePath.test(path)), 404, "此接口仅供团队工作空间使用。");
     if (path === "/status" && method === "GET")
       return send(response, 200, {
         product: "officecli-workspace",
@@ -854,7 +872,7 @@ export function createWorkspaceServer({
       if (action === "/editor-session" && method === "POST") {
         const data = await jsonBody(request);
         const result = await launch(account, file, data.sessionId);
-        return send(response, 200, { ...result, actor: publicUser(account.user), canManage: summary(account.user, file).canManage });
+        return send(response, 200, { ...result, actor: publicUser(account.user), canManage: !desktop && summary(account.user, file).canManage });
       }
       if (action === "/sharing" && method === "GET") {
         store.manage(account.user, file);
@@ -1236,6 +1254,7 @@ export function createWorkspaceServer({
         return;
       }
       if (url.pathname === "/workspace/mcp/selection") {
+        check(!desktop, 404, "此接口仅供团队工作空间使用。");
         if (request.headers.origin) origin(request);
         const grant = grants.authenticate(request.headers.authorization);
         if (request.method !== "POST") return send(response, 405, { error: "MCP 使用 POST。" }, { Allow: "POST" });
@@ -1286,6 +1305,11 @@ export function createWorkspaceServer({
         405,
         "请求方法无效。",
       );
+      if (desktop && url.pathname === "/") {
+        response.writeHead(302, { Location: "/workbench/" }).end();
+        return;
+      }
+      check(!desktop || !/^\/(admin|public|s|p)(\/|$)/.test(url.pathname), 404, "此页面仅供团队工作空间使用。");
       let path;
       if (url.pathname === "/" || url.pathname === "/admin" || url.pathname === "/public")
         path = adminAssets && join(adminAssets, "index.html");
@@ -1394,7 +1418,7 @@ export function createWorkspaceServer({
   server.on("upgrade", handleUpgrade);
   server.requestTimeout = 180_000;
   server.headersTimeout = 30_000;
-  return { server, handleRequest, handleUpgrade, provider, engine, session,
+  return { server, handleRequest, handleUpgrade, provider, engine, session, createDesktopSession,
     pauseForBackup() {
       backupPaused = true;
       return Promise.allSettled([...admitted, workbenchJobs.pause()]);

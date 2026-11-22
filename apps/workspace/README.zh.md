@@ -157,6 +157,8 @@ root/
 
 ## 离线发行与版本切换
 
+Linux 归档、HTTPS 反代及 macOS Electron 离线包的构建和验收命令见[工作台部署与桌面打包](../../docs/workspace-distribution.zh.md)。
+
 在构建机器准备当前平台的 OfficeCLI、已锁定的前端依赖、构建后的静态资源和 Node.js 发行目录。封装命令会把 Node.js、原生引擎、协作与 MCP、界面、模板和第三方许可随包复制，并生成带平台、版本、协议指纹和逐文件 SHA-256 的 `release.json`。
 
 ```bash

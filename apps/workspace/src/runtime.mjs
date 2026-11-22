@@ -70,7 +70,8 @@ export function createRuntime(workspace, { assets, binary, sidecar, standby = fa
     ready = false,
     failure = false,
     stopped;
-  const aiEnabled = process.env.OFFICECLI_AI_ENABLED === "true" && workspace.allowAI !== false;
+  const desktop = config.mode === "desktop";
+  const aiEnabled = !desktop && process.env.OFFICECLI_AI_ENABLED === "true" && workspace.allowAI !== false;
   const aiModel = process.env.HCD_OPENAI_MODEL || "gpt-6.1-sol";
 
   function spawnService(executable, args, env, ipc = false) {
@@ -160,7 +161,7 @@ export function createRuntime(workspace, { assets, binary, sidecar, standby = fa
       adminAssets: join(assets, "admin"),
       editorAssets: join(assets, "editor"),
       modelIds: aiEnabled ? [aiModel] : [],
-      workbenchModel: config.selectionMcp && workspace.allowAI !== false && process.env.OFFICECLI_WORKBENCH_OLLAMA_MODEL
+      workbenchModel: !desktop && config.selectionMcp && workspace.allowAI !== false && process.env.OFFICECLI_WORKBENCH_OLLAMA_MODEL
         ? {name:process.env.OFFICECLI_WORKBENCH_OLLAMA_MODEL,url:process.env.OFFICECLI_WORKBENCH_OLLAMA_URL || "http://127.0.0.1:11434"} : null,
     });
     await listen(business.server, config.port, config.bindHost);
@@ -277,6 +278,7 @@ export function createRuntime(workspace, { assets, binary, sidecar, standby = fa
     get ready() {
       return ready && !standby;
     },
+    createDesktopSession: () => business.createDesktopSession(),
     handleRequest: (...args) => business.handleRequest(...args),
     handleUpgrade: (...args) => business.handleUpgrade(...args),
   };

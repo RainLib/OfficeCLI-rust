@@ -60,9 +60,10 @@ export function DeskHome({
   setCreating,
   error,
 }: Props) {
+  const desktop = account.workspace.mode === 'desktop'
   const [filter, setFilter] = useState(() => {
     const query = new URLSearchParams(location.search)
-    return query.has('project') || query.get('section') === 'projects' ? 'projects' : 'home'
+    return !desktop && (query.has('project') || query.get('section') === 'projects') ? 'projects' : 'home'
   }),
     [search, setSearch] = useState(''),
     [order, setOrder] = useState<'recent' | 'name'>('recent'),
@@ -90,6 +91,7 @@ export function DeskHome({
   const destination = projectWritable ? { projectId: project.id, folderId: currentFolder } : null
   const refreshProjects = () => updateProjects(value => value + 1)
   useEffect(() => {
+    if (desktop) return
     const controller = new AbortController()
     api<{ projects: Project[] }>('/projects', { signal: controller.signal }).then(reply => {
       if (!controller.signal.aborted) { setProjects(reply.projects); setProjectListReady(true) }
@@ -97,7 +99,7 @@ export function DeskHome({
       if (!controller.signal.aborted) { setNotice(failText(cause)); setProjectListReady(true) }
     })
     return () => controller.abort()
-  }, [account.user.id, projectChanges])
+  }, [account.user.id, desktop, projectChanges])
   useEffect(() => {
     if (!inProjects) return
     const controller = new AbortController()
@@ -224,7 +226,7 @@ export function DeskHome({
           </span>
           <div>
             <strong>{account.workspace.name || '我的工作空间'}</strong>
-            <small>团队工作空间</small>
+            <small>{desktop ? '离线工作空间' : '团队工作空间'}</small>
           </div>
         </div>
         <div className="desk-rail-list">
@@ -233,7 +235,7 @@ export function DeskHome({
             { id: 'projects', label: '共享项目', icon: FolderOpen },
             { id: 'recent', label: '最近打开', icon: Clock3 },
             { id: 'stars', label: '星标文件', icon: Star },
-          ].map((n) => (
+          ].filter(item => !desktop || item.id !== 'projects').map((n) => (
             <button
               key={n.id}
               aria-current={filter === n.id ? 'page' : undefined}
@@ -258,15 +260,15 @@ export function DeskHome({
           ))}
         </div>
         <div className="desk-rail-bottom">
-          <a href="/admin#/documents">
+          {!desktop && <a href="/admin#/documents">
             <FolderOpen />
             文件管理
-          </a>
-          <a href="/admin#/integration">
+          </a>}
+          {!desktop && <a href="/admin#/integration">
             <Settings2 />
             应用接入
-          </a>
-          {account.user.role === 'admin' && (
+          </a>}
+          {!desktop && account.user.role === 'admin' && (
             <a href="/admin#/users">
               <Users />
               用户与角色
@@ -275,7 +277,7 @@ export function DeskHome({
           <div className="desk-user">
             <span>{account.user.displayName?.slice(-1) || '我'}</span>
             <strong>{account.user.displayName}</strong>
-            <button
+            {!desktop && <button
               title="退出登录"
               aria-label="退出登录"
               onClick={async () => {
@@ -288,7 +290,7 @@ export function DeskHome({
               }}
             >
               <LogOut size={15} />
-            </button>
+            </button>}
           </div>
         </div>
       </nav>
@@ -323,7 +325,7 @@ export function DeskHome({
             onClick={() => picker.current?.click()}
           >
             <Upload size={16} />
-            上传文件
+            {desktop ? '导入文件' : '上传文件'}
           </button>}
           </div>
           <input

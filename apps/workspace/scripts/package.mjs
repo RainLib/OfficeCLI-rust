@@ -48,7 +48,10 @@ try {
   for (const file of ["GlyphLessFont-LICENSE.txt", "GlyphLessFont-NOTICE.txt"])
     await copy(join(repo, "crates/pdf-handler/assets", file), `licenses/PDF/${file}`);
   await copy(join(app, "cli.mjs"), "app/cli.mjs");
-  await copy(join(app, "README.zh.md"), "README.zh.md");
+  const usage = await readFile(join(app, "README.zh.md"), "utf8");
+  const deployment = await readFile(join(repo, "docs", "workspace-distribution.zh.md"), "utf8");
+  await writeFile(join(stage, "README.zh.md"), usage.replace("../../docs/workspace-distribution.zh.md", "DEPLOYMENT.zh.md"));
+  await writeFile(join(stage, "DEPLOYMENT.zh.md"), deployment.replaceAll("../apps/workspace/README.zh.md", "README.zh.md"));
   for (const file of (await readdir(join(app, "src"))).filter(file => file.endsWith(".mjs") && !file.endsWith(".test.mjs")))
     await copy(join(app, "src", file), `app/src/${file}`);
   for (const file of ["officecli", "sidecar.cjs", "selection-mcp.cjs", "blank", "admin", "editor", "embed-example"])
