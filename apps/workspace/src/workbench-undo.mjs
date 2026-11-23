@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { check } from "./store.mjs";
-import { readCellRuns } from "./workbench-cell-runs.mjs";
+import { check } from "./store.mts";
+import { readCellRuns } from "./workbench-cell-runs.mts";
 
 const changed = "这次修改的内容或位置已变化，已保留现有编辑。";
 const text = (runs) => runs.map(run => run.text).join("");

@@ -85,14 +85,19 @@ npm ci --prefix examples/hdoc/admin-app
 npm ci --prefix examples/hdoc/editor
 npm ci --prefix examples/hdoc/xlsx-univer-viewer
 npm ci --prefix examples/hdoc/embed-host
+npm ci --prefix apps/workspace
 cargo build --release -p officecli --bin officecli
-node apps/workspace/scripts/build.mjs
+npm run build --prefix apps/workspace
 npm run demo --prefix examples/hdoc/embed-host
 ```
 
 Open **http://fold.localhost:4417/workbench/**. The local demo creates an isolated temporary workspace with example files and signs in a restricted demo member. Restarting the demo creates new demo data.
 
 For a persistent workspace with your own accounts, initialize and start it with [`apps/workspace/cli.mjs`](apps/workspace/README.zh.md#构建与启动). That guide also covers permissions, sharing, tenant isolation, deployment, backups and business-file publication. Published standalone CLI binaries do not by themselves contain the built web workspace.
+
+### Deploy with Docker Compose
+
+The base stack runs the workspace, collaboration service and Caddy with SQLite. Cloud workspaces can select PostgreSQL or MySQL using the supplied Compose overrides or connect to a managed database. Move an existing workspace by restoring a verified backup into a new workspace directory and an empty target database. The offline macOS desktop app uses local SQLite. [Compose deployment and database migration](docs/workspace-distribution.zh.md#docker-compose-云端工作台).
 
 ## Connect AI and coding agents
 

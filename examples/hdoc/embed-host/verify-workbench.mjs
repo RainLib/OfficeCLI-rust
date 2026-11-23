@@ -17,7 +17,7 @@ import { verifySheetCharts } from "./verify-sheet-charts.mjs";
 import { verifyWordPictures } from "./verify-word-pictures.mjs";
 import { verifyWordReview, verifyWordTracked } from "./verify-word-review.mjs";
 import { verifyWordTableCells } from "./verify-word-table-cells.mjs";
-import { planWorkbench } from "../../../apps/workspace/src/workbench-planner.mjs";
+import { planWorkbench } from "../../../apps/workspace/src/workbench-planner.mts";
 import {
   chromium,
   expect,

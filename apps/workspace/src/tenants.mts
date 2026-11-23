@@ -1,18 +1,23 @@
 import { createServer } from "node:http";
+import type { IncomingMessage } from "node:http";
+import type { Socket } from "node:net";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { check } from "./store.mjs";
+import { check } from "./store.mts";
+import { validateDatabaseConfig } from "./database.mts";
+import type { Workspace, WorkspaceConfig, WorkspaceKeys } from "./contracts.mts";
+import type { createRuntime } from "./runtime.mts";
 
-const signingKeys = ["jwt", "provider", "service", "events", "objects"];
-const privateEndpoints = ["callbackUrl", "engineUrl", "collabUrl"];
+const signingKeys = ["jwt", "provider", "service", "events", "objects"] as const;
+const privateEndpoints = ["callbackUrl", "engineUrl", "collabUrl"] as const;
 const loopback = new Set(["127.0.0.1", "[::1]", "localhost"]);
 
-export function bindAddress(host) {
+export function bindAddress(host: string) {
   if (host === "localhost") return "127.0.0.1";
   return host === "[::1]" ? "::1" : host;
 }
 
-export function publicOrigin(value) {
+export function publicOrigin(value: string) {
   const u = new URL(value);
   check(
     ["http:", "https:"].includes(u.protocol) &&
@@ -32,7 +37,7 @@ export function publicOrigin(value) {
   return u;
 }
 
-export function validIdentity(value) {
+export function validIdentity(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value.trim() === value &&
@@ -42,16 +47,16 @@ export function validIdentity(value) {
   );
 }
 
-export function readWorkspace(path, configName = "config.json") {
+export function readWorkspace(path: string, configName = "config.json"): Workspace {
   const root = realpathSync(path);
-  const config = JSON.parse(readFileSync(join(root, configName), "utf8"));
+  const config: WorkspaceConfig = JSON.parse(readFileSync(join(root, configName), "utf8"));
   check(
-    config.schemaVersion === "officecli-workspace/1" &&
-      validIdentity(config.tenantId) &&
+    config && validIdentity(config.tenantId) &&
       validIdentity(config.appId),
     400,
     "工作空间配置版本或身份无效。",
   );
+  validateDatabaseConfig(config);
   // The engine requires a numeric socket address. Use the same loopback
   // address for Node and Rust when a legacy configuration names localhost.
   config.bindHost = bindAddress(config.bindHost);
@@ -62,7 +67,7 @@ export function readWorkspace(path, configName = "config.json") {
       config[field] = endpoint.href.replace(/\/$/, "");
     }
   }
-  const keys = JSON.parse(readFileSync(join(root, "keys.json"), "utf8"));
+  const keys: WorkspaceKeys = JSON.parse(readFileSync(join(root, "keys.json"), "utf8"));
   const secrets = signingKeys.map((key) => keys[key]);
   check(
     secrets.every((v) => typeof v === "string" && Buffer.byteLength(v) >= 32) &&
@@ -73,8 +78,8 @@ export function readWorkspace(path, configName = "config.json") {
   return { root, config, keys };
 }
 
-export function readTenantRegistry(path, listenPort) {
-  const registry = JSON.parse(readFileSync(path, "utf8"));
+export function readTenantRegistry(path: string, listenPort: number): Workspace[] {
+  const registry: { workspaces?: Array<{ root?: string; ai?: boolean }> } = JSON.parse(readFileSync(path, "utf8"));
   check(
     Array.isArray(registry.workspaces) && registry.workspaces.length > 0,
     400,
@@ -85,7 +90,7 @@ export function readTenantRegistry(path, listenPort) {
     ports = new Set(),
     secrets = new Set(),
     databases = new Set(),
-    roots = [];
+    roots: string[] = [];
   return registry.workspaces.map((entry) => {
     check(
       typeof entry?.root === "string" &&
@@ -112,7 +117,8 @@ export function readTenantRegistry(path, listenPort) {
       "工作空间的数据目录必须独立。",
     );
     roots.push(root);
-    for (const name of ["business.sqlite", "objects", "staging", "engine"]) {
+    const sqlite = !config.database;
+    for (const name of [...(sqlite ? ["business.sqlite"] : []), "objects", "staging", "engine"]) {
       const part = join(root, name);
       if (!existsSync(part) && name !== "business.sqlite") continue;
       const inside = relative(root, realpathSync(part));
@@ -122,8 +128,10 @@ export function readTenantRegistry(path, listenPort) {
         "业务库和编辑数据需要位于各自的工作空间目录内。",
       );
     }
-    const db = statSync(join(root, "business.sqlite"), { bigint: true });
-    const database = db.dev + "/" + db.ino;
+    const database = config.database ? config.database.id : (() => {
+      const db = statSync(join(root, "business.sqlite"), { bigint: true });
+      return db.dev + "/" + db.ino;
+    })();
     check(!databases.has(database), 400, "两个租户使用了同一业务库。");
     databases.add(database);
     for (const key of signingKeys) {
@@ -158,11 +166,11 @@ export function readTenantRegistry(path, listenPort) {
   });
 }
 
-export function createTenantGateway(runtimes) {
-  const routes = new Map(runtimes.map((r) => [new URL(r.config.publicUrl).host, r]));
-  const sockets = new Set();
-  function route(req) {
-    return routes.get(req.headers.host?.toLowerCase());
+export function createTenantGateway(runtimes: ReturnType<typeof createRuntime>[]) {
+  const routes = new Map(runtimes.map((r) => [new URL(r.config.publicUrl).host, r] as const));
+  const sockets = new Set<Socket>();
+  function route(req: IncomingMessage) {
+    return req.headers.host ? routes.get(req.headers.host.toLowerCase()) : undefined;
   }
   const server = createServer((req, res) => {
     const runtime = route(req);

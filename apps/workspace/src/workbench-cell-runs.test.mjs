@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readCellRuns } from "./workbench-cell-runs.mjs";
+import { readCellRuns } from "./workbench-cell-runs.mts";
 
 test("native cell runs are bound to the worksheet revision even when only formatting changed", async () => {
   const cell = { nodeId: "cell", nodeHash: "same-text-hash", text: "正文", valueType: "string", textEditable: true };

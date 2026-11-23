@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHmac, randomUUID } from "node:crypto";
-import { Store, hash, iso, now, random } from "./store.mjs";
+import { Store, hash, iso, now, random } from "./store.mts";
 import {
   createProvider,
   documentId,
@@ -13,11 +13,11 @@ import {
   unseal,
 } from "./provider.mjs";
 
-function fixture(t) {
+async function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "workspace-provider-test-"));
-  const store = new Store(root);
-  t.after(() => {
-    store.close();
+  const store = await Store.open(root, { initialize: async () => {} });
+  t.after(async () => {
+    await store.close();
     rmSync(root, { recursive: true, force: true });
   });
   const config = {
@@ -29,7 +29,7 @@ function fixture(t) {
   const actorId = randomUUID(),
     sessionId = randomUUID(),
     browserHash = hash(random());
-  store.run(
+  await store.run(
     "INSERT INTO users VALUES(?,?,?,?,?,0,?)",
     actorId,
     "owner",
@@ -38,7 +38,7 @@ function fixture(t) {
     "member",
     iso(),
   );
-  store.run(
+  await store.run(
     "INSERT INTO sessions VALUES(?,?,?,?,?)",
     browserHash,
     actorId,
@@ -46,14 +46,14 @@ function fixture(t) {
     now() + 3600,
     now(),
   );
-  const file = store.createFile(
-    store.user(actorId),
+  const file = await store.createFile(
+    await store.user(actorId),
     "source.txt",
     "txt",
     "text/plain",
     Buffer.from("Original source"),
   );
-  store.run(
+  await store.run(
     "INSERT INTO launches(id,browser_hash,user_id,file_id,expires) VALUES(?,?,?,?,?)",
     sessionId,
     browserHash,
@@ -67,7 +67,7 @@ function fixture(t) {
 }
 
 test("model use defaults to denied and only deployment-configured IDs are returned", async (t) => {
-  const { store, config, keys, context, file, provider } = fixture(t);
+  const { store, config, keys, context, file, provider } = await fixture(t);
   const request = { context, externalFileId: file.id, operations: ["document.view", "document.edit", "document.ai"] };
   const denied = await provider.callback("/officecli-provider/v1/permissions/resolve", request);
   assert.deepEqual(denied.constraints.modelIds, []);
@@ -78,7 +78,7 @@ test("model use defaults to denied and only deployment-configured IDs are return
 });
 
 test("competing publications preserve the immutable source and reject a stale business head", async (t) => {
-  const { store, config, context, file, provider } = fixture(t);
+  const { store, config, context, file, provider } = await fixture(t);
   const path = (action) =>
     `/officecli-provider/v1/files/${file.id}/publications/${action}`;
   const bytes = Buffer.from("Published document");
@@ -126,13 +126,13 @@ test("competing publications preserve the immutable source and reject a stale bu
     }),
     (error) => error.status === 409,
   );
-  assert.equal(store.file(file.id).head, 2);
+  assert.equal((await store.file(file.id)).head, 2);
   assert.equal(
-    provider.descriptor(file, 1).sha256,
+    (await provider.descriptor(file, 1)).sha256,
     hash(Buffer.from("Original source")),
   );
   assert.equal(
-    store.all("SELECT * FROM versions WHERE file_id=?", file.id).length,
+    (await store.all("SELECT * FROM versions WHERE file_id=?", file.id)).length,
     2,
   );
   await assert.rejects(
@@ -145,9 +145,9 @@ test("competing publications preserve the immutable source and reject a stale bu
 });
 
 test("commit rechecks authorization after prepare and upload", async (t) => {
-  const { store, config, context, file, provider } = fixture(t);
+  const { store, config, context, file, provider } = await fixture(t);
   const memberId = randomUUID();
-  store.run(
+  await store.run(
     "INSERT INTO users VALUES(?,?,?,?,?,0,?)",
     memberId,
     "member",
@@ -156,13 +156,13 @@ test("commit rechecks authorization after prepare and upload", async (t) => {
     "member",
     iso(),
   );
-  store.run(
+  await store.run(
     "UPDATE launches SET user_id=? WHERE id=?",
     memberId,
     context.sessionId,
   );
   context.actorId = memberId;
-  store.run(
+  await store.run(
     "INSERT INTO acl VALUES(?,?,?,?)",
     file.id,
     memberId,
@@ -196,7 +196,7 @@ test("commit rechecks authorization after prepare and upload", async (t) => {
     new URL(prepared.transfer.url),
     bytes,
   );
-  store.run("DELETE FROM acl WHERE file_id=? AND user_id=?", file.id, memberId);
+  await store.run("DELETE FROM acl WHERE file_id=? AND user_id=?", file.id, memberId);
   await assert.rejects(
     provider.callback(path("commit"), {
       context,
@@ -205,11 +205,11 @@ test("commit rechecks authorization after prepare and upload", async (t) => {
     }),
     (error) => error.status === 403,
   );
-  assert.equal(store.file(file.id).head, 1);
+  assert.equal((await store.file(file.id)).head, 1);
 });
 
-test("signed callbacks bind exact bytes and path, and nonce replay is rejected", (t) => {
-  const { store } = fixture(t);
+test("signed callbacks bind exact bytes and path, and nonce replay is rejected", async (t) => {
+  const { store } = await fixture(t);
   const secret = random(),
     bytes = Buffer.from('{"a":1}'),
     stamp = String(now()),
@@ -226,12 +226,12 @@ test("signed callbacks bind exact bytes and path, and nonce replay is rejected",
       "x-hcd-signature": `v1;kid=test;mac=${mac}`,
     },
   };
-  assert.throws(
+  await assert.rejects(
     () =>
       verifySignature(store, request, Buffer.from('{"a":2}'), secret, "test"),
     (error) => error.status === 401,
   );
-  assert.throws(
+  await assert.rejects(
     () =>
       verifySignature(
         store,
@@ -242,15 +242,15 @@ test("signed callbacks bind exact bytes and path, and nonce replay is rejected",
       ),
     (error) => error.status === 401,
   );
-  verifySignature(store, request, bytes, secret, "test");
-  assert.throws(
+  await verifySignature(store, request, bytes, secret, "test");
+  await assert.rejects(
     () => verifySignature(store, request, bytes, secret, "test"),
     (error) => error.status === 409,
   );
 });
 
 test("logout invalidates live document authorization while preserving committed status recovery", async (t) => {
-  const { store, context, file, provider } = fixture(t);
+  const { store, context, file, provider } = await fixture(t);
   const permissions = {
     context,
     externalFileId: file.id,
@@ -265,7 +265,7 @@ test("logout invalidates live document authorization while preserving committed 
     ).granted,
     ["document.view"],
   );
-  store.run(
+  await store.run(
     "DELETE FROM sessions WHERE hash=(SELECT browser_hash FROM launches WHERE id=?)",
     context.sessionId,
   );

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, open, readdir, readFile, realpath, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { atomic, check, hash } from "./store.mjs";
+import { atomic, check, hash } from "./store.mts";
 
 export const releaseSchema = "officecli-workspace-release/1";
 export const releaseManifest = "release.json";

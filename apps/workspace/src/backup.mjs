@@ -4,8 +4,9 @@ import { chmod, copyFile, lstat, mkdir, open, readdir, readFile, realpath, renam
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { request } from "node:http";
-import { atomic, check, uuid, workspaceSchemaVersion } from "./store.mjs";
-import { readWorkspace } from "./tenants.mjs";
+import { Store, atomic, check, uuid, workspaceSchemaVersion } from "./store.mts";
+import { configureDatabase, sqliteSnapshotConfig } from "./database.mts";
+import { readWorkspace } from "./tenants.mts";
 
 const schema = "officecli-workspace-backup/1";
 const metadata = "snapshot.json";
@@ -106,17 +107,20 @@ const sameFile = (a, b) => a.bytes === b.bytes && a.sha256 === b.sha256;
 const summary = ({ id, capturedAt, files, collaborationRooms }) => ({ id, capturedAt, collaborationRooms,
   files: files.length, bytes: files.reduce((total, file) => total + file.bytes, 0) });
 
-export async function captureWorkspace({ root, store, config, id, hold, signal }) {
+export async function captureWorkspace({ root, copyDatabase, config, id, hold, signal }) {
   const staging = join(root, snapshots, id);
   await mkdir(dirname(staging), { recursive: true, mode: 0o700 });
   await mkdir(staging, { mode: 0o700 });
   try {
     const cut = await hold(async () => {
-      for (const name of [...folders, "keys.json", "config.json"])
+      for (const name of [...folders, "keys.json"])
         await copyTree(join(root, name), join(staging, name), signal);
+      if (config.database)
+        atomic(join(staging, "config.json"), JSON.stringify(sqliteSnapshotConfig(config), null, 2) + "\n", { exclusive: true });
+      else await copyTree(join(root, "config.json"), join(staging, "config.json"), signal);
       signal.throwIfAborted();
       const database = join(staging, "business.sqlite");
-      await backup(store.db, database);
+      await copyDatabase(database);
       await chmod(database, 0o600);
     });
     // SQLite backup can retain the source's WAL mode bit. Seal a standalone
@@ -173,17 +177,18 @@ export async function verifyBackup(path) {
     check(sameFile(item, await fingerprint(join(root, item.path))), 409, `备份文件校验失败（${item.path}）。`);
   verifyDatabase(root, files);
   const { config } = readWorkspace(root);
-  check(config.tenantId === manifest.tenantId && config.appId === manifest.appId, 409, "备份的工作区身份不匹配。");
+  check(!config.database && config.tenantId === manifest.tenantId && config.appId === manifest.appId, 409, "备份的工作区身份或数据库格式不匹配。");
   return summary(manifest);
 }
 
-async function installBackup(source, target, restore) {
+async function installBackup(source, target, restore, options) {
   source = await realpath(source);
   const path = await destination(target, source);
   const { manifest, files } = await readManifest(source);
   // Reserve an unused private path. Startup only recognizes config.json,
   // which is published after the restored files have been verified.
   await mkdir(path, { mode: 0o700 });
+  let databaseCommitted = false;
   try {
     const directories = new Set(folders.map(folder => join(path, folder)));
     for (const folder of directories) await mkdir(folder, { mode: 0o700 });
@@ -201,28 +206,48 @@ async function installBackup(source, target, restore) {
     }
     verifyDatabase(path, files);
     const { config } = readWorkspace(path, restore ? ".restore-config" : "config.json");
-    check(config.tenantId === manifest.tenantId && config.appId === manifest.appId, 409, "备份的工作区身份不匹配。");
+    check(!config.database && config.tenantId === manifest.tenantId && config.appId === manifest.appId, 409, "备份的工作区身份或数据库格式不匹配。");
     for (const dir of [...directories].sort((a, b) => b.length - a.length)) await sync(dir);
-    if (restore) await rename(join(path, ".restore-config"), join(path, "config.json"));
-    else atomic(join(path, metadata), JSON.stringify(manifest) + "\n", { exclusive: true });
+    if (restore) {
+      const selected = configureDatabase(config, options?.database, options?.urlEnv);
+      const pending = join(path, ".restore-config");
+      if (selected.database) {
+        atomic(pending, JSON.stringify(selected, null, 2) + "\n");
+        const sourceDb = join(path, "business.sqlite");
+        const store = await Store.open(path, { database: selected.database,
+          initialize: target => target.importDatabase(sourceDb, AbortSignal.timeout(15 * 60 * 1000)),
+        });
+        databaseCommitted = true;
+        await store.close();
+        await rm(sourceDb);
+      }
+      await rename(pending, join(path, "config.json"));
+    } else atomic(join(path, metadata), JSON.stringify(manifest) + "\n", { exclusive: true });
     await sync(path);
     await sync(dirname(path));
     return { ...summary(manifest), path };
   } catch (error) {
+    if (databaseCommitted) {
+      throw new Error(`数据库已迁移，工作区文件保留在 ${path}。发布本地配置时发生错误。`, { cause: error });
+    }
     await rm(path, { force: true, recursive: true });
     throw error;
   }
 }
 
-export const restoreBackup = (source, target) => installBackup(source, target, true);
+/** @param {string} source @param {string} target @param {{database?: string, urlEnv?: string}} [options] */
+export function restoreBackup(source, target, options) {
+  return installBackup(source, target, true, options);
+}
 
 // The deployment supervisor calls this only after its drained child has exited.
 export async function snapshotAfterShutdown({ root, config }, output, cut) {
+  check(!config.database, 409, "托管版本切换使用本机 SQLite。远程数据库使用 Compose 的在线备份与恢复。");
   const path = await destination(output, root);
   const id = randomUUID();
   const db = new DatabaseSync(join(root, "business.sqlite"), { readOnly: true });
   try {
-    await captureWorkspace({ root, config, store: { db }, id, signal: new AbortController().signal,
+    await captureWorkspace({ root, config, copyDatabase: path => backup(db, path), id, signal: new AbortController().signal,
       hold: async copy => { await copy(); return cut; } });
   } finally { db.close(); }
   const staging = join(root, snapshots, id);

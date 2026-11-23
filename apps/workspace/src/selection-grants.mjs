@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { check, hash, now, random, uuid } from "./store.mjs";
+import { check, hash, now, random, uuid } from "./store.mts";
 import { documentId } from "./provider.mjs";
-import { sheetTarget, selectedCells, relocateSheetSelection, sheetEdit } from "./workbench-targets.mjs";
+import { sheetTarget, selectedCells, relocateSheetSelection, sheetEdit } from "./workbench-targets.mts";
 import { textUndo, sheetUndo } from "./workbench-undo.mjs";
-import { readCellRuns } from "./workbench-cell-runs.mjs";
+import { readCellRuns } from "./workbench-cell-runs.mts";
 
 const integer = (value) => Number.isSafeInteger(value) && value >= 0;
 const stale = "选区或文件版本已改变，请在编辑器里重新选择。";
@@ -160,7 +160,7 @@ export function createSelectionGrants({ store, config, engine }) {
       publish(userId);
     };
   }
-  function recentActivity(account) {
+  async function recentActivity(account) {
     const visible = [];
     for (const [key, event] of activity) {
       if (event.until < now()) {
@@ -169,9 +169,7 @@ export function createSelectionGrants({ store, config, engine }) {
       }
       if (
         event.userId === account.user.id &&
-        store
-          .permissions(account.user, store.file(event.fileId))
-          .includes("document.view")
+        (await store.permissions(account.user, { id: event.fileId })).includes("document.view")
       )
         visible.push({
           fileId: event.fileId,
@@ -199,13 +197,17 @@ export function createSelectionGrants({ store, config, engine }) {
     }
   }
   function access(grant) {
+    return store.read(() => authorizedToken(grant));
+  }
+
+  async function authorizedToken(grant) {
     check(config.selectionMcp === true, 403, "此工作区未启用外部 Agent。");
     check(
       bearers.get(grant.digest) === grant && grant.expiresAt > now(),
       401,
       "选区授权已失效。",
     );
-    const record = store.get(
+    const record = await store.get(
       "SELECT l.response,l.expires,l.closed,s.expires AS browser_expires FROM launches l JOIN sessions s ON s.hash=l.browser_hash WHERE l.id=? AND l.user_id=? AND l.file_id=? AND s.hash=?",
       grant.launchId,
       grant.userId,
@@ -219,10 +221,10 @@ export function createSelectionGrants({ store, config, engine }) {
       403,
       "编辑会话已结束。",
     );
-    const user = store.user(grant.userId),
-      file = store.file(grant.fileId);
+    const user = await store.user(grant.userId),
+      file = await store.file(grant.fileId);
     check(!user.is_guest, 403, "外部 Agent 需要成员授权。");
-    store.permit(user, file, "document.view", "document.edit", "document.ai");
+    await store.permit(user, file, "document.view", "document.edit", "document.ai");
     const launch = JSON.parse(record.response);
     check(
       launch.documentId === grant.documentId &&
@@ -232,6 +234,7 @@ export function createSelectionGrants({ store, config, engine }) {
       401,
       "请重新连接编辑器。",
     );
+    check(bearers.get(grant.digest) === grant && grant.expiresAt > now(), 401, "选区授权已失效。");
     grant.expiresAt = Math.min(
       grant.expiresAt,
       launch.expiresAt,
@@ -241,7 +244,7 @@ export function createSelectionGrants({ store, config, engine }) {
     return launch.token;
   }
   async function inspect(grant, specOnly = false) {
-    const token = access(grant),
+    const token = await access(grant),
       path = "/v1/documents/" + grant.documentId;
     const board = grant.format === "excalidraw",
       sheet = grant.target.kind === "sheet";
@@ -257,7 +260,7 @@ export function createSelectionGrants({ store, config, engine }) {
       ),
       engine(path + "/auth", { token }),
     ]);
-    access(grant);
+    await access(grant);
     check(
       (data.revision === grant.revision ||
         (grant.target.kind === "spec" && grant.sentenceVerified && data.revision >= grant.revision && data.revision-grant.revision<=10000) ||
@@ -275,7 +278,7 @@ export function createSelectionGrants({ store, config, engine }) {
         const source=body;
         const line=source && specLines(source)?.[t.block];
         check(source?.customData?.officeBoard?.root===paper.id && typeof line==="string" && Array.from(line).slice(t.start,t.end).join("")===t.expected,409,stale);
-        access(grant);
+        await access(grant);
         grant.sentenceVerified=true;
       }
       return {};
@@ -368,7 +371,8 @@ export function createSelectionGrants({ store, config, engine }) {
     };
     instances.set(key, slot);
     if (value.selection === null) return { revoked: true };
-    const file = store.file(value.fileId);
+    const file = await store.file(value.fileId);
+    check(instances.get(key) === slot, 409, stale);
     const id = documentId(config, file.id);
     check(
       uuid(value.launchId) && value.selection?.documentId === id,
@@ -423,17 +427,17 @@ export function createSelectionGrants({ store, config, engine }) {
     }
   }
 
-  function authenticate(header) {
+  async function authenticate(header) {
     prune();
     const secret = /^Bearer ([\w-]{43})$/.exec(header || "")?.[1];
     const grant = secret && bearers.get(hash(secret));
     check(grant, 401, "需要有效的选区凭据。");
-    access(grant);
+    await access(grant);
     return grant;
   }
 
-  function snapshot(grant) {
-    access(grant);
+  async function snapshot(grant) {
+    await access(grant);
     return { documentId: grant.documentId, revision: grant.revision, collaborationEpoch: grant.epoch,
       target: grant.target, cellNodes: grant.cellNodes, spanSources: grant.spanSources };
   }
@@ -477,7 +481,7 @@ export function createSelectionGrants({ store, config, engine }) {
         instanceId, generation: 1, fileId: file.id, launchId,
         selection: { documentId: saved.documentId, revision: data.revision, collaborationEpoch: auth.collaborationEpoch, target },
       });
-      return await use(authenticate("Bearer " + authorization.token));
+      return await use(await authenticate("Bearer " + authorization.token));
     } finally {
       discard(instances.get(key));
       instances.delete(key);
@@ -493,20 +497,25 @@ export function createSelectionGrants({ store, config, engine }) {
   function agentHeaders(actor) {
     return {"X-HCD-Agent-Edit":"true","X-HCD-Agent-Presence-Id":actor.id,"X-HCD-Agent-Name":Buffer.from(actor.name).toString("base64url")};
   }
-  function pulse(grant, clear=false, phase="idle", actor=presenceIdentity(grant)) {
+  async function pulse(grant, clear=false, phase="idle", actor=presenceIdentity(grant)) {
     if(grant.target.kind!=="spec" || grant.receipt)return;
     const {id,anchor,head}=grant.target;
-    const token=access(grant);
+    const token = await access(grant);
+    if (grant.receipt) return;
 
     grant.specSeq=(grant.specSeq||0)+1;
     void engine("/v1/documents/"+grant.documentId+"/canvas/presence",{method:"POST",token,headers:{"X-HCD-Collaboration-Epoch":String(grant.epoch),...agentHeaders(actor)},data:{clientId:actor.id,agentPhase:phase,specSeq:grant.specSeq,specCursor:clear?null:{id,anchor,head}}}).catch(()=>{});
   }
   function planning(grant) {
     if(grant.target.kind!=="spec")return ()=>{};
-    pulse(grant);
-    const timer=setInterval(()=>{try{pulse(grant)}catch{clearInterval(timer)}},3000);
+    const tick = () => void pulse(grant).catch(() => clearInterval(timer));
+    const timer = setInterval(tick, 3000);
+    tick();
     timer.unref();
-    return (clear)=>{clearInterval(timer);if(clear){try{pulse(grant,true)}catch{}}};
+    return (clear) => {
+      clearInterval(timer);
+      if (clear) void pulse(grant, true).catch(() => {});
+    };
   }
   async function prepareMutation(grant, name, args, captureUndo = false) {
     const expectedRevision = grant.revision;
@@ -558,7 +567,7 @@ export function createSelectionGrants({ store, config, engine }) {
       const planned = await engine(
         "/v1/documents/" + grant.documentId + "/canvas/layout",
         {
-          token: access(grant),
+          token: await access(grant),
           method: "POST",
           data: {
             expectedRevision: grant.revision,
@@ -680,9 +689,9 @@ export function createSelectionGrants({ store, config, engine }) {
     let undoCells = cells;
     if (captureUndo && sheet && grant.format === "xlsx") {
       const targets = new Set(args.edits.map(edit => edit.address));
-      const runs = await readCellRuns(engine, access(grant), grant.documentId, grant.revision,
+      const runs = await readCellRuns(engine, await access(grant), grant.documentId, grant.revision,
         cells.filter(entry => targets.has(entry.address)).map(entry => entry.cell));
-      access(grant);
+      await access(grant);
       undoCells = cells.map(entry => ({ ...entry, cell: entry.cell && { ...entry.cell,
         ...(runs.has(entry.cell.nodeId) && { xlsxRuns: runs.get(entry.cell.nodeId) }) } }));
     }
@@ -708,7 +717,7 @@ export function createSelectionGrants({ store, config, engine }) {
   }
 
   async function prepareReview(grant, jobId, name, args) {
-    access(grant);
+    await access(grant);
     check(!grant.receipt && !grant.busy && !grant.review, 409, "选区已用于其他提交，请重新选择。");
     grant.review = jobId;
     try { return await prepareMutation(grant, name, args, true); }
@@ -717,7 +726,7 @@ export function createSelectionGrants({ store, config, engine }) {
 
   async function call(grant, name, args, identity) {
     const actor = presenceIdentity(grant, identity);
-    access(grant);
+    await access(grant);
     if (name === "read_selection") {
       const { elements, spans, cells, sheetName, sceneRevision } =
         await inspect(grant, !!grant.specRead);
@@ -725,7 +734,7 @@ export function createSelectionGrants({ store, config, engine }) {
       // committed, return the current projection so the caller can verify its work.
       if (grant.target.kind === "spec") {
         const {id,block,start,end,expected}=grant.target;
-        pulse(grant,false,"idle",actor);
+        await pulse(grant, false, "idle", actor);
         return { documentId:grant.documentId,file:grant.name,revision:grant.revision,kind:"spec",format:grant.format,spans:[{blockId:id,block,start,end,text:expected}],...(grant.receipt && {receipt:grant.receipt}) };
       }
       const pinned = grant.specRead && !grant.receipt;
@@ -773,8 +782,8 @@ export function createSelectionGrants({ store, config, engine }) {
     const finish = startActivity(grant.userId, grant.fileId, args.requestId, actor.name);
     try {
       const prepared = await prepareMutation(grant, name, args);
-      pulse(grant, false, "writing", actor);
-      const result = await commitPrepared(access(grant), prepared, actor);
+      await pulse(grant, false, "writing", actor);
+      const result = await commitPrepared(await access(grant), prepared, actor);
       const receipt = {
         documentId: grant.documentId,
         requestId: args.requestId,
@@ -784,7 +793,7 @@ export function createSelectionGrants({ store, config, engine }) {
       };
       grant.receipt = receipt;
       grant.intent = intent;
-      store.audit(grant.userId, "embed.selection.edited", grant.fileId);
+      await store.audit(grant.userId, "embed.selection.edited", grant.fileId);
       return receipt;
     } finally {
       grant.busy = false;

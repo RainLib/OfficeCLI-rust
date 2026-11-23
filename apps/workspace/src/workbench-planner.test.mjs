@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { combineFileActions, organizeBoardSections, planWorkbench, planWorkbenchFile } from "./workbench-planner.mjs";
+import { combineFileActions, organizeBoardSections, planWorkbench, planWorkbenchFile } from "./workbench-planner.mts";
 
 test("separate proposals for the same file produce one reviewed batch", () => {
   const make = (tool, args) => ({ fileId: "workshop", tool, args: { requestId: "reviewed", ...args } });

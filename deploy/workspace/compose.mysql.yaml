@@ -1,0 +1,40 @@
+services:
+  workspace:
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      FOLDLY_DATABASE: mysql
+      FOLDLY_DATABASE_URL_FILE: /run/secrets/foldly_database_url
+    secrets:
+      - foldly_database_url
+
+  mysql:
+    image: mysql:8.4@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: foldly
+      MYSQL_USER: foldly
+      MYSQL_PASSWORD_FILE: /run/secrets/foldly_database_password
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/foldly_database_admin
+    volumes:
+      - foldly_mysql:/var/lib/mysql
+    secrets:
+      - foldly_database_admin
+      - foldly_database_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "--protocol=tcp", "-h", "127.0.0.1", "ping", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+
+volumes:
+  foldly_mysql:
+
+secrets:
+  foldly_database_admin:
+    file: ${FOLDLY_DATABASE_ADMIN_PASSWORD_FILE:-./.secrets/foldly-database-admin}
+  foldly_database_password:
+    file: ${FOLDLY_DATABASE_PASSWORD_FILE:-./.secrets/foldly-database-password}
+  foldly_database_url:
+    file: ${FOLDLY_DATABASE_URL_FILE:-./.secrets/foldly-database-url}

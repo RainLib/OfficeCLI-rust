@@ -1,6 +1,23 @@
-import { check } from "./store.mjs";
+import { check } from "./store.mts";
+import type { CellEdit, WorkbookCell, Worksheet } from "./workbench-types.mts";
 
-export function sheetTarget(target) {
+interface SheetRange {
+  sheetId: string;
+  sheetIndex: number;
+  top: number;
+  left: number;
+  bottom: number;
+  right: number;
+}
+
+interface SelectedCell {
+  row: number;
+  column: number;
+  address: string;
+  cell: WorkbookCell | undefined;
+}
+
+export function sheetTarget(target: SheetRange): SheetRange & { kind: "sheet" } {
   const { sheetId, sheetIndex, top, left, bottom, right } = target;
   const values = [sheetIndex, top, left, bottom, right];
   check(
@@ -19,38 +36,42 @@ export function sheetTarget(target) {
   );
   return { kind: "sheet", sheetId, sheetIndex, top, left, bottom, right };
 }
-function address(row, col) {
+function address(row: number, col: number) {
   let label = "";
   for (let n = col + 1; n > 0; n = Math.floor((n - 1) / 26))
     label = String.fromCharCode(65 + ((n - 1) % 26)) + label;
   return label + (row + 1);
 }
-export function selectedCells(target, sheet) {
+export function selectedCells(target: SheetRange, sheet: Worksheet): SelectedCell[] {
   check(
     sheet.sheetId === target.sheetId && sheet.sheetIndex === target.sheetIndex,
     409,
     "工作表已改变，请重新选择。",
   );
-  const byAddress = new Map(sheet.cells.map((c) => [c.address, c]));
-  const cells = [];
+  const selected = new Map<string, SelectedCell>();
   for (let row = target.top; row <= target.bottom; row++)
     for (let column = target.left; column <= target.right; column++) {
       const key = address(row, column);
-      cells.push({
-        row: row + 1,
-        column: column + 1,
-        address: key,
-        cell: byAddress.get(key),
-      });
+      selected.set(key, { row: row + 1, column: column + 1, address: key, cell: undefined });
     }
-  return cells;
+  // The worksheet can carry far more cells than the 128-cell grant.
+  for (const cell of sheet.cells) {
+    const entry = selected.get(cell.address);
+    if (entry) entry.cell = cell;
+  }
+  return [...selected.values()];
 }
 
-export function relocateSheetSelection(target, sheet, nodeIds) {
-  check(sheet.sheetId === target.sheetId && Array.isArray(nodeIds) && nodeIds.length && nodeIds.every(Boolean),
+export function relocateSheetSelection(target: SheetRange, sheet: Worksheet, nodeIds: unknown) {
+  check(sheet.sheetId === target.sheetId && Array.isArray(nodeIds) && nodeIds.length &&
+    nodeIds.every((id): id is string => typeof id === "string" && id.length > 0),
     409, "包含空白单元格的旧选区需要重新选择。");
-  const addresses = new Map(sheet.cells.map(cell => [cell.nodeId, cell.address]));
-  const positions = nodeIds.map(id => {
+  const selectedIds = new Set(nodeIds);
+  const addresses = new Map<string, string>();
+  for (const cell of sheet.cells) {
+    if (selectedIds.has(cell.nodeId)) addresses.set(cell.nodeId, cell.address);
+  }
+  const positions = nodeIds.map((id): [number, number] => {
     const address = /^([A-Z]+)([1-9][0-9]*)$/.exec(addresses.get(id) || "");
     check(address, 409, "原选区的单元格已被移除，请重新选择。");
     let column = 0;
@@ -66,7 +87,7 @@ export function relocateSheetSelection(target, sheet, nodeIds) {
   return sheetTarget({ ...target, sheetIndex: sheet.sheetIndex, top, left, bottom: top + rows - 1, right: left + columns - 1 });
 }
 
-export function sheetEdit(target, cells, edits) {
+export function sheetEdit(target: SheetRange, cells: readonly SelectedCell[], edits: readonly CellEdit[]) {
   const selected = new Map(cells.map((c) => [c.address, c]));
   check(
     new Set(edits.map((e) => e.address)).size === edits.length,
@@ -79,7 +100,7 @@ export function sheetEdit(target, cells, edits) {
     const { row, column, cell } = entry;
     if (!cell)
       return {
-        op: "xlsx.cell.set",
+        op: "xlsx.cell.set" as const,
         sheetId: target.sheetId,
         row,
         column,
@@ -99,7 +120,7 @@ export function sheetEdit(target, cells, edits) {
         "数字单元格需要数字。",
       );
       return {
-        op: "xlsx.number.set",
+        op: "xlsx.number.set" as const,
         nodeId: cell.nodeId,
         sheetId: target.sheetId,
         value,
@@ -108,7 +129,7 @@ export function sheetEdit(target, cells, edits) {
     }
     check(cell.textEditable, 409, "此单元格无法按文字编辑。");
     return {
-      op: "text.splice",
+      op: "text.splice" as const,
       nodeId: cell.nodeId,
       start: 0,
       deleteCount: [...cell.text].length,
