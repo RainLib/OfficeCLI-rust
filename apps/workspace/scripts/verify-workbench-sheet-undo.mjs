@@ -190,6 +190,9 @@ try {
   await expect.poll(async () => (await sheet()).cells.find(cell => cell.address === 'B2')?.text).toBe('AI新增格【同事】')
   // The receipt precedes the editor's index refresh and protected-input cleanup.
   await expect(pane(peer).locator('.editor-statusbar')).toContainText(`r${cellRevision} · 已保存`)
+  // Keep the command in the ribbon while switching tabs and measuring groups.
+  await pane(peer).getByRole('button', { name: '展开功能区', exact: true }).click()
+  await expect(pane(peer).locator('.document-ribbon')).toHaveAttribute('data-expanded', 'true')
   await pane(peer).getByRole('button', { name: '插入', exact: true }).click()
   const insertedRow = peer.waitForResponse(response => response.url().endsWith('/node-patch')
     && response.request().method() === 'POST')
