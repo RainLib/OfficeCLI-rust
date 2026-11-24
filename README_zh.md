@@ -14,7 +14,7 @@
 
 <p align="center"><a href="README.md">English</a> · <b>中文</b> · <a href="README_ja.md">日本語</a> · <a href="README_ko.md">한국어</a></p>
 
-![Foldly：连接文档、表格、演示与白板](docs/assets/readme/foldly-banner.svg)
+![Foldly：连接文档、表格、演示与白板](docs/assets/readme/foldly-banner-zh.svg)
 
 **Foldly（折页）把多种文件、团队协作和 AI 操作放到同一个工作空间。** 在多个标签间处理 Word、Excel、PPT 和白板，让全局 AI 按指定的文件与选区协同编辑；也可以将单个编辑器嵌入自己的业务系统，由外部 Agent 通过 MCP 操作，聊天面板按需显示。
 
@@ -61,18 +61,21 @@
 
 ![实际白板：原生可编辑节点、自动连线与全局 AI](docs/assets/readme/whiteboard.jpg)
 
-<details>
-<summary><b>Word、Excel 与 PowerPoint 编辑器实拍</b></summary>
+### Word、Excel 与 PowerPoint 编辑器实拍
 
-| Word · 富文本与格式 | Excel · 单元格与公式 |
-| --- | --- |
-| ![Word 编辑器与统一功能区](docs/assets/readme/word-editor.png) | ![表格网格、格式与计算汇总](docs/assets/readme/sheet-editor.png) |
+**Word · 富文本与格式**
+
+![Word 编辑器与统一功能区](docs/assets/readme/word-editor.png)
+
+**Excel · 单元格与公式**
+
+![表格网格、格式与计算汇总](docs/assets/readme/sheet-editor.png)
+
+**PowerPoint · 幻灯片与对象**
 
 ![中文版 PowerPoint 编辑器打开汉语发音课堂演示文稿](docs/assets/readme/slides-editor-zh.png)
 
 截图来自实际运行的中文编辑器，内容为示例文件。[截图来源](docs/assets/readme/screenshots.json)
-
-</details>
 
 ## 启动工作台
 
@@ -108,6 +111,8 @@ npm run demo --prefix examples/hdoc/embed-host
 ![管理后台的用户与角色页面，包含添加用户、角色和账号状态](docs/assets/readme/admin-console-zh.png)
 
 ## 接入 AI 与编程 Agent
+
+[查看原有 OfficeCLI 与 AionUi 制作演示文稿的动态演示（英文界面）](assets/ppt-process.webp)。AionUi 是调用 CLI 的独立应用。
 
 ### 1. 给本地编程助手提供文档工具
 

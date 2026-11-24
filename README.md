@@ -30,6 +30,8 @@ Its Rust document engine is exposed through the `officecli` command for reading,
 - **Move between formats.** Reference document passages and worksheet ranges on a whiteboard, open the original source, and organize selected board content back into an editable document with a backlink.
 - **Keep your own application.** Use the full workspace, an individual embedded editor, a selection-scoped MCP connection, or the local CLI. The chat UI is optional.
 
+[View the workspace home screenshot (Chinese interface)](docs/assets/readme/workspace-home.png)
+
 ## AI collaboration across files
 
 A task can read one file and edit another, or coordinate several files with explicit dependencies:
@@ -41,6 +43,8 @@ The workspace tracks the target file and range for each step. Proposed writes ha
 External agents use the same document APIs and permission checks. Each agent can carry its own identity and visible editing activity. For the built-in natural-language planner, configure a supported model endpoint; local read/write commands also work without a model.
 
 For larger tasks, the editor's AI team supports 1–4 workers with a shared plan, scoped work leases and peer findings. Supported full-deck PPTX rebuilds draft slides in parallel and validate the results before live replacement. This requires the configured AI backend; see [agent-team verification and limits](docs/acceptance/hcd-agent-team-rebuild.zh.md).
+
+[View the cross-file AI collaboration screenshot (Chinese interface)](docs/assets/readme/ai-collaboration.jpg)
 
 ## Documents, data and an infinite canvas
 
@@ -55,18 +59,23 @@ For larger tasks, the editor's AI team supports 1–4 workers with a shared plan
 
 Native Office settings and supported edits are verified through editing, export and reopening of the same original. Export fidelity is format- and operation-specific; see [current boundaries](#current-boundaries).
 
-<details>
-<summary><b>Word, Excel and PowerPoint editor screenshots</b></summary>
+[View the whiteboard screenshot (Chinese interface)](docs/assets/readme/whiteboard.jpg)
 
-| Word · rich text and formatting | Excel · cells and formulas |
-| --- | --- |
-| ![English Word editor with a project proposal](docs/assets/readme/word-editor-en.png) | ![English worksheet editor with a sample gradebook](docs/assets/readme/sheet-editor-en.png) |
+### Word, Excel and PowerPoint editor views
+
+**Word · rich text and formatting**
+
+![English Word editor with a project proposal](docs/assets/readme/word-editor-en.png)
+
+**Excel · cells and formulas**
+
+![English worksheet editor with a sample gradebook](docs/assets/readme/sheet-editor-en.png)
+
+**PowerPoint · slides and objects**
 
 ![English PowerPoint editor with slide thumbnails and a sample product launch deck](docs/assets/readme/slides-editor-en.png)
 
 The screenshots show the running editors with English controls and sample files. [Capture sources](docs/assets/readme/screenshots.json) · [Chinese workspace and AI screenshots](README_zh.md)
-
-</details>
 
 ## Run the workspace
 
@@ -97,9 +106,13 @@ The root Compose file starts PostgreSQL, Caddy, the workspace and a separate Yjs
 
 Open `/admin` on your workspace domain, or [http://localhost:7400/admin](http://localhost:7400/admin) with the default local Compose configuration. Sign in with the workspace administrator account. On the first Compose startup, `FOLDLY_ADMIN` sets its username and `FOLDLY_ADMIN_PASSWORD_FILE` points to its password file.
 
-Administrators can manage members and roles, grant access to individual files, configure fonts and themes, and review write-back jobs and audit records. The console currently uses a Chinese interface. [Console screenshots](README_zh.md#管理后台) · [Administration guide](apps/workspace/README.zh.md#使用流程)
+Administrators can manage members and roles, grant access to individual files, configure fonts and themes, and review write-back jobs and audit records. The console currently uses a Chinese interface. [View the console screenshot](docs/assets/readme/admin-console-zh.png) · [Administration guide](apps/workspace/README.zh.md#使用流程)
 
 ## Connect AI and coding agents
+
+The original OfficeCLI presentation-creation demo shows an agent working in [AionUi](https://github.com/iOfficeAI/AionUi), a separate application using the CLI.
+
+![OfficeCLI presentation-creation demo in AionUi](assets/ppt-process.webp)
 
 ### 1. Give a local coding agent document tools
 
