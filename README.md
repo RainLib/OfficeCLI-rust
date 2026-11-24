@@ -30,8 +30,6 @@ Its Rust document engine is exposed through the `officecli` command for reading,
 - **Move between formats.** Reference document passages and worksheet ranges on a whiteboard, open the original source, and organize selected board content back into an editable document with a backlink.
 - **Keep your own application.** Use the full workspace, an individual embedded editor, a selection-scoped MCP connection, or the local CLI. The chat UI is optional.
 
-![The running workspace: file library, shared projects and optional global AI](docs/assets/readme/workspace-home.png)
-
 ## AI collaboration across files
 
 A task can read one file and edit another, or coordinate several files with explicit dependencies:
@@ -43,8 +41,6 @@ The workspace tracks the target file and range for each step. Proposed writes ha
 External agents use the same document APIs and permission checks. Each agent can carry its own identity and visible editing activity. For the built-in natural-language planner, configure a supported model endpoint; local read/write commands also work without a model.
 
 For larger tasks, the editor's AI team supports 1–4 workers with a shared plan, scoped work leases and peer findings. Supported full-deck PPTX rebuilds draft slides in parallel and validate the results before live replacement. This requires the configured AI backend; see [agent-team verification and limits](docs/acceptance/hcd-agent-team-rebuild.zh.md).
-
-![A real multi-file AI task with selected targets and reviewable changes](docs/assets/readme/ai-collaboration.jpg)
 
 ## Documents, data and an infinite canvas
 
@@ -59,18 +55,16 @@ For larger tasks, the editor's AI team supports 1–4 workers with a shared plan
 
 Native Office settings and supported edits are verified through editing, export and reopening of the same original. Export fidelity is format- and operation-specific; see [current boundaries](#current-boundaries).
 
-![A live whiteboard with editable diagram nodes and the global AI panel](docs/assets/readme/whiteboard.jpg)
-
 <details>
-<summary><b>More real editor views: Word, Excel and PowerPoint</b></summary>
+<summary><b>Word, Excel and PowerPoint editor screenshots</b></summary>
 
 | Word · rich text and formatting | Excel · cells and formulas |
 | --- | --- |
-| ![Word editor with the unified ribbon](docs/assets/readme/word-editor.png) | ![Worksheet editor with formatted cells and calculated totals](docs/assets/readme/sheet-editor.png) |
+| ![English Word editor with a project proposal](docs/assets/readme/word-editor-en.png) | ![English worksheet editor with a sample gradebook](docs/assets/readme/sheet-editor-en.png) |
 
-![PowerPoint editor with native objects and the unified ribbon](docs/assets/readme/slides-editor.jpg)
+![English PowerPoint editor with slide thumbnails and a sample product launch deck](docs/assets/readme/slides-editor-en.png)
 
-These are screenshots of running editors with example documents, not design mockups. [Capture sources and verification](docs/assets/readme/screenshots.json).
+The screenshots show the running editors with English controls and sample files. [Capture sources](docs/assets/readme/screenshots.json) · [Chinese workspace and AI screenshots](README_zh.md)
 
 </details>
 
