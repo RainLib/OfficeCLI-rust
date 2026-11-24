@@ -17,6 +17,7 @@
     "test": "node --test src/*.test.mjs",
     "test:acceptance": "node scripts/verify.mjs",
     "test:backup": "node scripts/verify-backup.mjs",
+    "test:compose-collaboration": "node scripts/verify-compose-collaboration.mts",
     "test:databases": "node scripts/verify-databases.mjs",
     "test:deployment": "node scripts/verify-deployment.mjs",
     "test:desktop": "node ../desktop/verify.mjs",

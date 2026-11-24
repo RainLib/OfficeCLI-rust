@@ -7,6 +7,9 @@ port=${FOLDLY_INTERNAL_PORT:-7400}
 cli=/opt/foldly/app/cli.mjs
 
 case "${1:-serve}" in
+  collaboration)
+    exec node /opt/foldly/app/dist/sidecar.cjs
+    ;;
   health)
     exec gosu node node -e '
       const fs = require("node:fs");
@@ -40,6 +43,28 @@ if [ -n "${FOLDLY_DATABASE_URL_FILE:-}" ]; then
 fi
 
 if [ "${1:-serve}" != serve ]; then exec gosu node node "$cli" "$@"; fi
+
+if [ -n "${FOLDLY_COLLABORATION_SERVICE:-}" ]; then
+  key_file=${FOLDLY_COLLABORATION_KEY_FILE:?Collaboration key path required}
+  install -d -o node -g node -m 0700 "$(dirname "$key_file")"
+  gosu node node -e '
+    const {existsSync, linkSync, mkdtempSync, rmSync, writeFileSync} = require("node:fs");
+    const {randomBytes} = require("node:crypto");
+    const {dirname, join} = require("node:path");
+    const path = process.argv[1];
+    if (existsSync(path)) process.exit(0);
+    const temporary = mkdtempSync(join(dirname(path), ".key-"));
+    try {
+      const key = join(temporary, "key");
+      writeFileSync(key, randomBytes(32).toString("hex"), {mode:0o600});
+      linkSync(key, path);
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    } finally {
+      rmSync(temporary, {recursive:true,force:true});
+    }
+  ' "$key_file"
+fi
 
 if [ ! -e "$root/config.json" ]; then
   password_file=${FOLDLY_ADMIN_PASSWORD_FILE:-/run/secrets/foldly_admin_password}

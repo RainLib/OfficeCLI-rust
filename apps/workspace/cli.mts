@@ -173,6 +173,8 @@ try {
     console.log(JSON.stringify(await restoreBackup(values.backup, root, { database: values.database, urlEnv: values["database-url-env"] }), null, 2));
   } else if (command === "start") {
     const standby = isDeploymentChild();
+    check(!process.env.FOLDLY_COLLABORATION_SERVICE || (!values.tenants && !standby),
+      400, "独立协作服务需要单工作区容器部署。");
     check(
       (root && !values.tenants) || (!root && values.tenants),
       400,

@@ -16,9 +16,9 @@ Linux 工作台启用账号、团队项目、文件权限、分享和业务回�
 
 ## Docker Compose 云端工作台
 
-默认的 `docker compose up` 会启动 `workspace`、`postgres` 和 `proxy`。PostgreSQL 健康后，工作台连接数据库并启动 OfficeCLI 文档引擎和 Yjs/Hocuspocus 协作进程。数据库、引擎和协作进程都就绪后，工作台才会通过健康检查。编辑器、管理后台和 `/collaboration` WebSocket 从 Caddy 的同一个入口访问。
+默认的 `docker compose up` 会启动 `workspace`、`postgres`、`proxy` 和一个独立的 `collaboration` 实例。工作台依赖 PostgreSQL 并启动 OfficeCLI 文档引擎，协作实例单独运行 Yjs/Hocuspocus。引擎和至少一个协作实例就绪后，工作台才会通过启动检查。编辑器、管理后台和 `/collaboration` WebSocket 从 Caddy 的同一个入口访问。
 
-工作台镜像还包含 Office 模板和 PDF 渲染依赖。文档、修订和协作数据位于 `workspace_data` 卷，PostgreSQL 数据位于 `foldly_postgres` 卷，Caddy 证书位于 `caddy_data` 卷。数据库和协作进程通过容器内网和回环地址访问。部署需要 Docker Engine 和 Docker Compose 2.24.4 或以上，以支持数据库配置合并。[Docker Compose 文件合并](https://docs.docker.com/reference/compose-file/merge/)
+工作台镜像包含 Office 模板和 PDF 渲染依赖。工作台与协作实例使用同一镜像的两个命令。文档、修订和持久化的 Yjs 状态位于 `workspace_data` 卷，业务数据库位于 `foldly_postgres` 卷，Caddy 证书位于 `caddy_data` 卷。协作实例仅挂载工作台自动生成的内部凭证，并通过私有网络上的工作台接口访问引擎。部署需要 Docker Engine 和 Docker Compose 2.24.4 或以上，以支持数据库配置合并。[Docker Compose 文件合并](https://docs.docker.com/reference/compose-file/merge/)
 
 容器中的 Chromium 以 `node` 用户运行。Compose 加载固定版本的 seccomp 配置，为 PDF 渲染沙箱提供用户命名空间支持。[Playwright v1.65.1 的配置](https://github.com/microsoft/playwright/blob/v1.65.1/utils/docker/seccomp_profile.json)
 
@@ -44,11 +44,35 @@ unset FOLDLY_INITIAL_PASSWORD
 
 docker compose up --build -d --wait
 docker compose ps
-docker compose top workspace
+docker compose top workspace collaboration
 curl --fail http://localhost:7400/workspace/api/status
 ```
 
-用 `docker compose top workspace` 可以查看文档引擎和 `sidecar.cjs` 协作进程。在浏览器访问 `http://localhost:7400/workbench/`，用 `FOLDLY_ADMIN` 和刚设置的密码登录。用两个浏览器窗口打开同一份 DOCX，核对一端的编辑会同步到另一端，再点「保存点」并导出。管理员可访问同站点的 `/admin`。默认入口仅监听服务器本机。
+在浏览器访问 `http://localhost:7400/workbench/`，用 `FOLDLY_ADMIN` 和刚设置的密码登录。用两个有编辑权限的账号打开同一份 DOCX，核对一端的编辑会同步到另一端，再点「保存点」并导出。管理员可访问同站点的 `/admin`。默认入口仅监听服务器本机。
+
+### 协作实例扩容与故障切换
+
+在同一个 Compose 项目中扩到两个副本。后续执行 `up` 时继续传入所需的副本数。
+
+```bash
+docker compose up -d --no-build --wait --scale collaboration=2
+docker compose ps collaboration
+docker compose logs --tail 100 workspace collaboration
+```
+
+工作台按文档 ID 分配协作实例。同一份文档的用户进入同一房间，增加副本时已分配的房间保留原实例。实例失联后，客户端通过原入口重连。工作台先更换该文档的写入凭证，引擎据此拒绝旧实例的写入，再让新实例恢复已持久化的 Yjs 状态。已落盘但尚未形成文档修订的内容，会在房间恢复后进入保存流程。
+
+浏览器先通过工作台的登录或分享会话，协作实例随后核对当前文档、编辑权限和协作版本。通过 API 嵌入编辑器的客户端应使用编辑会话返回的完整 `collabUrl`，包括其中的路由参数。更新镜像后刷新已打开的编辑页。
+
+此拓扑用于单主机 Compose。工作台与文档引擎各运行一个实例，协作副本分摊不同文档的长连接和计算。操作备份时，工作台让在线协作实例暂停接收新修改并保存已接收的编辑，再通过引擎写入屏障取得数据快照。快照包括文档、修订、Yjs 状态及业务数据库，可以按下方的恢复流程导入新项目。
+
+在独立的测试项目中验证双人编辑、故障切换和 PostgreSQL 快照恢复。需要 Node.js 24.13 或以上、Docker Compose，以及安装了依赖和 Chromium 的编辑器测试环境。[重连后的工作台截图](acceptance/compose-collaboration.png)
+
+```bash
+npm ci --prefix examples/hdoc/editor
+npm exec --prefix examples/hdoc/editor -- playwright install chromium
+npm run --prefix apps/workspace test:compose-collaboration
+```
 
 ### 构建并推送双架构镜像
 
@@ -56,7 +80,7 @@ curl --fail http://localhost:7400/workspace/api/status
 
 ```bash
 docker login ghcr.io --username RainLib
-FOLDLY_IMAGE=ghcr.io/rainlib/foldly-workspace:0.1.33
+FOLDLY_IMAGE="ghcr.io/rainlib/foldly-workspace:$(git rev-parse --short HEAD)"
 docker buildx build --platform linux/amd64,linux/arm64 \
   --tag "$FOLDLY_IMAGE" --push .
 docker buildx imagetools inspect "$FOLDLY_IMAGE"
@@ -66,10 +90,10 @@ docker buildx imagetools inspect "$FOLDLY_IMAGE"
 
 ### 从 GHCR 镜像部署
 
-把 `docker-compose.yaml`、`.env.example` 和 `deploy/workspace/` 放到服务器的部署目录，按上面的方式准备 `.env` 和密码文件。将域名的 DNS 指向服务器，开放 TCP 80 和 443。将 `.env` 中的镜像设为上一步已推送的标签，以下示例使用 `0.1.33`。
+把 `docker-compose.yaml`、`.env.example` 和 `deploy/workspace/` 放到服务器的部署目录，按上面的方式准备 `.env` 和密码文件。将域名的 DNS 指向服务器，开放 TCP 80 和 443。将 `.env` 中的镜像设为上一步已推送的实际标签。部署文件和镜像使用同一版本，已有 `v0.1.33` 镜像配套该版本的 Compose。
 
 ```dotenv
-FOLDLY_IMAGE=ghcr.io/rainlib/foldly-workspace:0.1.33
+FOLDLY_IMAGE=ghcr.io/rainlib/foldly-workspace:YOUR_COMMIT_TAG
 FOLDLY_PUBLIC_URL=https://foldly.example.com
 FOLDLY_PROXY_SITE=foldly.example.com
 FOLDLY_LISTEN_ADDR=0.0.0.0
@@ -81,7 +105,7 @@ FOLDLY_HTTPS_PORT=443
 docker compose pull
 docker compose up -d --no-build --wait
 curl --fail https://foldly.example.com/workspace/api/status
-docker compose logs --tail 100 workspace proxy
+docker compose logs --tail 100 workspace collaboration proxy
 ```
 
 公开镜像可以直接拉取。若 Package 仍是私有的，先执行 `docker login ghcr.io`，使用有 Package 读取权限的 GitHub 账号和带 `read:packages` 的 classic token 登录。Compose 按服务器架构拉取镜像。更新时先备份，再更换 `FOLDLY_IMAGE` 的标签或清单摘要，重新拉取并启动。`docker compose down` 保留已有数据卷。使用同一个 Compose 项目名管理同一部署。
@@ -107,7 +131,7 @@ docker compose up -d --no-build --wait
 
 #### 随 Compose 启动 MySQL
 
-新建 MySQL 部署时，在 `.env` 设置以下文件列表。首次生成密钥时，沿用上面的三个数据库密钥文件名，把连接地址设为 `mysql://foldly:<数据库用户密码>@mysql:3306/foldly`。Compose 会启动 MySQL、工作台和 Caddy，后续可继续使用同一条 `docker compose up -d --build --wait`。
+新建 MySQL 部署时，在 `.env` 设置以下文件列表。首次生成密钥时，沿用上面的三个数据库密钥文件名，把连接地址设为 `mysql://foldly:<数据库用户密码>@mysql:3306/foldly`。Compose 会启动 MySQL、工作台、协作服务和 Caddy，后续继续使用 `docker compose up -d --build --wait`。
 
 ```dotenv
 COMPOSE_FILE=docker-compose.yaml:deploy/workspace/compose.mysql.yaml

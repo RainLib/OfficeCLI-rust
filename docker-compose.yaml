@@ -1,13 +1,14 @@
 services:
   workspace:
-    # The workspace starts the OfficeCLI engine and the Yjs/Hocuspocus sidecar.
-    image: ${FOLDLY_IMAGE:-foldly-workspace:0.1.33-local}
-    build:
+    image: &foldly_image ${FOLDLY_IMAGE:-foldly-workspace:local}
+    build: &foldly_build
       context: .
       dockerfile: Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
+      collaboration:
+        condition: service_started
     init: true
     restart: unless-stopped
     stop_grace_period: 140s
@@ -26,11 +27,46 @@ services:
       FOLDLY_SELECTION_MCP: ${FOLDLY_SELECTION_MCP:-false}
       FOLDLY_DATABASE: postgres
       FOLDLY_DATABASE_URL_FILE: /run/secrets/foldly_database_url
+      FOLDLY_COLLABORATION_SERVICE: collaboration
+      FOLDLY_COLLABORATION_BRIDGE_PORT: ${FOLDLY_COLLABORATION_BRIDGE_PORT:-7403}
+      FOLDLY_COLLABORATION_KEY_FILE: /run/foldly-collaboration/key
     volumes:
       - workspace_data:/var/lib/foldly
+      - collaboration_credentials:/run/foldly-collaboration
     secrets:
       - foldly_admin_password
       - foldly_database_url
+    networks:
+      - default
+      - collaboration
+
+  collaboration:
+    image: *foldly_image
+    build: *foldly_build
+    command: ["collaboration"]
+    user: node
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 120s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HCD_API_URL: http://workspace:${FOLDLY_COLLABORATION_BRIDGE_PORT:-7403}
+      HCD_COLLAB_BIND: 0.0.0.0
+      HCD_COLLAB_PORT: 7402
+      FOLDLY_COLLABORATION_KEY_FILE: /run/foldly-collaboration/key
+    volumes:
+      - collaboration_credentials:/run/foldly-collaboration:ro
+    networks:
+      - collaboration
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7402/',{signal:AbortSignal.timeout(2500)}).then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 5s
+      timeout: 4s
+      start_period: 30s
+      retries: 24
 
   postgres:
     image: postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
@@ -76,9 +112,14 @@ services:
 
 volumes:
   workspace_data:
+  collaboration_credentials:
   foldly_postgres:
   caddy_data:
   caddy_config:
+
+networks:
+  collaboration:
+    internal: true
 
 secrets:
   foldly_admin_password:

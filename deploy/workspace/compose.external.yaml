@@ -1,6 +1,8 @@
 services:
   workspace:
-    depends_on: !reset {}
+    depends_on: !override
+      collaboration:
+        condition: service_started
     environment:
       FOLDLY_DATABASE: ${FOLDLY_DATABASE:-}
       FOLDLY_DATABASE_URL_FILE: !reset null
