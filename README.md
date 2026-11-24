@@ -20,7 +20,7 @@
 
 Its Rust document engine is exposed through the `officecli` command for reading, creating, editing and exporting files from scripts, developer tools and agent workflows.
 
-[Try the workspace](#run-the-workspace) · [Deploy with Docker Compose](#deploy-with-docker-compose) · [Downloads](docs/workspace-distribution.zh.md#下载-0133) · [Connect an agent](#connect-ai-and-coding-agents) · [Embed an editor](#embed-in-your-product) · [Documentation](#documentation)
+[Try the workspace](#run-the-workspace) · [Deploy with Docker Compose](#deploy-with-docker-compose) · [Downloads](docs/workspace-distribution.zh.md#下载-0134) · [Connect an agent](#connect-ai-and-coding-agents) · [Embed an editor](#embed-in-your-product) · [Documentation](#documentation)
 
 ## One workspace, several ways to collaborate
 

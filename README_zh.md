@@ -20,7 +20,7 @@
 
 底层 Rust 文档引擎通过 `officecli` 命令提供，供脚本、开发工具和 AI 编程助手读取、创建、修改、渲染与导出文件。
 
-[启动工作台](#启动工作台) · [Docker Compose 部署](#用-docker-compose-部署) · [工作台和桌面包下载](docs/workspace-distribution.zh.md#下载-0133) · [AI 与编程 Agent 接入](#接入-ai-与编程-agent) · [嵌入业务系统](#嵌入业务系统) · [开发文档](#开发文档)
+[启动工作台](#启动工作台) · [Docker Compose 部署](#用-docker-compose-部署) · [工作台和桌面包下载](docs/workspace-distribution.zh.md#下载-0134) · [AI 与编程 Agent 接入](#接入-ai-与编程-agent) · [嵌入业务系统](#嵌入业务系统) · [开发文档](#开发文档)
 
 ## 一个工作空间，连接团队与文件
 

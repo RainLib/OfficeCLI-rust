@@ -177,7 +177,7 @@ npm run package --prefix apps/workspace -- \
   --public-url http://127.0.0.1:7400 --password-env FOLD_INITIAL_ADMIN_PASSWORD
 /srv/fold/workspace start
 /srv/fold/workspace deployment-status
-/srv/fold/workspace upgrade --release /media/fold-0.1.33
+/srv/fold/workspace upgrade --release /media/fold-0.1.34
 /srv/fold/workspace rollback
 ```
 
