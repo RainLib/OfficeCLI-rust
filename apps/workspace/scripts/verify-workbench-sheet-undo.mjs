@@ -181,11 +181,15 @@ try {
   await select(peer, 1, 1)
   await expect(field(peer)).toHaveValue('AI新增格')
   await field(peer).fill('AI新增格【同事】')
+  const cellSaved = peer.waitForResponse(response => response.url().endsWith('/node-patch')
+    && response.request().method() === 'POST')
   await pane(peer).getByRole('button', { name: '应用内容', exact: true }).click()
+  const cellResponse = await cellSaved
+  assert(cellResponse.ok(), await cellResponse.text())
+  const { revision: cellRevision } = await cellResponse.json()
   await expect.poll(async () => (await sheet()).cells.find(cell => cell.address === 'B2')?.text).toBe('AI新增格【同事】')
-  // The canonical write precedes the browser's index refresh. Structural
-  // commands are available once the protected input has finished reconciling.
-  await expect(field(peer)).toBeEnabled()
+  // The receipt precedes the editor's index refresh and protected-input cleanup.
+  await expect(pane(peer).locator('.editor-statusbar')).toContainText(`r${cellRevision} · 已保存`)
   await pane(peer).getByRole('button', { name: '插入', exact: true }).click()
   const insertedRow = peer.waitForResponse(response => response.url().endsWith('/node-patch')
     && response.request().method() === 'POST')
