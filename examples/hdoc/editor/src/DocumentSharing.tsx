@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Check, Copy, Globe, Link, LockKeyhole, Pencil, Share2, X } from 'lucide-react'
 import type { Session } from './api.ts'
+import { useI18n } from './i18n.tsx'
+import { localizeSource } from './sourceLocale.tsx'
 import './sharing.css'
 
 export type SharingPolicy = {
@@ -33,14 +35,15 @@ export function DocumentVisitorIdentity() {
 
 export function ShareControl() {
   const sharing = useContext(SharingContext)
+  const { locale } = useI18n()
   const [notice, setNotice] = useState('')
   if (!sharing) return null
   async function copyLink() {
     try { await navigator.clipboard.writeText(sharing!.sharedUrl || location.href); setNotice('链接已复制') }
     catch { setNotice('请复制浏览器地址栏中的分享链接') }
   }
-  return <><button className="sharing-trigger" onClick={() => sharing.canManage ? sharing.setOpen(true) : void copyLink()} title={notice || '分享文档'}>
-    <Share2 size={15} /><span>{sharing.canManage ? '分享' : notice || '复制链接'}</span>
+  return <><button className="sharing-trigger" onClick={() => sharing.canManage ? sharing.setOpen(true) : void copyLink()} title={localizeSource(locale, notice || '分享文档')}>
+    <Share2 size={15} /><span>{localizeSource(locale, sharing.canManage ? '分享' : notice || '复制链接')}</span>
   </button>{sharing.open && sharing.canManage && <ShareDialog fileId={sharing.fileId} onClose={() => sharing.setOpen(false)} />}</>
 }
 
