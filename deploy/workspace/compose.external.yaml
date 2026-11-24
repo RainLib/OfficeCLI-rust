@@ -1,0 +1,18 @@
+services:
+  workspace:
+    depends_on: !reset {}
+    environment:
+      FOLDLY_DATABASE: ${FOLDLY_DATABASE:-}
+      FOLDLY_DATABASE_URL_FILE: !reset null
+    secrets: !override
+      - foldly_admin_password
+
+  postgres: !reset null
+
+volumes:
+  foldly_postgres: !reset null
+
+secrets:
+  foldly_database_admin: !reset null
+  foldly_database_password: !reset null
+  foldly_database_url: !reset null
