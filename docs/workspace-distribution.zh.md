@@ -4,15 +4,15 @@ Linux 工作台和 macOS Electron 桌面端共用原生引擎、Web 编辑器、
 
 Linux 工作台启用账号、团队项目、文件权限、分享和业务回写。桌面只启动本机工作区，使用独立的 SQLite、文件目录、签名密钥和本地会话。团队管理、分享、AI、MCP 和业务回写由桌面服务端关闭。两端可通过导入和导出原生文件交换内容。
 
-## 下载 0.1.32
+## 下载 0.1.33
 
 | 适用平台 | 工作台包 |
 | --- | --- |
-| Linux ARM64 | [Linux ARM64 工作台归档](https://github.com/RainLib/Foldly/releases/download/v0.1.32/foldly-workspace-0.1.32-linux-arm64.tar.gz) |
-| Linux x86_64 | [Linux x86_64 工作台归档](https://github.com/RainLib/Foldly/releases/download/v0.1.32/foldly-workspace-0.1.32-linux-x86_64.tar.gz) |
-| macOS Apple Silicon | [Electron 离线测试包（ad-hoc 签名）](https://github.com/RainLib/Foldly/releases/download/v0.1.32/foldly-desktop-0.1.32-macos-arm64.zip) |
+| Linux ARM64 | [Linux ARM64 工作台归档](https://github.com/RainLib/Foldly/releases/download/v0.1.33/foldly-workspace-0.1.33-linux-arm64.tar.gz) |
+| Linux x86_64 | [Linux x86_64 工作台归档](https://github.com/RainLib/Foldly/releases/download/v0.1.33/foldly-workspace-0.1.33-linux-x86_64.tar.gz) |
+| macOS Apple Silicon | [Electron 离线测试包（ad-hoc 签名）](https://github.com/RainLib/Foldly/releases/download/v0.1.33/foldly-desktop-0.1.33-macos-arm64.zip) |
 
-将归档和工作台校验清单保存在同一目录。Linux 用 `sha256sum --ignore-missing -c WORKSPACE-SHA256SUMS` 校验，macOS 用 `shasum -a 256 --ignore-missing -c WORKSPACE-SHA256SUMS` 校验。[工作台校验清单](https://github.com/RainLib/Foldly/releases/download/v0.1.32/WORKSPACE-SHA256SUMS) · [GitHub Release v0.1.32](https://github.com/RainLib/Foldly/releases/tag/v0.1.32)
+将归档和工作台校验清单保存在同一目录。Linux 用 `sha256sum --ignore-missing -c WORKSPACE-SHA256SUMS` 校验，macOS 用 `shasum -a 256 --ignore-missing -c WORKSPACE-SHA256SUMS` 校验。[工作台校验清单](https://github.com/RainLib/Foldly/releases/download/v0.1.33/WORKSPACE-SHA256SUMS) · [GitHub Release v0.1.33](https://github.com/RainLib/Foldly/releases/tag/v0.1.33)
 
 ## Docker Compose 云端工作台
 
@@ -45,7 +45,7 @@ curl --fail http://localhost:7400/workspace/api/status
 
 ```bash
 docker login ghcr.io --username RainLib
-FOLDLY_IMAGE=ghcr.io/rainlib/foldly-workspace:0.1.32-multidb
+FOLDLY_IMAGE=ghcr.io/rainlib/foldly-workspace:0.1.33
 docker buildx build --platform linux/amd64,linux/arm64 \
   --tag "$FOLDLY_IMAGE" --push .
 docker buildx imagetools inspect "$FOLDLY_IMAGE"
@@ -55,10 +55,10 @@ docker buildx imagetools inspect "$FOLDLY_IMAGE"
 
 ### 从 GHCR 镜像部署
 
-把 `docker-compose.yaml`、`.env.example` 和 `deploy/workspace/` 放到服务器的部署目录，按上面的方式准备 `.env` 和密码文件。将域名的 DNS 指向服务器，开放 TCP 80 和 443。将 `.env` 中的镜像设为上一步已推送的标签，以下示例使用 `0.1.32-multidb`。
+把 `docker-compose.yaml`、`.env.example` 和 `deploy/workspace/` 放到服务器的部署目录，按上面的方式准备 `.env` 和密码文件。将域名的 DNS 指向服务器，开放 TCP 80 和 443。将 `.env` 中的镜像设为上一步已推送的标签，以下示例使用 `0.1.33`。
 
 ```dotenv
-FOLDLY_IMAGE=ghcr.io/rainlib/foldly-workspace:0.1.32-multidb
+FOLDLY_IMAGE=ghcr.io/rainlib/foldly-workspace:0.1.33
 FOLDLY_PUBLIC_URL=https://foldly.example.com
 FOLDLY_PROXY_SITE=foldly.example.com
 FOLDLY_LISTEN_ADDR=0.0.0.0
@@ -188,7 +188,7 @@ OFFICECLI_BIN="$PWD/target/release/officecli" \
 
 ```bash
 npm ci --prefix apps/workspace
-FOLDLY_VERSION=0.1.32
+FOLDLY_VERSION=0.1.33
 FOLDLY_LINUX_KIT="foldly-workspace-${FOLDLY_VERSION}-linux-arm64"
 node apps/workspace/scripts/package.mjs \
   --version "$FOLDLY_VERSION" \
@@ -204,8 +204,8 @@ tar -C dist -czf "dist/$FOLDLY_LINUX_KIT.tar.gz" "$FOLDLY_LINUX_KIT"
 
 ```bash
 npm ci --prefix apps/workspace
-FOLDLY_VERSION=0.1.32
-FOLDLY_COMMON_ASSETS=/path/to/foldly-workspace-0.1.32-linux-arm64/app/dist
+FOLDLY_VERSION=0.1.33
+FOLDLY_COMMON_ASSETS=/path/to/foldly-workspace-0.1.33-linux-arm64/app/dist
 FOLDLY_X86_NODE=/opt/node-v24-linux-x64
 FOLDLY_LINUX_KIT="foldly-workspace-${FOLDLY_VERSION}-linux-x86_64"
 
@@ -231,7 +231,7 @@ tar -C dist -czf "dist/$FOLDLY_LINUX_KIT.tar.gz" "$FOLDLY_LINUX_KIT"
 准备服务账号 `foldly`、持久目录 `/srv/foldly` 和域名 `foldly.example.com`。将归档解包到该账号可读的目录。以下以 x86_64 为例，ARM64 使用对应的解包目录。命令由 `foldly` 运行，`/srv/foldly` 需可写，初次安装时 `/srv/foldly/live` 由安装命令创建。
 
 ```bash
-cd /srv/foldly/releases/foldly-workspace-0.1.32-linux-x86_64
+cd /srv/foldly/releases/foldly-workspace-0.1.33-linux-x86_64
 ./workspace release-info
 read -r -s -p "Foldly 初始管理员密码: " FOLDLY_INITIAL_PASSWORD
 export FOLDLY_INITIAL_PASSWORD
@@ -283,13 +283,13 @@ foldly.example.com {
 ```bash
 npm ci --prefix apps/workspace
 node apps/workspace/scripts/package.mjs \
-  --version 0.1.32 --node-runtime /opt/node-v24 \
-  --assets "$PWD/dist/workspace-assets" --output "$PWD/dist/macos-workspace-0.1.32"
+  --version 0.1.33 --node-runtime /opt/node-v24 \
+  --assets "$PWD/dist/workspace-assets" --output "$PWD/dist/macos-workspace-0.1.33"
 node apps/desktop/package-macos.mjs \
-  --release "$PWD/dist/macos-workspace-0.1.32" \
+  --release "$PWD/dist/macos-workspace-0.1.33" \
   --electron-zip /path/to/electron-v44.9.1-darwin-arm64.zip \
   --electron-sha256 ff597552c9c7b0b16c39a7fb93a346ee7148afbd372ebcf0c18415482c49fbea \
-  --output "$PWD/dist/foldly-desktop-0.1.32-macos-arm64.zip"
+  --output "$PWD/dist/foldly-desktop-0.1.33-macos-arm64.zip"
 ```
 
 解包后打开 `Foldly Desktop.app`。首次启动创建本机用户，数据存放在 `~/Library/Application Support/Foldly Desktop/workspace/`。从首页用「导入文件」打开原生文件。编辑可用「保存点」落盘，原格式副本从文件操作菜单导出。正常关闭窗口或按 ⌘Q 时，应用先保存编辑器中的草稿，再等待本机协作服务完成落盘。保存失败时会保留窗口并显示错误。
@@ -311,9 +311,9 @@ OFFICECLI_RELEASE_NATIVE_VERIFY=1 \
 在 Mac 上对 ZIP 运行以下验收。脚本解包并检查签名，使用独立临时用户目录。两次都验证桌面权限边界、原生文件打开、Word 保存和导出，以及编辑后立即退出再重开。第一次使用交付包的默认 Chromium 沙箱。第二次由 macOS 的回环网络策略限制整个进程树，测试启动器用 `--no-sandbox` 避免 Chromium 重复安装 Seatbelt 沙箱。外网探针必须返回 `EPERM`。
 
 ```bash
-FOLDLY_DESKTOP_PACKAGE=/path/to/foldly-desktop-0.1.32-macos-arm64.zip \
+FOLDLY_DESKTOP_PACKAGE=/path/to/foldly-desktop-0.1.33-macos-arm64.zip \
   npm run test:desktop --prefix apps/workspace
 FOLDLY_DESKTOP_KERNEL_OFFLINE=1 \
-FOLDLY_DESKTOP_PACKAGE=/path/to/foldly-desktop-0.1.32-macos-arm64.zip \
+FOLDLY_DESKTOP_PACKAGE=/path/to/foldly-desktop-0.1.33-macos-arm64.zip \
   npm run test:desktop --prefix apps/workspace
 ```

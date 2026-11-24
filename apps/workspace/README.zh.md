@@ -172,12 +172,12 @@ npm run package --prefix apps/workspace -- \
 把发行目录复制或归档到与包匹配的系统和 CPU。安装使用包内运行时，启动机只需要系统基础库和支持的浏览器。包内静态资源由工作区同源提供。AI 在首次安装时默认关闭。
 
 ```bash
-/media/fold-0.1.31/workspace release-info
-/media/fold-0.1.31/workspace install --deployment /srv/fold \
+/media/fold-0.1.32/workspace release-info
+/media/fold-0.1.32/workspace install --deployment /srv/fold \
   --public-url http://127.0.0.1:7400 --password-env FOLD_INITIAL_ADMIN_PASSWORD
 /srv/fold/workspace start
 /srv/fold/workspace deployment-status
-/srv/fold/workspace upgrade --release /media/fold-0.1.32
+/srv/fold/workspace upgrade --release /media/fold-0.1.33
 /srv/fold/workspace rollback
 ```
 

@@ -20,7 +20,7 @@
 
 Its Rust document engine is exposed through the `officecli` command for reading, creating, editing and exporting files from scripts, developer tools and agent workflows.
 
-[Try the workspace](#run-the-workspace) · [Connect an agent](#connect-ai-and-coding-agents) · [Embed an editor](#embed-in-your-product) · [Documentation](#documentation)
+[Try the workspace](#run-the-workspace) · [Deploy with Docker Compose](#deploy-with-docker-compose) · [Downloads](docs/workspace-distribution.zh.md#下载-0133) · [Connect an agent](#connect-ai-and-coding-agents) · [Embed an editor](#embed-in-your-product) · [Documentation](#documentation)
 
 ## One workspace, several ways to collaborate
 
@@ -97,7 +97,7 @@ For a persistent workspace with your own accounts, initialize and start it with 
 
 ### Deploy with Docker Compose
 
-The base stack runs the workspace, collaboration service and Caddy with SQLite. Cloud workspaces can select PostgreSQL or MySQL using the supplied Compose overrides or connect to a managed database. Move an existing workspace by restoring a verified backup into a new workspace directory and an empty target database. The offline macOS desktop app uses local SQLite. [Compose deployment and database migration](docs/workspace-distribution.zh.md#docker-compose-云端工作台).
+The base stack runs the workspace, collaboration service and Caddy with SQLite. Cloud workspaces can select PostgreSQL or MySQL using the supplied Compose overrides or connect to a managed database. Move an existing workspace by restoring a verified backup into a new workspace directory and an empty target database. The offline macOS desktop app uses local SQLite. [docker-compose.yaml](docker-compose.yaml) · [Deployment and database migration](docs/workspace-distribution.zh.md#docker-compose-云端工作台)
 
 ## Connect AI and coding agents
 
