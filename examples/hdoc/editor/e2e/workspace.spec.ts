@@ -2754,8 +2754,10 @@ test('fixed input journal failures warn before close and keep entered text edita
     }
   })
   await open(page, 'fixed-draft-error')
-  await page.getByRole('button', { name: '编辑文字：Total brew time: 3-4 minutes', exact: true }).click()
-  const text = page.locator('.fixed-pages iframe').first().contentFrame().getByRole('textbox', { name: '编辑文字', exact: true })
+  const hitbox = page.getByRole('button', { name: '编辑文字：Total brew time: 3-4 minutes', exact: true })
+  const slideId = await hitbox.evaluate(button => button.closest('.fixed-page')!.id)
+  await hitbox.click()
+  const text = page.locator(`#${slideId} iframe`).contentFrame().getByRole('textbox', { name: '编辑文字', exact: true })
   await text.fill('STORAGE_FAILED_INPUT')
   await expect(page.locator('[data-draft-protection]')).toHaveAttribute('data-draft-protection', 'failed')
   await expect(page.getByRole('alert', { name: '本地草稿保护不可用' })).toBeVisible()
