@@ -1,6 +1,6 @@
 services:
   workspace:
-    image: &foldly_image ${FOLDLY_IMAGE:-foldly-workspace:local}
+    image: &foldly_image ${FOLDLY_IMAGE:-foldly-workspace:0.1.34-local}
     build: &foldly_build
       context: .
       dockerfile: Dockerfile
