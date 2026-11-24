@@ -20,7 +20,7 @@
 
 底层 Rust 文档引擎通过 `officecli` 命令提供，供脚本、开发工具和 AI 编程助手读取、创建、修改、渲染与导出文件。
 
-[启动工作台](#启动工作台) · [AI 与编程 Agent 接入](#接入-ai-与编程-agent) · [嵌入业务系统](#嵌入业务系统) · [开发文档](#开发文档)
+[启动工作台](#启动工作台) · [Docker Compose 部署](#用-docker-compose-部署) · [工作台和桌面包下载](docs/workspace-distribution.zh.md#下载-0133) · [AI 与编程 Agent 接入](#接入-ai-与编程-agent) · [嵌入业务系统](#嵌入业务系统) · [开发文档](#开发文档)
 
 ## 一个工作空间，连接团队与文件
 
@@ -97,7 +97,7 @@ npm run demo --prefix examples/hdoc/embed-host
 
 ### 用 Docker Compose 部署
 
-基础配置启动工作台、协作服务和 Caddy，默认使用 SQLite。云端可以加载 PostgreSQL 或 MySQL 配置，也可以连接已有数据库。已有工作区通过已校验的备份恢复到新目录和空目标库后切换。macOS 离线版使用本机 SQLite。[Compose 部署与数据库迁移](docs/workspace-distribution.zh.md#docker-compose-云端工作台)
+基础配置启动工作台、协作服务和 Caddy，默认使用 SQLite。云端可以加载 PostgreSQL 或 MySQL 配置，也可以连接已有数据库。已有工作区通过已校验的备份恢复到新目录和空目标库后切换。macOS 离线版使用本机 SQLite。[docker-compose.yaml](docker-compose.yaml) · [部署与数据库迁移](docs/workspace-distribution.zh.md#docker-compose-云端工作台)
 
 ## 接入 AI 与编程 Agent
 
