@@ -62,7 +62,7 @@ export function BusinessEditor({ fileId, shared }: { fileId: string; shared?: { 
     void renew()
     return () => { active = false; request.abort(); clearTimeout(timer); document.removeEventListener('visibilitychange', visible) }
   }, [fileId, isShared, secret, retry])
-  const websocket = new URL('/collaboration', location.href)
+  const websocket = new URL(launch?.collabUrl || '/collaboration', location.href)
   websocket.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
   const returnTo = location.pathname + location.search + location.hash
   if (blocked || !launch && error) return <main className="shared-access-state"><div>

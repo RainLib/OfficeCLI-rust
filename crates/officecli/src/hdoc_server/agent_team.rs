@@ -1367,7 +1367,7 @@ async fn commit_deck(
         let mut staged = state.clone();
         staged.root = scratch.path().to_path_buf();
         staged.remote = None;
-        staged.collaboration_lock = Arc::new(Mutex::new(()));
+        staged.collaboration_lock = Arc::new(Mutex::new(None));
         staged.agent_runs = HashMap::from([(run_id.to_string(), run)]).into();
         staged.agents = Default::default();
         staged.agent_operations = Default::default();

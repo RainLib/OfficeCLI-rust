@@ -1,7 +1,7 @@
 import { createWorkbenchJobs } from "./workbench-jobs.mjs";
 import { createRequire } from "node:module";
 import { createSelectionGrants, supportsSelectionFormat } from "./selection-grants.mjs";
-import { createServer, request as httpRequest } from "node:http";
+import { createServer, request as httpRequest, STATUS_CODES } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { createHmac, randomUUID } from "node:crypto";
 import { readFileSync, existsSync, statSync, createReadStream } from "node:fs";
@@ -120,6 +120,7 @@ export function createWorkspaceServer({
   modelIds = /** @type {string[]} */ ([]),
   workbenchModel = /** @type {{name: string, url: string} | null} */ (null),
   captureBackup,
+  collaborationTarget = /** @type {((documentId: string, socket: import("node:net").Socket) => Promise<import("./collaboration.mts").CollaborationTarget>) | undefined} */ (undefined),
   publicAvailable = () => true,
 }) {
   const desktop = config.mode === "desktop";
@@ -159,6 +160,11 @@ export function createWorkspaceServer({
     aiEnabled: modelIds.length > 0,
     selectionMcp: config.selectionMcp === true,
   };
+  const collaborationSignature = id => createHmac("sha256", keys.objects).update("collaboration/" + id).digest("base64url");
+  function collaborationPath(id) {
+    if (!collaborationTarget) return "/collaboration";
+    return "/collaboration?" + new URLSearchParams({ document: id, route: collaborationSignature(id) });
+  }
   const cookie = (request, name = desktop ? DESKTOP_COOKIE : COOKIE) => {
     const values = (request.headers.cookie || "")
       .split(";")
@@ -309,7 +315,7 @@ export function createWorkspaceServer({
               id, account.hash, user.id, file.id, expiry, encrypted);
           return { request, purpose };
         });
-        if (prepared.response) return { ...prepared.response, fileName: file.name, collabUrl: "/collaboration" };
+        if (prepared.response) return { ...prepared.response, fileName: file.name, collabUrl: collaborationPath(prepared.response.documentId) };
         let response;
         try {
           response = await engine(
@@ -340,7 +346,7 @@ export function createWorkspaceServer({
         return {
           ...response,
           fileName: file.name,
-          collabUrl: "/collaboration",
+          collabUrl: collaborationPath(response.documentId),
         };
       });
     pending.set(id, work);
@@ -1373,12 +1379,27 @@ export function createWorkspaceServer({
       await session(request);
       if (socket.destroyed) return;
       check(publicAvailable(), 503, "工作空间正在关闭。");
-      const target = new URL(config.collabUrl),
-        outgoing = httpRequest(target, {
+      let target = new URL(config.collabUrl);
+      const headers = { ...request.headers };
+      if (collaborationTarget) {
+        const params = new URL(request.url, config.publicUrl).searchParams;
+        const id = params.get("document");
+        check(id && equal(params.get("route") ?? "", collaborationSignature(id)), 403, "协作连接未绑定文档。");
+        const selected = await collaborationTarget(id, socket);
+        target = new URL(selected.url);
+        Object.assign(headers, selected.headers);
+        delete headers.cookie;
+        delete headers.authorization;
+      }
+      const outgoing = httpRequest(target, {
           path: "/",
-          headers: { ...request.headers, host: target.host },
+          headers: { ...headers, host: target.host },
+          timeout: 5000,
         });
+      socket.once("close", () => outgoing.destroy());
       outgoing.on("upgrade", (upstream, other, buffer) => {
+        if (socket.destroyed) { other.destroy(); return; }
+        other.setTimeout(0);
         const lines = [
           `HTTP/1.1 ${upstream.statusCode} ${upstream.statusMessage}`,
           ...Object.entries(upstream.headers).map(
@@ -1397,11 +1418,13 @@ export function createWorkspaceServer({
         other.on("close", () => socket.destroy());
         socket.on("close", () => other.destroy());
       });
-      outgoing.on("response", () => socket.destroy());
+      outgoing.on("response", upstream => { upstream.resume(); socket.destroy(); });
+      outgoing.on("timeout", () => outgoing.destroy());
       outgoing.on("error", () => socket.destroy());
       outgoing.end();
-    } catch {
-      socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+    } catch (error) {
+      const status = error instanceof HttpError ? error.status : 503;
+      socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nConnection: close\r\n\r\n`);
     }
   }
   const server = createServer(handleRequest);

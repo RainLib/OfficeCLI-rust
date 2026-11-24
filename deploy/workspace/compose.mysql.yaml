@@ -3,6 +3,8 @@ services:
     depends_on: !override
       mysql:
         condition: service_healthy
+      collaboration:
+        condition: service_started
     environment:
       FOLDLY_DATABASE: mysql
 

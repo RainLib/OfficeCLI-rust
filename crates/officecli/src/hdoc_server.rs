@@ -19,6 +19,7 @@ mod canvas;
 mod canvas_materials;
 mod canvas_reactions;
 mod canvas_spec;
+mod collaboration_owners;
 mod exports;
 mod grid_drafts;
 mod identity;
@@ -74,7 +75,7 @@ struct ServerState {
     remote: Option<RemoteStore>,
     /// Theme pinned onto newly imported documents; `None` keeps today's unpinned behavior.
     default_theme: Option<String>,
-    collaboration_lock: Arc<Mutex<()>>,
+    collaboration_lock: Arc<Mutex<Option<collaboration_owners::Owners>>>,
     downloads: Arc<Mutex<HashMap<String, DownloadTicket>>>,
     export_jobs: Arc<tokio::sync::Semaphore>,
     agents: Arc<Mutex<HashMap<(String, String), AgentActivity>>>,
@@ -242,7 +243,11 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         secret,
         remote,
         default_theme,
-        collaboration_lock: Arc::new(Mutex::new(())),
+        collaboration_lock: Arc::new(Mutex::new(
+            (backup.is_some()
+                && std::env::var("HCD_WORKSPACE_COLLABORATION").as_deref() == Ok("true"))
+            .then(collaboration_owners::Owners::default),
+        )),
         downloads: Arc::new(Mutex::new(HashMap::new())),
         export_jobs: Arc::new(tokio::sync::Semaphore::new(2)),
         agents: Arc::new(Mutex::new(HashMap::new())),
@@ -286,6 +291,7 @@ pub async fn serve(command: HdocServeCommand) -> Result<()> {
         .route("/integration/v1/publications/{id}/artifact", get(integration::recovery::artifact))
         .route("/integration/v1/publications/{id}/event-retry", post(integration::recovery::retry_event))
         .route("/integration/v1/backup-leases/{id}", axum::routing::put(integration::backup::acquire).delete(integration::backup::release))
+        .route("/integration/v1/collaboration-owners/{id}", axum::routing::put(collaboration_owners::assign))
         .route("/v1/documents/{id}/integration", get(integration::document_status))
         .route("/v1/documents/{id}/publications", post(integration::publish))
         .route("/v1/documents/{id}/publications/{publication_id}", get(integration::publication_status))
@@ -1370,10 +1376,11 @@ async fn collaboration_get(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &headers, &id, false)?;
+    let actor = claims(&state, &headers, &id)?;
     open(&state, &id)?;
-    let _guard = state.collaboration_lock.lock().await;
-    check_collaboration_epoch(&state, &id, &headers).await?;
+    let owners = state.collaboration_lock.lock().await;
+    let owner = collaboration_owners::require(&owners, &actor, &id, &headers)?;
+    let epoch = check_collaboration_epoch(&state, &id, &headers).await?;
     if let Some(remote) = &state.remote {
         let bytes = remote
             .collaboration_get(&id)
@@ -1401,11 +1408,22 @@ async fn collaboration_get(
     if bytes.len() > 8 * 1024 * 1024 {
         return Err(internal("stored collaboration state exceeds 8 MiB"));
     }
-    Ok((
+    let mut response = (
         [(header::CONTENT_TYPE, "application/octet-stream")],
         Body::from(bytes),
     )
-        .into_response())
+        .into_response();
+    if owner.is_some()
+        && stored_collaboration_pending(&state, &id, epoch)
+            .await?
+            .is_some_and(|pending| pending.dirty)
+    {
+        response.headers_mut().insert(
+            "x-hcd-collaboration-dirty",
+            axum::http::HeaderValue::from_static("true"),
+        );
+    }
+    Ok(response)
 }
 
 async fn collaboration_put(
@@ -1414,9 +1432,16 @@ async fn collaboration_put(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Result<Json<Value>, ApiError> {
-    authorize(&state, &headers, &id, true)?;
+    let actor = write_claims(&state, &headers, &id)?;
     open(&state, &id)?;
-    let _guard = state.collaboration_lock.lock().await;
+    let owners = state.collaboration_lock.lock().await;
+    if owners.is_some() && actor.sub.as_deref() != Some("hcd-collaboration") {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "collaboration service identity required".into(),
+        ));
+    }
+    collaboration_owners::require(&owners, &actor, &id, &headers)?;
     let epoch = check_collaboration_epoch(&state, &id, &headers).await?;
     if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
         return Err(bad("collaboration state must be 1-8 MiB"));
@@ -1807,6 +1832,33 @@ struct PendingCollaboration {
     sequence: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+struct StoredCollaborationPending {
+    dirty: bool,
+    sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<uuid::Uuid>,
+}
+
+fn collaboration_pending_path(state: &ServerState, id: &str, epoch: u64) -> PathBuf {
+    state
+        .root
+        .join("collaboration")
+        .join(format!("{id}.{epoch}.pending"))
+}
+
+async fn stored_collaboration_pending(
+    state: &ServerState,
+    id: &str,
+    epoch: u64,
+) -> Result<Option<StoredCollaborationPending>, ApiError> {
+    match tokio::fs::read(collaboration_pending_path(state, id, epoch)).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(internal),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(internal(error)),
+    }
+}
+
 async fn collaboration_pending(
     State(state): State<ServerState>,
     Path(id): Path<String>,
@@ -1820,19 +1872,22 @@ async fn collaboration_pending(
             "collaboration service identity required".into(),
         ));
     }
-    let _guard = state.collaboration_lock.lock().await;
+    let owners = state.collaboration_lock.lock().await;
+    let owner = collaboration_owners::require(&owners, &actor, &id, &headers)?;
     let epoch = check_collaboration_epoch(&state, &id, &headers).await?;
     open(&state, &id)?;
-    let path = state
-        .root
-        .join("collaboration")
-        .join(format!("{id}.{epoch}.pending"));
-    if let Ok(bytes) = tokio::fs::read(&path).await {
-        let previous: PendingCollaboration = serde_json::from_slice(&bytes).map_err(internal)?;
-        if previous.sequence >= pending.sequence {
-            return Ok(Json(json!({"ok":true})));
-        }
+    if stored_collaboration_pending(&state, &id, epoch)
+        .await?
+        .is_some_and(|previous| previous.owner == owner && previous.sequence >= pending.sequence)
+    {
+        return Ok(Json(json!({"ok":true})));
     }
+    let path = collaboration_pending_path(&state, &id, epoch);
+    let pending = StoredCollaborationPending {
+        dirty: pending.dirty,
+        sequence: pending.sequence,
+        owner,
+    };
     tokio::fs::create_dir_all(path.parent().expect("collaboration directory"))
         .await
         .map_err(internal)?;
@@ -1869,23 +1924,14 @@ async fn require_clean_collaboration(
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
     let epoch = check_collaboration_epoch(state, id, headers).await?;
-    let path = state
-        .root
-        .join("collaboration")
-        .join(format!("{id}.{epoch}.pending"));
-    match tokio::fs::read(path).await {
-        Ok(bytes) => {
-            let pending: PendingCollaboration = serde_json::from_slice(&bytes).map_err(internal)?;
-            if pending.dirty {
-                return Err(ApiError(
-                    StatusCode::CONFLICT,
-                    "collaborators have unsaved edits; wait for a checkpoint, reread and replan"
-                        .into(),
-                ));
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(internal(error)),
+    if stored_collaboration_pending(state, id, epoch)
+        .await?
+        .is_some_and(|pending| pending.dirty)
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "collaborators have unsaved edits; wait for a checkpoint, reread and replan".into(),
+        ));
     }
     Ok(())
 }
@@ -1920,7 +1966,8 @@ async fn project(
     Json(request): Json<ExpectedRevision>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = write_claims(&state, &headers, &id)?;
-    let _guard = state.collaboration_lock.lock().await;
+    let owners = state.collaboration_lock.lock().await;
+    collaboration_owners::require(&owners, &actor, &id, &headers)?;
     check_agent_patch(&state, &id, &headers, &actor).await?;
     let bundle = open(&state, &id)?;
     let result = project_editor(&bundle, request.expected_revision).map_err(hcd_error)?;
@@ -2251,8 +2298,10 @@ async fn checkpoint(
     headers: HeaderMap,
     Json(request): Json<SnapshotRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let actor = checkpoint_author(write_claims(&state, &headers, &id)?, &headers)?;
-    let _guard = state.collaboration_lock.lock().await;
+    let actor = write_claims(&state, &headers, &id)?;
+    let owners = state.collaboration_lock.lock().await;
+    collaboration_owners::require(&owners, &actor, &id, &headers)?;
+    let actor = checkpoint_author(actor, &headers)?;
     check_collaboration_epoch(&state, &id, &headers).await?;
     if request.blocks.len() > 1_000_000 {
         return Err(bad("snapshot block limit exceeded"));
@@ -5187,7 +5236,7 @@ mod tests {
             secret: Arc::new(secret.to_vec()),
             remote: None,
             default_theme: None,
-            collaboration_lock: Arc::new(Mutex::new(())),
+            collaboration_lock: Arc::new(Mutex::new(None)),
             downloads: Arc::new(Mutex::new(HashMap::new())),
             export_jobs: Arc::new(tokio::sync::Semaphore::new(2)),
             agents: Arc::new(Mutex::new(HashMap::new())),

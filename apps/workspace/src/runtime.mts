@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Store, atomic, check } from "./store.mts";
 import { databaseEnvKeys } from "./database.mts";
 import { createWorkspaceServer } from "./server.mjs";
+import { createCollaborationPool } from "./collaboration.mts";
 import { errorMessage } from "./contracts.mts";
 import type { Workspace } from "./contracts.mts";
 
@@ -84,6 +85,7 @@ export function createRuntime(workspace: Workspace, { assets, binary, sidecar, s
   let stopped: Promise<void> | undefined;
   let draining = false, ready = false, failure = false;
   const desktop = config.mode === "desktop";
+  const pool = createCollaborationPool(workspace);
   const aiEnabled = !desktop && process.env.OFFICECLI_AI_ENABLED === "true" && workspace.allowAI !== false;
   const aiModel = process.env.HCD_OPENAI_MODEL || "gpt-6.1-sol";
 
@@ -119,7 +121,7 @@ export function createRuntime(workspace: Workspace, { assets, binary, sidecar, s
   }
 
   async function holdForBackup(id: string, copy: () => Promise<unknown>, signal: AbortSignal, shutdown = false) {
-    check(business && collab, 503, "工作空间未就绪。");
+    check(business && (pool || collab), 503, "工作空间未就绪。");
     const url = `${config.engineUrl}/integration/v1/backup-leases/${id}`;
     const headers = { Authorization: `Bearer ${keys.service}` };
     const prep = AbortSignal.any([signal, AbortSignal.timeout(90_000)]);
@@ -128,7 +130,7 @@ export function createRuntime(workspace: Workspace, { assets, binary, sidecar, s
     let heldUntilShutdown = false;
     try {
       await bounded(business.pauseForBackup(), prep);
-      const paused = await collabCommand(collab, "backup-freeze", id, prep);
+      const paused = await (pool ? pool.freeze(id, prep) : collabCommand(collab!, "backup-freeze", id, prep));
       check(typeof paused.flushed === "number" && Number.isSafeInteger(paused.flushed), 503, "协作服务未确认落盘。");
       while (true) {
         prep.throwIfAborted();
@@ -151,7 +153,11 @@ export function createRuntime(workspace: Workspace, { assets, binary, sidecar, s
     } finally {
       if (!heldUntilShutdown) {
         if (!releaseConfirmed) await removeLease().then(result => result.body?.cancel()).catch(() => {});
-        try { await collabCommand(collab, "backup-resume", id, AbortSignal.timeout(5000)); }
+        try {
+          const timeout = AbortSignal.timeout(5000);
+          if (pool) await pool.resume(id, timeout);
+          else await collabCommand(collab!, "backup-resume", id, timeout);
+        }
         finally { if (!standby) await business.resumeAgentJobs(); }
       }
     }
@@ -186,6 +192,7 @@ export function createRuntime(workspace: Workspace, { assets, binary, sidecar, s
       config,
       keys,
       captureBackup: snapshot,
+      collaborationTarget: pool?.target,
       publicAvailable: () => ready && !standby,
       adminAssets: join(assets, "admin"),
       editorAssets: join(assets, "editor"),
@@ -194,6 +201,7 @@ export function createRuntime(workspace: Workspace, { assets, binary, sidecar, s
         ? {name:process.env.OFFICECLI_WORKBENCH_OLLAMA_MODEL,url:process.env.OFFICECLI_WORKBENCH_OLLAMA_URL || "http://127.0.0.1:11434"} : null,
     });
     await listen(business.server, config.port, config.bindHost);
+    if (pool) await listen(pool.bridge, pool.bridgePort, config.bindHost);
     check(!stopped, 503, "工作空间启动已结束。");
     const integration = {
       schemaVersion: "officecli-integration/1",
@@ -227,6 +235,7 @@ export function createRuntime(workspace: Workspace, { assets, binary, sidecar, s
       "HCD_DATABASE_URL",
       "HCD_S3_BUCKET",
       "HCD_DEFAULT_THEME",
+      "FOLDLY_COLLABORATION_KEY_FILE",
       ...databaseEnvKeys(),
       ...privateEnv,
       ...(aiEnabled ? [] : ["OPENAI_API_KEY", "RAINY_OPENAI_API_KEY"]),
@@ -236,6 +245,7 @@ export function createRuntime(workspace: Workspace, { assets, binary, sidecar, s
     env.HCD_AI_ENABLED = aiEnabled ? "true" : "false";
     env.HCD_COLLAB_BIND = new URL(config.collabUrl).hostname.replace(/^\[|\]$/g, "");
     env.HCD_LOCAL_WORKSPACE_BACKUP = "true";
+    env.HCD_WORKSPACE_COLLABORATION = pool ? "true" : "false";
     spawnService(
       binary,
       [
@@ -251,8 +261,17 @@ export function createRuntime(workspace: Workspace, { assets, binary, sidecar, s
       env,
     );
     await waitForService(config.engineUrl + "/health", "编辑服务");
-    collab = spawnService(process.execPath, [sidecar], env, true);
-    await waitForService(config.collabUrl, "协作服务");
+    if (pool) {
+      const deadline = Date.now() + 120_000;
+      while (!stopped && !failure && Date.now() < deadline) {
+        if (await pool.ready().catch(() => false)) break;
+        await delay(250);
+      }
+      check(!stopped && !failure && Date.now() < deadline, 503, "协作服务未就绪。");
+    } else {
+      collab = spawnService(process.execPath, [sidecar], env, true);
+      await waitForService(config.collabUrl, "协作服务");
+    }
     if (!standby) await business.resumeAgentJobs();
     ready = true;
   }
@@ -280,6 +299,7 @@ export function createRuntime(workspace: Workspace, { assets, binary, sidecar, s
       backupAbort?.abort();
       await backupTask?.catch(() => {});
       business?.server.close();
+      await pool?.stop();
       await Promise.all(
         children.map(async (child) => {
           if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null)

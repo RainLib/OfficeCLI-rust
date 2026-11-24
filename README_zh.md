@@ -97,7 +97,7 @@ npm run demo --prefix examples/hdoc/embed-host
 
 ### 用 Docker Compose 部署
 
-根目录的 Compose 默认启动 PostgreSQL、Caddy 和工作台。工作台容器会启动文档引擎和 Yjs/Hocuspocus 协作服务，并提供编辑器和管理后台。附加配置支持随栈启动 MySQL、使用 SQLite 或连接已有数据库。已有工作区通过已校验的备份恢复到新目录和空目标库后切换。macOS 离线版使用本机 SQLite。[docker-compose.yaml](docker-compose.yaml) · [部署与数据库迁移](docs/workspace-distribution.zh.md#docker-compose-云端工作台)
+根目录的 Compose 默认启动 PostgreSQL、Caddy、工作台和独立的 Yjs/Hocuspocus 协作服务。协作实例按文档分流，统一从原有的 WebSocket 入口鉴权。工作台提供文档引擎、编辑器和管理后台，附加配置支持 MySQL、SQLite 和已有数据库。macOS 离线版使用本机 SQLite。[docker-compose.yaml](docker-compose.yaml) · [部署、扩容与恢复](docs/workspace-distribution.zh.md#docker-compose-云端工作台)
 
 ## 接入 AI 与编程 Agent
 

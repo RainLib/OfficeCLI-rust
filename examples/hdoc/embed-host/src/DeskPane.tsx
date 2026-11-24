@@ -23,8 +23,6 @@ export type PaneHandle = {
   prepare: () => Promise<void>
   clear: () => void
 }
-const socket = new URL('/collaboration', location.origin)
-socket.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
 export const DeskPane = forwardRef<
   PaneHandle,
   {
@@ -42,6 +40,8 @@ export const DeskPane = forwardRef<
   const { theme } = useAppearance()
   const { launch, error, setError, selection, report, connect, clear } =
     useFileBinding(file, account)
+  const socket = new URL(launch?.collabUrl || '/collaboration', location.origin)
+  socket.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
   const check = useRef<(() => Promise<unknown>) | null>(null)
   const [editorReady, setEditorReady] = useState(false)
   const register = useCallback((fn: (() => Promise<unknown>) | null) => {

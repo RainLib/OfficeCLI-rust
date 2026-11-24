@@ -51,7 +51,7 @@ fn unavailable(message: &str) -> ApiError {
 fn conflict(message: &str) -> ApiError {
     ApiError(StatusCode::CONFLICT, message.into())
 }
-fn configured(state: &ServerState) -> Result<&Integration, ApiError> {
+pub(super) fn configured(state: &ServerState) -> Result<&Integration, ApiError> {
     state.integration.as_deref().ok_or_else(|| {
         ApiError(
             StatusCode::NOT_FOUND,
@@ -115,7 +115,7 @@ impl Integration {
         Ok(())
     }
 
-    fn service(&self, headers: &HeaderMap) -> Result<(), ApiError> {
+    pub(in crate::hdoc_server) fn service(&self, headers: &HeaderMap) -> Result<(), ApiError> {
         if headers.contains_key(header::ORIGIN) {
             return Err(denied("session exchange is server-to-server"));
         }
