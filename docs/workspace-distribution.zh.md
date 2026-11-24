@@ -221,7 +221,7 @@ OFFICECLI_BIN="$PWD/target/release/officecli" \
 
 ```bash
 npm ci --prefix apps/workspace
-FOLDLY_VERSION=0.1.34
+FOLDLY_VERSION=0.1.35
 FOLDLY_LINUX_KIT="foldly-workspace-${FOLDLY_VERSION}-linux-arm64"
 node apps/workspace/scripts/package.mjs \
   --version "$FOLDLY_VERSION" \
@@ -237,8 +237,8 @@ tar -C dist -czf "dist/$FOLDLY_LINUX_KIT.tar.gz" "$FOLDLY_LINUX_KIT"
 
 ```bash
 npm ci --prefix apps/workspace
-FOLDLY_VERSION=0.1.34
-FOLDLY_COMMON_ASSETS=/path/to/foldly-workspace-0.1.34-linux-arm64/app/dist
+FOLDLY_VERSION=0.1.35
+FOLDLY_COMMON_ASSETS=/path/to/foldly-workspace-${FOLDLY_VERSION}-linux-arm64/app/dist
 FOLDLY_X86_NODE=/opt/node-v24-linux-x64
 FOLDLY_LINUX_KIT="foldly-workspace-${FOLDLY_VERSION}-linux-x86_64"
 
@@ -316,13 +316,13 @@ foldly.example.com {
 ```bash
 npm ci --prefix apps/workspace
 node apps/workspace/scripts/package.mjs \
-  --version 0.1.34 --node-runtime /opt/node-v24 \
-  --assets "$PWD/dist/workspace-assets" --output "$PWD/dist/macos-workspace-0.1.34"
+  --version 0.1.35 --node-runtime /opt/node-v24 \
+  --assets "$PWD/dist/workspace-assets" --output "$PWD/dist/macos-workspace-0.1.35"
 node apps/desktop/package-macos.mjs \
-  --release "$PWD/dist/macos-workspace-0.1.34" \
+  --release "$PWD/dist/macos-workspace-0.1.35" \
   --electron-zip /path/to/electron-v44.9.1-darwin-arm64.zip \
   --electron-sha256 ff597552c9c7b0b16c39a7fb93a346ee7148afbd372ebcf0c18415482c49fbea \
-  --output "$PWD/dist/foldly-desktop-0.1.34-macos-arm64.zip"
+  --output "$PWD/dist/foldly-desktop-0.1.35-macos-arm64.zip"
 ```
 
 解包后打开 `Foldly Desktop.app`。首次启动创建本机用户，数据存放在 `~/Library/Application Support/Foldly Desktop/workspace/`。从首页用「导入文件」打开原生文件。编辑可用「保存点」落盘，原格式副本从文件操作菜单导出。正常关闭窗口或按 ⌘Q 时，应用先保存编辑器中的草稿，再等待本机协作服务完成落盘。保存失败时会保留窗口并显示错误。
