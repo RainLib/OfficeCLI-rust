@@ -46,9 +46,15 @@ async function login(username, pass) {
   const result = await request('/workspace/api/login', { method: 'POST', data: { username, password: pass } })
   return { ...result.value, cookie: result.cookie }
 }
-async function selectText(page, needle) {
-  const paragraph = page.locator('.desk-editor.is-visible .tiptap p').filter({ hasText: needle }).first()
+async function waitForEditableParagraph(page, needle) {
+  // A new collaboration epoch can render its text before the editor accepts input.
+  const paragraph = page.locator('.desk-editor.is-visible .tiptap[contenteditable="true"] p')
+    .filter({ hasText: needle }).first()
   await expect(paragraph).toBeVisible({ timeout: 45000 })
+  return paragraph
+}
+async function selectText(page, needle) {
+  const paragraph = await waitForEditableParagraph(page, needle)
   const point = await paragraph.evaluate((p, value) => {
     const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT)
     while (walker.nextNode()) {
@@ -66,7 +72,7 @@ async function selectText(page, needle) {
   await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe(needle)
 }
 async function insertInside(page, needle, offset, value, bold = false) {
-  const paragraph = page.locator('.desk-editor.is-visible .tiptap p').filter({ hasText: needle }).first()
+  const paragraph = await waitForEditableParagraph(page, needle)
   const point = await paragraph.evaluate((paragraph, { needle, offset }) => {
     const ownerDocument = paragraph.ownerDocument
     const walker = ownerDocument.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT)
