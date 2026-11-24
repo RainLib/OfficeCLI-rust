@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { CloudUpload, LoaderCircle } from 'lucide-react'
 import { api, type Session } from './api.ts'
+import { LocalText } from './sourceLocale.tsx'
 import './host-integration.css'
 
 type HostStatus = {
@@ -123,7 +124,7 @@ export function HostPublicationControl({ session, revision, beforeSave }: { sess
   const canExport = permits(session, 'document.download') || permits(session, 'document.export')
   if (!writable && !canExport && !permits(session, 'history.view')) return null
   return <details className="host-publication" data-publication-state={result?.state || (status?.pending ? 'pending' : 'saved')}>
-    <summary><CloudUpload size={15} /><span>{busy ? '回写中' : status?.pending ? '待回写' : '业务版本'}</span></summary>
+    <summary><CloudUpload size={15} /><span><LocalText source={busy ? '回写中' : status?.pending ? '待回写' : '业务版本'} /></span></summary>
     <div className="host-publication-popover">
       <strong>业务文件保存</strong>
       <p>工作区修订 r{revision ?? status?.revision ?? '…'} · 业务版本 {status?.externalVersion || '…'}</p>

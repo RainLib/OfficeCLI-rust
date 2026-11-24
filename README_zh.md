@@ -62,15 +62,15 @@
 ![实际白板：原生可编辑节点、自动连线与全局 AI](docs/assets/readme/whiteboard.jpg)
 
 <details>
-<summary><b>更多真实界面：Word、Excel 与 PowerPoint</b></summary>
+<summary><b>Word、Excel 与 PowerPoint 编辑器实拍</b></summary>
 
 | Word · 富文本与格式 | Excel · 单元格与公式 |
 | --- | --- |
 | ![Word 编辑器与统一功能区](docs/assets/readme/word-editor.png) | ![表格网格、格式与计算汇总](docs/assets/readme/sheet-editor.png) |
 
-![PowerPoint 原生对象编辑与统一功能区](docs/assets/readme/slides-editor.jpg)
+![中文版 PowerPoint 编辑器打开汉语发音课堂演示文稿](docs/assets/readme/slides-editor-zh.png)
 
-图片均来自实际运行的编辑器，使用示例文件，未使用设计稿冒充产品截图。[截图来源与验证记录](docs/assets/readme/screenshots.json)。
+截图来自实际运行的中文编辑器，内容为示例文件。[截图来源](docs/assets/readme/screenshots.json)
 
 </details>
 

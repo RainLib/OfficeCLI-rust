@@ -49,10 +49,43 @@
       "syntheticProductScreenshot": false
     },
     {
-      "file": "slides-editor.jpg",
-      "source": "isolated demo at /workbench/; team retrospective PPTX",
-      "kind": "current in-app browser capture",
-      "sha256": "2f8e4e8367c7e9669856df3fec789bdbe7a8765c84e8cd390ac25d4f3e08cd2f",
+      "file": "word-editor-en.png",
+      "source": "Embedded editor, assets/showcase/project-proposal.docx",
+      "sourceCommit": "8707e7b29424f1af7057722cd33ba658c63f6c7f",
+      "capturedOn": "2026-11-24",
+      "locale": "en-US",
+      "kind": "verified workspace browser run",
+      "sha256": "bb4ab15c3334f80c660083857805130bf6d61e3c52d3eb005ce7180878e0d453",
+      "syntheticProductScreenshot": false
+    },
+    {
+      "file": "sheet-editor-en.png",
+      "source": "Embedded editor, assets/showcase/gradebook.xlsx",
+      "sourceCommit": "8707e7b29424f1af7057722cd33ba658c63f6c7f",
+      "capturedOn": "2026-11-24",
+      "locale": "en-US",
+      "kind": "verified workspace browser run",
+      "sha256": "00461082522695b08c3884fbeb2c4a95d0537eed670be339448978602e079b40",
+      "syntheticProductScreenshot": false
+    },
+    {
+      "file": "slides-editor-en.png",
+      "source": "Embedded editor, examples/product_launch_morph.pptx, slide 4",
+      "sourceCommit": "8707e7b29424f1af7057722cd33ba658c63f6c7f",
+      "capturedOn": "2026-11-24",
+      "locale": "en-US",
+      "kind": "verified workspace browser run",
+      "sha256": "a5aed40e831eb8f2129aa22e262aba9e3febc2f9b878b9e0ebb221af92214346",
+      "syntheticProductScreenshot": false
+    },
+    {
+      "file": "slides-editor-zh.png",
+      "source": "Foldly 0.1.34 workbench, docs/acceptance/hcd-document-production/chinese-pronunciation.pptx, slide 1",
+      "sourceCommit": "3ab475fbe92825d970503b4334c92d71aa573d37",
+      "capturedOn": "2026-11-24",
+      "locale": "zh-CN",
+      "kind": "verified workspace browser run",
+      "sha256": "f8af0c6c23b9d632e337c5037e58edef8cac9b14ec3ef1b9baa37d5dfab4f10d",
       "syntheticProductScreenshot": false
     }
   ],
