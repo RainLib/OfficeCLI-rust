@@ -1,13 +1,12 @@
 services:
   workspace:
-    depends_on:
+    depends_on: !override
       mysql:
         condition: service_healthy
     environment:
       FOLDLY_DATABASE: mysql
-      FOLDLY_DATABASE_URL_FILE: /run/secrets/foldly_database_url
-    secrets:
-      - foldly_database_url
+
+  postgres: !reset null
 
   mysql:
     image: mysql:8.4@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
@@ -29,12 +28,5 @@ services:
       retries: 24
 
 volumes:
+  foldly_postgres: !reset null
   foldly_mysql:
-
-secrets:
-  foldly_database_admin:
-    file: ${FOLDLY_DATABASE_ADMIN_PASSWORD_FILE:-./.secrets/foldly-database-admin}
-  foldly_database_password:
-    file: ${FOLDLY_DATABASE_PASSWORD_FILE:-./.secrets/foldly-database-password}
-  foldly_database_url:
-    file: ${FOLDLY_DATABASE_URL_FILE:-./.secrets/foldly-database-url}

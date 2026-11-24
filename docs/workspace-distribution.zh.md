@@ -16,28 +16,39 @@ Linux 工作台启用账号、团队项目、文件权限、分享和业务回�
 
 ## Docker Compose 云端工作台
 
-`workspace` 镜像包含当前源码构建的 Rust 引擎、工作台、编辑器、协作服务、空白 Office 模板和 PDF 渲染依赖。`proxy` 用 Caddy 提供统一入口和 HTTPS。工作区目录位于 `workspace_data` 卷，证书位于 `caddy_data` 卷。基础配置使用 SQLite，可加载附加配置一起启动 PostgreSQL 或 MySQL。部署需要 Docker Engine 和 Docker Compose 2.24 或以上。
+默认的 `docker compose up` 会启动 `workspace`、`postgres` 和 `proxy`。PostgreSQL 健康后，工作台连接数据库并启动 OfficeCLI 文档引擎和 Yjs/Hocuspocus 协作进程。数据库、引擎和协作进程都就绪后，工作台才会通过健康检查。编辑器、管理后台和 `/collaboration` WebSocket 从 Caddy 的同一个入口访问。
+
+工作台镜像还包含 Office 模板和 PDF 渲染依赖。文档、修订和协作数据位于 `workspace_data` 卷，PostgreSQL 数据位于 `foldly_postgres` 卷，Caddy 证书位于 `caddy_data` 卷。数据库和协作进程通过容器内网和回环地址访问。部署需要 Docker Engine 和 Docker Compose 2.24.4 或以上，以支持数据库配置合并。[Docker Compose 文件合并](https://docs.docker.com/reference/compose-file/merge/)
 
 容器中的 Chromium 以 `node` 用户运行。Compose 加载固定版本的 seccomp 配置，为 PDF 渲染沙箱提供用户命名空间支持。[Playwright v1.65.1 的配置](https://github.com/microsoft/playwright/blob/v1.65.1/utils/docker/seccomp_profile.json)
 
 ### 从当前源码启动
 
-在仓库根目录创建配置和首次启动的管理员密码文件。下面的 `read` 会隐藏键入的密码。密码至少 12 个字符。
+在仓库根目录为新部署准备 `.env`、管理员密码和 PostgreSQL 密钥。下面的 `read` 会隐藏键入的工作台管理员密码，密码至少 12 个字符。已有部署沿用自己的项目名和密钥文件，并按下文选择原来的数据库配置。
 
 ```bash
 cp .env.example .env
 mkdir -p .secrets
 chmod 700 .secrets
 read -r -s FOLDLY_INITIAL_PASSWORD
-(umask 077 && printf '%s\n' "$FOLDLY_INITIAL_PASSWORD" > .secrets/foldly-admin-password)
+(
+  set -eC
+  umask 077
+  printf '%s\n' "$FOLDLY_INITIAL_PASSWORD" > .secrets/foldly-admin-password
+  openssl rand -hex 24 > .secrets/foldly-database-admin
+  openssl rand -hex 24 > .secrets/foldly-database-password
+  printf 'postgresql://foldly:%s@postgres:5432/foldly\n' \
+    "$(cat .secrets/foldly-database-password)" > .secrets/foldly-database-url
+)
 unset FOLDLY_INITIAL_PASSWORD
 
 docker compose up --build -d --wait
 docker compose ps
+docker compose top workspace
 curl --fail http://localhost:7400/workspace/api/status
 ```
 
-在浏览器访问 `http://localhost:7400/workbench/`，用 `FOLDLY_ADMIN` 和刚设置的密码登录。导入 DOCX，编辑后点「保存点」，再导出 DOCX 或 PDF。引擎和协作服务通过工作台转发。默认入口仅监听服务器本机。
+用 `docker compose top workspace` 可以查看文档引擎和 `sidecar.cjs` 协作进程。在浏览器访问 `http://localhost:7400/workbench/`，用 `FOLDLY_ADMIN` 和刚设置的密码登录。用两个浏览器窗口打开同一份 DOCX，核对一端的编辑会同步到另一端，再点「保存点」并导出。管理员可访问同站点的 `/admin`。默认入口仅监听服务器本机。
 
 ### 构建并推送双架构镜像
 
@@ -94,29 +105,26 @@ docker compose up -d --no-build --wait
 
 每个工作区使用独立数据库，由一个工作台实例持有。PostgreSQL 使用 UTF-8 的专用库及其 `public` schema。连接应直连数据库，或使用保留会话的代理。内置引擎继续使用本地工作区目录。独立 HCD 引擎的 PostgreSQL 和 S3 设置用于引擎数据。
 
-#### 随 Compose 启动数据库
+#### 随 Compose 启动 MySQL
 
-使用当前源码构建工作台镜像。先按「从当前源码启动」创建 `.env` 和工作台管理员密码，再执行下面的命令。MySQL 部署将开头两行分别设为 `mysql` 和 `3306`。
+新建 MySQL 部署时，在 `.env` 设置以下文件列表。首次生成密钥时，沿用上面的三个数据库密钥文件名，把连接地址设为 `mysql://foldly:<数据库用户密码>@mysql:3306/foldly`。Compose 会启动 MySQL、工作台和 Caddy，后续可继续使用同一条 `docker compose up -d --build --wait`。
 
-```bash
-FOLDLY_DB_SERVICE=postgres
-FOLDLY_DB_PORT=5432
-(umask 077
-  openssl rand -hex 24 > .secrets/foldly-database-admin
-  openssl rand -hex 24 > .secrets/foldly-database-password
-  printf '%s://foldly:%s@%s:%s/foldly\n' \
-    "$FOLDLY_DB_SERVICE" "$(cat .secrets/foldly-database-password)" \
-    "$FOLDLY_DB_SERVICE" "$FOLDLY_DB_PORT" > .secrets/foldly-database-url
-)
-docker compose -f docker-compose.yaml -f "deploy/workspace/compose.$FOLDLY_DB_SERVICE.yaml" \
-  up -d --build --wait
+```dotenv
+COMPOSE_FILE=docker-compose.yaml:deploy/workspace/compose.mysql.yaml
 ```
 
-数据库服务通过 Compose 内网供工作台访问，数据持久化在各自的数据库卷中。工作台用专用 `foldly` 数据库账号创建和读写自己的表。操作同一个部署时继续使用同一组 Compose 文件和项目名。
+工作台使用专用的 `foldly` 数据库账号。PostgreSQL 和 MySQL 使用各自的数据卷。已有 PostgreSQL 或 MySQL 部署更新时沿用原来的项目名、Compose 文件选择和密钥文件。
 
-#### 连接已有的数据库服务
+#### 使用 SQLite 或连接已有的数据库
 
-在 `.env` 设置 `FOLDLY_DATABASE=postgres` 或 `FOLDLY_DATABASE=mysql`。在仅部署账号可读的 `.foldly.runtime.env` 中设置 `FOLDLY_DATABASE_URL`，使用 `postgresql://user:password@host:5432/database?tls=true` 或 `mysql://user:password@host:3306/database?tls=true` 格式。账号和密码中的保留字符需要 URL 编码。启用 TLS 时验证服务证书和主机名，如需私有 CA，可把证书挂载到容器内并配置 `FOLDLY_DATABASE_URL_CA_FILE`。
+已有 SQLite 或接入托管数据库的 Compose 部署，在更新版本前用以下文件列表指定原有存储。SQLite 部署继续使用原项目和 `workspace_data` 卷。新建 SQLite 部署只需准备工作台管理员密码。
+
+```dotenv
+COMPOSE_FILE=docker-compose.yaml:deploy/workspace/compose.external.yaml
+FOLDLY_DATABASE=sqlite
+```
+
+使用已有的 PostgreSQL 或 MySQL 时，把 `FOLDLY_DATABASE` 设为对应类型。在仅部署账号可读的 `.foldly.runtime.env` 中设置 `FOLDLY_DATABASE_URL`，使用 `postgresql://user:password@host:5432/database?tls=true` 或 `mysql://user:password@host:3306/database?tls=true` 格式。账号和密码中的保留字符需要 URL 编码。启用 TLS 时验证服务证书和主机名，如需私有 CA，可把证书挂载到容器内并配置 `FOLDLY_DATABASE_URL_CA_FILE`。
 
 二进制发行包直接启动时，首次用 `workspace init --database postgres …` 或 `workspace init --database mysql …`。连接地址可从 `FOLDLY_DATABASE_URL_FILE` 读取。多租户可以用 `--database-url-env` 给每个工作区指定独立的环境变量名，并使用对应的 `<变量名>_FILE` 文件。配置只记录数据库类型、连接变量名和绑定 ID，地址和密码由环境或文件提供。
 
@@ -134,14 +142,15 @@ docker compose cp "workspace:/tmp/$FOLDLY_BACKUP_NAME/." "$FOLDLY_BACKUP_NAME/"
 docker compose exec -T --user node workspace rm -r "/tmp/$FOLDLY_BACKUP_NAME"
 ```
 
-恢复前将 `.env` 中的 `FOLDLY_PUBLIC_URL` 和 `FOLDLY_INTERNAL_PORT` 设为备份工作区的原始地址和端口。下例恢复到新的 Compose 项目。在新服务器启动，或先停用占用同一端口的原入口。备份目录需要让镜像内的 `node` 用户（UID 1000）可读。
+恢复前将 `.env` 中的 `FOLDLY_PUBLIC_URL` 和 `FOLDLY_INTERNAL_PORT` 设为备份工作区的原始地址和端口。下例使用已构建的工作台镜像，恢复到新的 PostgreSQL Compose 项目。在新服务器启动，或先停用占用同一端口的原入口。备份目录需要让镜像内的 `node` 用户（UID 1000）可读。
 
 ```bash
 FOLDLY_BACKUP=/absolute/path/to/verified-backup
-docker compose -p foldly-restored run --rm --no-deps \
+docker compose -f docker-compose.yaml -p foldly-restored up -d --wait postgres
+docker compose -f docker-compose.yaml -p foldly-restored run --rm --no-deps \
   --volume "$FOLDLY_BACKUP:/backup:ro" workspace \
-  restore --backup /backup --root /var/lib/foldly/workspace
-docker compose -p foldly-restored up -d --no-build --wait
+  restore --backup /backup --root /var/lib/foldly/workspace --database postgres
+docker compose -f docker-compose.yaml -p foldly-restored up -d --no-build --wait
 ```
 
 用原账号登录并核对文件与权限。后续用 `-p foldly-restored` 管理这个部署。首次启动的密码文件由 Compose 挂载，已恢复的工作空间使用备份中的账号。
@@ -155,7 +164,7 @@ SQLite、PostgreSQL、MySQL 都使用相同的工作区快照格式。备份会�
 ```bash
 foldly_target() {
   docker compose --env-file .env.postgres -p foldly-postgres \
-    -f docker-compose.yaml -f deploy/workspace/compose.postgres.yaml "$@"
+    -f docker-compose.yaml "$@"
 }
 foldly_target up -d --wait postgres
 foldly_target run --rm --no-deps --volume "$FOLDLY_BACKUP:/backup:ro" workspace \
@@ -163,7 +172,7 @@ foldly_target run --rm --no-deps --volume "$FOLDLY_BACKUP:/backup:ro" workspace 
 foldly_target up -d --no-build --wait
 ```
 
-MySQL 使用对应 Compose 配置与 `--database mysql`。恢复到 SQLite 使用基础配置与 `--database sqlite`。恢复需要独立的新目录，网络数据库需要空库。导入在目标事务中逐表读回校验，成功后才发布新工作区配置。登录目标核对项目成员、原文件、历史版本和现有编辑内容，然后切换入口。若在目标尚未承接新写入时需要回退，停用目标并重新启用源部署。
+MySQL 使用对应 Compose 配置，先启动 `mysql`，再用 `--database mysql` 恢复。SQLite 使用 `compose.external.yaml` 和 `--database sqlite` 恢复。托管数据库使用同一附加配置及对应的数据库类型和连接地址。恢复需要独立的新目录，网络数据库需要空库。导入在目标事务中逐表读回校验，成功后才发布新工作区配置。登录目标核对项目成员、原文件、历史版本和现有编辑内容，然后切换入口。若在目标尚未承接新写入时需要回退，停用目标并重新启用源部署。
 
 归档版的 `install/upgrade/rollback` 控制器通过复制本地数据实现版本切换，适用于 SQLite。使用 PostgreSQL 或 MySQL 的部署用 Compose 或 `workspace start --root` 运行，并在升级前留存已验证的工作区快照。
 

@@ -1,9 +1,13 @@
 services:
   workspace:
+    # The workspace starts the OfficeCLI engine and the Yjs/Hocuspocus sidecar.
     image: ${FOLDLY_IMAGE:-foldly-workspace:0.1.33-local}
     build:
       context: .
       dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
     init: true
     restart: unless-stopped
     stop_grace_period: 140s
@@ -20,11 +24,38 @@ services:
       FOLDLY_ADMIN: ${FOLDLY_ADMIN:-admin}
       FOLDLY_WORKSPACE_NAME: ${FOLDLY_WORKSPACE_NAME:-Foldly 工作空间}
       FOLDLY_SELECTION_MCP: ${FOLDLY_SELECTION_MCP:-false}
-      FOLDLY_DATABASE: ${FOLDLY_DATABASE:-}
+      FOLDLY_DATABASE: postgres
+      FOLDLY_DATABASE_URL_FILE: /run/secrets/foldly_database_url
     volumes:
       - workspace_data:/var/lib/foldly
     secrets:
       - foldly_admin_password
+      - foldly_database_url
+
+  postgres:
+    image: postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
+    restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        FOLDLY_POSTGRES_APP_PASSWORD=$$(cat /run/secrets/foldly_database_password)
+        export FOLDLY_POSTGRES_APP_PASSWORD
+        exec docker-entrypoint.sh postgres
+    environment:
+      POSTGRES_DB: foldly
+      POSTGRES_PASSWORD_FILE: /run/secrets/foldly_database_admin
+    volumes:
+      - foldly_postgres:/var/lib/postgresql/data
+      - ./deploy/workspace/postgres-init.sql:/docker-entrypoint-initdb.d/10-foldly.sql:ro
+    secrets:
+      - foldly_database_admin
+      - foldly_database_password
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "foldly", "-d", "foldly"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
 
   proxy:
     image: caddy:2.11-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
@@ -45,9 +76,16 @@ services:
 
 volumes:
   workspace_data:
+  foldly_postgres:
   caddy_data:
   caddy_config:
 
 secrets:
   foldly_admin_password:
     file: ${FOLDLY_ADMIN_PASSWORD_FILE:-./.secrets/foldly-admin-password}
+  foldly_database_admin:
+    file: ${FOLDLY_DATABASE_ADMIN_PASSWORD_FILE:-./.secrets/foldly-database-admin}
+  foldly_database_password:
+    file: ${FOLDLY_DATABASE_PASSWORD_FILE:-./.secrets/foldly-database-password}
+  foldly_database_url:
+    file: ${FOLDLY_DATABASE_URL_FILE:-./.secrets/foldly-database-url}

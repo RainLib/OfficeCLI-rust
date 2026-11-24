@@ -97,7 +97,7 @@ For a persistent workspace with your own accounts, initialize and start it with 
 
 ### Deploy with Docker Compose
 
-The base stack runs the workspace, collaboration service and Caddy with SQLite. Cloud workspaces can select PostgreSQL or MySQL using the supplied Compose overrides or connect to a managed database. Move an existing workspace by restoring a verified backup into a new workspace directory and an empty target database. The offline macOS desktop app uses local SQLite. [docker-compose.yaml](docker-compose.yaml) · [Deployment and database migration](docs/workspace-distribution.zh.md#docker-compose-云端工作台)
+The root Compose file starts PostgreSQL, Caddy and the workspace. The workspace container starts the OfficeCLI document engine and Yjs/Hocuspocus collaboration service and serves the editor and admin console. Compose overlays support bundled MySQL, SQLite and managed databases. Move an existing workspace by restoring a verified backup into a new workspace directory and a new database. The offline macOS desktop app uses local SQLite. [docker-compose.yaml](docker-compose.yaml) · [Deployment and database migration](docs/workspace-distribution.zh.md#docker-compose-云端工作台)
 
 ## Connect AI and coding agents
 
