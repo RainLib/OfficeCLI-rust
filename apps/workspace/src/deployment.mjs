@@ -7,14 +7,14 @@ import { chmod, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { restoreBackup, snapshotAfterShutdown } from "./backup.mjs";
 import { installRelease, releaseId, verifyRelease } from "./release.mjs";
-import { listen } from "./runtime.mjs";
-import { atomic, check, equal, HttpError, random, uuid, workspaceSchemaVersion } from "./store.mjs";
-import { readWorkspace } from "./tenants.mjs";
+import { listen } from "./runtime.mts";
+import { atomic, check, equal, HttpError, random, uuid, workspaceSchemaVersion } from "./store.mts";
+import { readWorkspace } from "./tenants.mts";
+import { deploymentChildFlag } from "./contracts.mts";
 
 const schema = "officecli-workspace-deployment/1";
 const stateFile = "deployment.json", secretFile = "control.key";
 const validPair = pair => pair && releaseId(pair.release) && uuid(pair.data);
-const childFlag = "OFFICECLI_DEPLOYMENT_CHILD";
 const pointer = (root, state) => atomic(join(root, stateFile), JSON.stringify(state, null, 2) + "\n");
 const dataRoot = (root, pair) => join(root, "workspaces", pair.data);
 const kitRoot = (root, id) => join(root, "releases", id);
@@ -108,7 +108,7 @@ async function boot(root, pair, verified) {
   check(kit.manifest.id === pair.release && kit.manifest.workspaceSchema === workspaceSchemaVersion,
     409, "发行与数据版本不兼容。");
   const child = spawn(join(kit.root, "runtime/node"), [join(kit.root, "app/cli.mjs"), "start", "--root", dataRoot(root, pair)],
-    { cwd: kit.root, env: { ...process.env, [childFlag]: "1" }, stdio: ["ignore", "inherit", "inherit", "ipc"] });
+    { cwd: kit.root, env: { ...process.env, [deploymentChildFlag]: "1" }, stdio: ["ignore", "inherit", "inherit", "ipc"] });
   // Node emits an error on failed spawn and on an IPC write to a dead child.
   child.on("error", () => {});
   try {
@@ -138,10 +138,6 @@ async function drain(child) {
   } finally { ending.abort(); }
 }
 
-export function isDeploymentChild() {
-  return process.env[childFlag] === "1" && process.connected && typeof process.send === "function";
-}
-
 // Implemented by the installed release, so its own process owns its startup
 // migrations and all filesystem writers drained during handoff.
 export async function connectDeploymentChild(runtime) {
@@ -150,7 +146,7 @@ export async function connectDeploymentChild(runtime) {
     const { id, type } = message;
     try {
       if (type === "activate") {
-        runtime.activate();
+        await runtime.activate();
         process.send?.({ type, id }, () => {});
       } else {
         const cut = await runtime.drain();

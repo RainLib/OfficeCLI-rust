@@ -106,14 +106,17 @@ async function fixtureRelease(manifest, version, bad) {
   const root = join(scratch, version);
   cpSync(pack, root, { recursive: true, mode: constants.COPYFILE_FICLONE });
   unlinkSync(join(root, "release.json"));
-  const path = join(root, "app/src/store.mjs");
+  const path = join(root, "app/src/business-schema.mjs");
   const before = readFileSync(path, "utf8");
   const changed = before.replace('const workspaceSchemaRevision = "1";', 'const workspaceSchemaRevision = "2";')
-    .replace('(!revision || revision.value === workspaceSchemaRevision)', '(!revision || ["1", workspaceSchemaRevision].includes(revision.value))')
-    .replace('this.run("INSERT OR IGNORE INTO metadata VALUES(?,?)", "schemaRevision", workspaceSchemaRevision);',
-      `this.run("INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", "schemaRevision", workspaceSchemaRevision);
-      this.db.exec("CREATE TABLE IF NOT EXISTS release_upgrade_fixture(migrated TEXT NOT NULL)");
-      ${bad ? 'this.db.exec("UPDATE files SET name=\'Unsuccessful migration\'");' : ''}`);
+    .replace('compatible(revisionKey, workspaceSchemaRevision)', '(values.get(revisionKey) === "1" || compatible(revisionKey, workspaceSchemaRevision))')
+    .replace('const versions = await verifySchema(db, true);',
+      `const versions = await verifySchema(db, true);
+      if (versions.get(revisionKey) === "1") {
+        await db.run('UPDATE metadata SET value=? WHERE "key"=?', [workspaceSchemaRevision, revisionKey]);
+        await db.exec("CREATE TABLE IF NOT EXISTS release_upgrade_fixture(migrated TEXT NOT NULL)");
+        ${bad ? 'await db.exec("UPDATE files SET name=\'Unsuccessful migration\'");' : ''}
+      }`);
   assert.notEqual(changed, before);
   writeFileSync(path, changed);
   if (bad) writeFileSync(join(root, "app/dist/sidecar.cjs"), "process.exit(42);\n");

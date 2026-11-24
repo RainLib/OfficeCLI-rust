@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { homedir } from "node:os";
 import { sealRelease } from "../src/release.mjs";
-import { workspaceSchemaVersion } from "../src/store.mjs";
+import { workspaceSchemaVersion } from "../src/store.mts";
 
 const { values } = parseArgs({ options: {
   version: { type: "string" }, "node-runtime": { type: "string" }, output: { type: "string" }, assets: { type: "string" },
@@ -47,23 +47,31 @@ try {
   await copy(join(repo, "LICENSE"), "licenses/OfficeCLI.txt");
   for (const file of ["GlyphLessFont-LICENSE.txt", "GlyphLessFont-NOTICE.txt"])
     await copy(join(repo, "crates/pdf-handler/assets", file), `licenses/PDF/${file}`);
-  await copy(join(app, "cli.mjs"), "app/cli.mjs");
+  const compiled = spawnSync("npm", ["run", "build:runtime", "--prefix", app, "--", "--outDir", join(stage, "app")], { stdio: "inherit" });
+  if (compiled.error) throw compiled.error;
+  if (compiled.status !== 0) throw new Error("工作台 TypeScript 构建失败。");
   const usage = await readFile(join(app, "README.zh.md"), "utf8");
   const deployment = await readFile(join(repo, "docs", "workspace-distribution.zh.md"), "utf8");
   await writeFile(join(stage, "README.zh.md"), usage.replace("../../docs/workspace-distribution.zh.md", "DEPLOYMENT.zh.md"));
   await writeFile(join(stage, "DEPLOYMENT.zh.md"), deployment.replaceAll("../apps/workspace/README.zh.md", "README.zh.md"));
-  for (const file of (await readdir(join(app, "src"))).filter(file => file.endsWith(".mjs") && !file.endsWith(".test.mjs")))
-    await copy(join(app, "src", file), `app/src/${file}`);
   for (const file of ["officecli", "sidecar.cjs", "selection-mcp.cjs", "blank", "admin", "editor", "embed-example"])
     await copy(join(assets, file), `app/dist/${file}`);
   await writeFile(join(stage, "workspace"), '#!/bin/sh\nset -eu\nrelease_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)\nexec "$release_dir/runtime/node" "$release_dir/app/cli.mjs" "$@"\n', { mode: 0o755, flag: "wx" });
 
   const records = new Set();
-  for (const directory of ["editor", "admin-app", "embed-host", "xlsx-univer-viewer"]) {
-    const project = join(repo, "examples/hdoc", directory);
+  const projects = [app, ...["editor", "admin-app", "embed-host", "xlsx-univer-viewer"].map(directory => join(repo, "examples/hdoc", directory))];
+  for (const project of projects) {
     const { packages } = JSON.parse(await readFile(join(project, "package-lock.json"), "utf8"));
     for (const [relative, item] of Object.entries(packages)) {
-      if (!relative.startsWith("node_modules/") || !item.version || !existsSync(join(project, relative, "package.json"))) continue;
+      if (!relative.startsWith("node_modules/") || !item.version || project === app && item.dev) continue;
+      if (!existsSync(join(project, relative, "package.json"))) {
+        if (project === app && !item.optional) throw new Error("请先运行 npm ci --prefix apps/workspace 安装工作台数据库驱动。");
+        continue;
+      }
+      if (project === app) {
+        const destination = join(stage, "app", relative);
+        if (!existsSync(destination)) await copy(join(project, relative), "app/" + relative);
+      }
       const name = relative.slice(relative.lastIndexOf("node_modules/") + "node_modules/".length).replaceAll("/", "+");
       await notices(join(project, relative), "npm", `${name}@${item.version}`, records);
     }

@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-import { planSpecPhrase } from "../../../apps/workspace/src/spec-edit.mjs";
+import { planSpecPhrase } from "../../../apps/workspace/src/spec-edit.mts";
 
 function localPlan(prompt, selection) {
   if (selection.kind === "canvas") {

@@ -15,7 +15,7 @@ import {
   uuid,
   atomic,
   operations,
-} from "./store.mjs";
+} from "./store.mts";
 
 const stable = (value) =>
   JSON.stringify(value, function (_key, item) {
@@ -55,7 +55,7 @@ export function unseal(secret, value) {
     ]).toString(),
   );
 }
-export function verifySignature(store, request, body, secret, keyId) {
+export async function verifySignature(store, request, body, secret, keyId) {
   const stamp = request.headers["x-hcd-timestamp"],
     nonce = request.headers["x-hcd-nonce"];
   check(
@@ -77,19 +77,22 @@ export function verifySignature(store, request, body, secret, keyId) {
     401,
     "请求签名无效。",
   );
-  store.transaction(() => {
-    store.run("DELETE FROM nonces WHERE expires<?", now());
+  await store.transaction(async () => {
+    await store.run("DELETE FROM nonces WHERE expires<?", now());
     check(
-      !store.get("SELECT id FROM nonces WHERE id=?", nonce),
+      !await store.get("SELECT id FROM nonces WHERE id=?", nonce),
       409,
       "请求 nonce 已使用。",
     );
-    store.run("INSERT INTO nonces VALUES(?,?)", nonce, now() + 600);
+    await store.run("INSERT INTO nonces VALUES(?,?)", nonce, now() + 600);
   });
 }
 export function createProvider(store, config, keys, { modelIds = [] } = {}) {
-  function permissions(user, file) {
-    return store.permissions(user, file).filter(op =>
+  async function permissions(user, file) {
+    return filteredPermissions(await store.permissions(user, file));
+  }
+  function filteredPermissions(granted) {
+    return granted.filter(op =>
       (op !== "document.ai" || modelIds.length > 0) &&
       (op !== "document.publish" || config.mode !== "desktop"));
   }
@@ -99,9 +102,9 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
       403,
       "应用归属不匹配。",
     );
-  function identity(context, fileId, allowExpired = false) {
+  async function identity(context, fileId, allowExpired = false) {
     binding(context);
-    const session = store.get(
+    const session = await store.get(
       "SELECT * FROM launches WHERE id=?",
       context.sessionId,
     );
@@ -113,9 +116,9 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
       "编辑会话归属不匹配。",
     );
     const user = allowExpired
-      ? store.get("SELECT * FROM users WHERE id=?", session.user_id)
-      : store.user(session.user_id);
-    const browser = store.get(
+      ? await store.get("SELECT * FROM users WHERE id=?", session.user_id)
+      : await store.user(session.user_id);
+    const browser = await store.get(
       "SELECT * FROM sessions WHERE hash=?",
       session.browser_hash,
     );
@@ -129,15 +132,15 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
         403,
         "业务会话已结束，请重新登录。",
       );
-    return { session, user, file: store.file(session.file_id) };
+    return { session, user, file: await store.file(session.file_id) };
   }
-  function descriptor(file, version = file.head) {
+  async function descriptor(file, version = file.head) {
     check(
       typeof version === "number" && Number.isSafeInteger(version),
       400,
       "业务版本无效。",
     );
-    const item = store.get(
+    const item = await store.get(
       "SELECT * FROM versions WHERE file_id=? AND version=?",
       file.id,
       version,
@@ -204,8 +207,8 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
         405,
         "传输方法无效。",
       );
-      const file = store.file(parts[1]),
-        version = store.get(
+      const file = await store.file(parts[1]),
+        version = await store.get(
           "SELECT * FROM versions WHERE file_id=? AND version=?",
           file.id,
           parseVersion(parts[2]),
@@ -227,7 +230,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
       405,
       "传输方法无效。",
     );
-    const record = store.get("SELECT * FROM publications WHERE id=?", parts[1]);
+    const record = await store.get("SELECT * FROM publications WHERE id=?", parts[1]);
     check(record, 404, "发布动作不存在。");
     const intent = JSON.parse(record.intent);
     check(
@@ -238,7 +241,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
       "暂存文件与发布意图不一致。",
     );
     atomic(join(store.root, "staging", `${record.id}.bin`), bytes);
-    store.run("UPDATE publications SET uploaded=1 WHERE id=?", record.id);
+    await store.run("UPDATE publications SET uploaded=1 WHERE id=?", record.id);
     return { status: 204 };
   }
   async function callback(path, data) {
@@ -251,7 +254,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
         400,
         "兑换参数无效。",
       );
-      const session = store.get(
+      const session = await store.get(
         "SELECT * FROM launches WHERE id=?",
         data.sessionId,
       );
@@ -263,13 +266,13 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
         403,
         "一次性业务凭证已失效。",
       );
-      const browser = store.get(
+      const browser = await store.get(
         "SELECT * FROM sessions WHERE hash=?",
         session.browser_hash,
       );
-      const user = store.user(session.user_id);
+      const user = await store.user(session.user_id);
       check(browser?.expires > now(), 403, "请重新登录业务系统。");
-      const prior = store.get(
+      const prior = await store.get(
         "SELECT * FROM exchanges WHERE id=?",
         data.exchangeId,
       );
@@ -300,7 +303,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
         actor: { id: user.id, displayName: user.display_name },
         expiresAt: new Date(session.expires * 1000).toISOString(),
       };
-      store.run(
+      await store.run(
         "INSERT INTO exchanges VALUES(?,?,?,?,?)",
         data.exchangeId,
         session.id,
@@ -311,7 +314,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
       return result;
     }
     if (path === "/officecli-provider/v1/permissions/resolve") {
-      const { user, file, session } = identity(
+      const { user, file, session } = await identity(
         data.context,
         data.externalFileId,
       );
@@ -322,8 +325,8 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
         400,
         "权限请求无效。",
       );
-      const granted = permissions(user, file);
-      const acl = store.permissions(user, file);
+      const acl = await store.permissions(user, file);
+      const granted = filteredPermissions(acl);
       const selectionAgent = config.selectionMcp === true && !user.is_guest && file.format === "excalidraw" &&
         ["document.view","document.edit","document.ai"].every(op=>acl.includes(op));
       return {
@@ -355,15 +358,15 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
       };
     }
     if (path === "/officecli-provider/v1/users/resolve") {
-      identity(data.context);
+      await identity(data.context);
       check(
         Array.isArray(data.userIds) && data.userIds.length <= 100,
         400,
         "用户查询无效。",
       );
       return {
-        users: data.userIds.map((id) => {
-          const user = store.get("SELECT * FROM users WHERE id=?", id);
+        users: await Promise.all(data.userIds.map(async id => {
+          const user = await store.get("SELECT * FROM users WHERE id=?", id);
           return user
             ? {
                 id: user.id,
@@ -371,7 +374,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
                 deleted: !!user.disabled,
               }
             : { id, displayName: "已删除用户", deleted: true };
-        }),
+        })),
       };
     }
     const match =
@@ -381,18 +384,18 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
     check(match, 404, "Provider 接口不存在。");
     const fileId = decodeURIComponent(match[1]),
       action = match[2];
-    const { user, file } = identity(
+    const { user, file } = await identity(
       data.context,
       fileId,
       action === "publications/status",
     );
     if (action === "describe" || action === "download") {
-      store.permit(user, file, "document.view");
+      await store.permit(user, file, "document.view");
       const version =
         data.version === undefined ? file.head : parseVersion(data.version);
       // Exact source versions are required by the editing engine even when the
       // user is viewing the current document without history permission.
-      const item = descriptor(file, version);
+      const item = await descriptor(file, version);
       return action === "describe"
         ? item
         : {
@@ -406,7 +409,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
     check(config.mode !== "desktop", 403, "桌面工作区使用本地保存和导出。");
     if (action === "publications/status") {
       check(uuid(data.publicationId), 400, "发布 ID 无效。");
-      const record = store.get(
+      const record = await store.get(
         "SELECT * FROM publications WHERE id=?",
         data.publicationId,
       );
@@ -422,7 +425,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
         ...(record?.receipt ? { receipt: JSON.parse(record.receipt) } : {}),
       };
     }
-    store.permit(
+    await store.permit(
       user,
       file,
       "document.view",
@@ -456,7 +459,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
         400,
         "发布输出与业务文件不匹配。",
       );
-      const prior = store.get(
+      const prior = await store.get(
         "SELECT * FROM publications WHERE id=?",
         intent.publicationId,
       );
@@ -476,7 +479,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
         "业务版本已变化，未覆盖文件。",
       );
       if (!prior)
-        store.run(
+        await store.run(
           "INSERT INTO publications VALUES(?,?,?,?,0,NULL,?)",
           intent.publicationId,
           file.id,
@@ -498,7 +501,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
       400,
       "发布提交参数无效。",
     );
-    const record = store.get(
+    const record = await store.get(
       "SELECT * FROM publications WHERE id=?",
       data.publicationId,
     );
@@ -518,69 +521,68 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
       "发布文件校验失败。",
     );
     const digest = store.put(bytes);
-    return store.transaction(() => {
-      const current = store.file(file.id);
-      store.permit(
-        store.user(user.id),
-        current,
-        "document.view",
-        "document.edit",
-        "document.publish",
-      );
-      check(
-        intent.expectedVersion === `v${current.head}`,
-        409,
-        "业务版本已变化，未覆盖文件。",
-      );
-      const version = current.head + 1,
-        at = iso();
-      const receipt = {
-        publicationId: record.id,
-        externalFileId: file.id,
-        documentId: intent.documentId,
-        revision: intent.revision,
-        externalVersion: `v${version}`,
-        sha256: digest,
-        committedAt: at,
-      };
-      store.run(
-        "INSERT INTO versions VALUES(?,?,?,?,?,?,?)",
-        file.id,
-        version,
-        digest,
-        bytes.length,
-        user.id,
-        at,
-        JSON.stringify(receipt),
-      );
-      store.run(
-        "UPDATE files SET head=?,modified_at=? WHERE id=?",
-        version,
-        at,
-        file.id,
-      );
-      store.run(
-        "UPDATE publications SET receipt=? WHERE id=?",
-        JSON.stringify(receipt),
-        record.id,
-      );
-      store.audit(user.id, "publication.committed", record.id);
-      return receipt;
-    });
+    const current = await store.file(file.id);
+    await store.permit(
+      await store.user(user.id),
+      current,
+      "document.view",
+      "document.edit",
+      "document.publish",
+    );
+    check(
+      intent.expectedVersion === `v${current.head}`,
+      409,
+      "业务版本已变化，未覆盖文件。",
+    );
+    const version = current.head + 1,
+      at = iso();
+    const receipt = {
+      publicationId: record.id,
+      externalFileId: file.id,
+      documentId: intent.documentId,
+      revision: intent.revision,
+      externalVersion: `v${version}`,
+      sha256: digest,
+      committedAt: at,
+    };
+    await store.run(
+      "INSERT INTO versions VALUES(?,?,?,?,?,?,?)",
+      file.id,
+      version,
+      digest,
+      bytes.length,
+      user.id,
+      at,
+      JSON.stringify(receipt),
+    );
+    await store.run(
+      "UPDATE files SET head=?,modified_at=? WHERE id=?",
+      version,
+      at,
+      file.id,
+    );
+    await store.run(
+      "UPDATE publications SET receipt=? WHERE id=?",
+      JSON.stringify(receipt),
+      record.id,
+    );
+    await store.audit(user.id, "publication.committed", record.id);
+    return receipt;
   }
-  function event(data) {
+  async function event(data) {
     binding(data);
     check(
       data.schemaVersion === "officecli-event/1" &&
         uuid(data.eventId) &&
         data.type === "publication.committed" &&
         uuid(data.externalFileId) &&
+        uuid(data.payload?.receipt?.publicationId) &&
         Number.isSafeInteger(data.sequence) &&
         data.sequence > 0,
       400,
       "事件格式无效。",
     );
-    const record = store.get(
+    const record = await store.get(
       "SELECT * FROM publications WHERE id=?",
       data.payload?.receipt?.publicationId,
     );
@@ -592,7 +594,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
       409,
       "事件尚无已确认业务回执。",
     );
-    const prior = store.get("SELECT * FROM events WHERE id=?", data.eventId);
+    const prior = await store.get("SELECT * FROM events WHERE id=?", data.eventId);
     if (prior) {
       check(
         prior.body === JSON.stringify(data),
@@ -601,7 +603,7 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
       );
       return;
     }
-    store.run(
+    await store.run(
       "INSERT INTO events VALUES(?,?,?,?,?,?)",
       data.eventId,
       data.externalFileId,
@@ -611,5 +613,15 @@ export function createProvider(store, config, keys, { modelIds = [] } = {}) {
       iso(),
     );
   }
-  return { callback, object, event, descriptor, identity, permissions };
+  return {
+    callback(path, data) {
+      const mutating = path.endsWith("/sessions/resolve") || /\/publications\/(prepare|commit)$/.test(path);
+      return mutating ? store.transaction(() => callback(path, data)) : store.read(() => callback(path, data));
+    },
+    object(request, url, bytes) {
+      return request.method === "PUT" ? store.transaction(() => object(request, url, bytes)) : store.read(() => object(request, url, bytes));
+    },
+    event(data) { return store.transaction(() => event(data)); },
+    descriptor, identity, permissions, filteredPermissions,
+  };
 }

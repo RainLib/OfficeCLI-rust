@@ -1,4 +1,3 @@
-import { organizeBoardSections, planWorkbench, planWorkbenchFile } from "./workbench-planner.mjs";
 import { createWorkbenchJobs } from "./workbench-jobs.mjs";
 import { createRequire } from "node:module";
 import { createSelectionGrants, supportsSelectionFormat } from "./selection-grants.mjs";
@@ -21,7 +20,7 @@ import {
   verifyPassword,
   profiles,
   operations,
-} from "./store.mjs";
+} from "./store.mts";
 import {
   createProvider,
   verifySignature,
@@ -29,8 +28,8 @@ import {
   unseal,
   documentId,
 } from "./provider.mjs";
-import { Sharing, GUEST_COOKIE } from "./sharing.mjs";
-import { createProjects } from "./projects.mjs";
+import { Sharing, GUEST_COOKIE } from "./sharing.mts";
+import { createProjects } from "./projects.mts";
 import { createMentionInbox } from "./mention-inbox.mjs";
 import { createPublicationJobs } from "./publication-jobs.mjs";
 import { Readable } from "node:stream";
@@ -118,8 +117,8 @@ export function createWorkspaceServer({
   keys,
   adminAssets,
   editorAssets,
-  modelIds = [],
-  workbenchModel = null,
+  modelIds = /** @type {string[]} */ ([]),
+  workbenchModel = /** @type {{name: string, url: string} | null} */ (null),
   captureBackup,
   publicAvailable = () => true,
 }) {
@@ -131,13 +130,21 @@ export function createWorkspaceServer({
   const inbox = createMentionInbox({ store, engine, config });
   const publicationJobs = createPublicationJobs({ store, engine, config, serviceKey: keys.service, launch });
   const grants = createSelectionGrants({ store, config, engine });
+  const hasViewOperation = {
+    sqlite: "EXISTS (SELECT 1 FROM json_each(a.operations) WHERE value='document.view')",
+    postgres: "jsonb_exists(a.operations::jsonb,'document.view')",
+    mysql: "JSON_CONTAINS(a.operations,JSON_QUOTE('document.view'))",
+  }[store.kind];
   function checkedActions(actions) {
     const { parseSelectionMutation } = selectionTransport();
     return actions.map(action => ({ ...action,
       args: parseSelectionMutation(action.tool, { ...action.args, requestId: randomUUID() }) }));
   }
   const workbenchJobs = createWorkbenchJobs({ store, grants, launch, engine,
-    planFile: async input => checkedActions(await planWorkbenchFile(input, workbenchModel)),
+    planFile: async input => {
+      const { planWorkbenchFile } = await import("./workbench-planner.mts");
+      return checkedActions(await planWorkbenchFile(input, workbenchModel));
+    },
   });
   let backupPaused = false, callbacksPaused = false;
   const admitted = new Set(), callbacks = new Set();
@@ -159,28 +166,34 @@ export function createWorkspaceServer({
       .filter((s) => s.startsWith(`${name}=`));
     return values.length === 1 ? values[0].slice(name.length + 1) : "";
   };
-  function session(request) {
-    const value = cookie(request);
-    const record = /^[A-Za-z0-9_-]{43}$/.test(value) && store.get(
-      "SELECT * FROM sessions WHERE hash=?",
-      hash(value),
-    );
-    if (record && record.expires > now()) return { ...record, user: store.user(record.user_id) };
-    check(!desktop, 401, "请通过折页桌面客户端打开本地工作空间。");
-    const guest = sharing.account(cookie(request, GUEST_COOKIE));
-    check(guest, 401, "请登录工作空间，或通过分享链接打开文档。");
-    return guest;
+  async function session(request) {
+    return store.read(async () => {
+      const value = cookie(request);
+      const record = /^[A-Za-z0-9_-]{43}$/.test(value) && await store.get(
+        "SELECT * FROM sessions WHERE hash=?",
+        hash(value),
+      );
+      if (record && record.expires > now()) return { ...record, user: await store.user(record.user_id) };
+      check(!desktop, 401, "请通过折页桌面客户端打开本地工作空间。");
+      const guest = await sharing.account(cookie(request, GUEST_COOKIE));
+      check(guest, 401, "请登录工作空间，或通过分享链接打开文档。");
+      return guest;
+    });
   }
   const admin = (account) =>
     check(account.user.role === "admin", 403, "需要工作空间管理员权限。");
-  function createDesktopSession() {
+  const adminRead = (request, work) => store.read(async () => {
+    admin(await session(request));
+    return work();
+  });
+  async function createDesktopSession() {
     check(desktop, 403, "仅本地工作空间支持桌面会话。");
-    const owner = store.get("SELECT id FROM users WHERE username='desktop' AND role='member' AND disabled=0");
+    const owner = await store.get("SELECT id FROM users WHERE username='desktop' AND role='member' AND disabled=0");
     check(owner, 409, "本机用户不存在。");
     const value = random();
-    store.transaction(() => {
-      store.run("DELETE FROM sessions");
-      store.run("INSERT INTO sessions VALUES(?,?,?,?,?)", hash(value), owner.id, random(), now() + 30 * 86400, now());
+    await store.transaction(async () => {
+      await store.run("DELETE FROM sessions");
+      await store.run("INSERT INTO sessions VALUES(?,?,?,?,?)", hash(value), owner.id, random(), now() + 30 * 86400, now());
     });
     return { name: DESKTOP_COOKIE, value };
   }
@@ -204,42 +217,35 @@ export function createWorkspaceServer({
     });
     response.end(status === 204 ? undefined : JSON.stringify(value));
   };
-  const summary = (user, file) => {
-    const selectionPermissions = config.selectionMcp === true ? store.permissions(user, file) : [];
-    const version = store.get(
-      "SELECT * FROM versions WHERE file_id=? AND version=?",
-      file.id,
-      file.head,
-    );
-    const receipt = version.receipt ? JSON.parse(version.receipt) : null;
+  function summary(user, access) {
+    const { file, operations, receipt } = access;
     return {
       id: file.id,
       resourceDocumentId: documentId(config, file.id),
       name: file.name,
       format: file.format,
       ownerId: file.owner_id,
-      ownerName: store.get(
-        "SELECT display_name FROM users WHERE id=?",
-        file.owner_id,
-      )?.display_name,
+      ownerName: access.ownerName,
       version: `v${file.head}`,
-      size: version.size,
+      size: access.size,
       createdAt: file.created_at,
       modifiedAt: file.modified_at,
-      operations: provider.permissions(user, file),
-      location: projects.visibleLocation(user, file.id),
+      operations: provider.filteredPermissions(operations),
+      location: access.location,
       canDelegateSelection: config.selectionMcp === true && supportsSelectionFormat(file.format) && !user.is_guest &&
-        ["document.view", "document.edit", "document.ai"].every(op => selectionPermissions.includes(op)),
-      canManage: store.canManage(user, file),
-      lastPublishedRevision: receipt?.revision ?? null,
-      documentId: store.get(
-        "SELECT id FROM launches WHERE file_id=? LIMIT 1",
-        file.id,
-      )
-        ? documentId(config, file.id)
-        : null,
+        ["document.view", "document.edit", "document.ai"].every(op => operations.includes(op)),
+      canManage: access.canManage,
+      lastPublishedRevision: receipt ? JSON.parse(receipt).revision : null,
+      documentId: access.hasLaunch ? documentId(config, file.id) : null,
     };
-  };
+  }
+
+  async function fileSummary(user, file) {
+    const access = await store.access(user, file.id);
+    check(access.operations.includes("document.view"), 403, "没有此文件的操作权限。");
+    return summary(user, access);
+  }
+
   async function engine(
     path,
     { method = "GET", data, token = keys.service, headers = {}, signal } = {},
@@ -278,63 +284,37 @@ export function createWorkspaceServer({
     const work = previous
       .catch(() => {})
       .then(async () => {
-        const user = store.user(account.user.id);
-        store.permit(user, file, "document.view");
-        let record = store.get("SELECT * FROM launches WHERE id=?", id);
-        if (record)
-          check(
-            record.browser_hash === account.hash &&
-              record.user_id === user.id &&
-              record.file_id === file.id &&
-              !record.closed,
-            403,
-            "编辑会话归属不匹配。",
-          );
-        if (record?.response) {
-          const response = JSON.parse(record.response);
-          if (response.expiresAt > now() + 60)
-            return {
-              ...response,
-              fileName: file.name,
-              collabUrl: "/collaboration",
-            };
-        }
-        let request;
-        if (record?.request) request = unseal(keys.objects, record.request);
-        else {
-          request = {
-            sessionId: id,
-            exchangeId: randomUUID(),
-            externalFileId: file.id,
-            launchCode: random(),
-          };
-          const purpose = record ? "refresh" : "open",
-            expiry = Math.min(account.expires, now() + 3600);
+        const prepared = await store.transaction(async () => {
+          const browser = await store.get("SELECT user_id,expires FROM sessions WHERE hash=?", account.hash);
+          check(browser?.user_id === account.user.id && browser.expires > now(), 401, "请重新登录工作空间。");
+          const user = await store.user(browser.user_id);
+          await store.permit(user, file, "document.view");
+          const record = await store.get("SELECT * FROM launches WHERE id=?", id);
           if (record)
-            store.run(
-              "UPDATE launches SET request=?,purpose=?,expires=? WHERE id=?",
-              seal(keys.objects, request),
-              purpose,
-              expiry,
-              id,
-            );
+            check(record.browser_hash === account.hash && record.user_id === user.id &&
+              record.file_id === file.id && !record.closed, 403, "编辑会话归属不匹配。");
+          if (record?.response) {
+            const response = JSON.parse(record.response);
+            if (response.expiresAt > now() + 60) return { response };
+          }
+          if (record?.request) return { request: unseal(keys.objects, record.request), purpose: record.purpose };
+          const request = { sessionId: id, exchangeId: randomUUID(), externalFileId: file.id, launchCode: random() };
+          const purpose = record ? "refresh" : "open";
+          const expiry = Math.min(browser.expires, now() + 3600);
+          const encrypted = seal(keys.objects, request);
+          if (record)
+            await store.run("UPDATE launches SET request=?,purpose=?,expires=? WHERE id=?", encrypted, purpose, expiry, id);
           else
-            store.run(
-              "INSERT INTO launches(id,browser_hash,user_id,file_id,expires,request) VALUES(?,?,?,?,?,?)",
-              id,
-              account.hash,
-              user.id,
-              file.id,
-              expiry,
-              seal(keys.objects, request),
-            );
-          record = store.get("SELECT * FROM launches WHERE id=?", id);
-        }
+            await store.run("INSERT INTO launches(id,browser_hash,user_id,file_id,expires,request) VALUES(?,?,?,?,?,?)",
+              id, account.hash, user.id, file.id, expiry, encrypted);
+          return { request, purpose };
+        });
+        if (prepared.response) return { ...prepared.response, fileName: file.name, collabUrl: "/collaboration" };
         let response;
         try {
           response = await engine(
-            `/integration/v1/sessions${record.purpose === "refresh" ? `/${id}/refresh` : ""}`,
-            { method: "POST", data: request },
+            `/integration/v1/sessions${prepared.purpose === "refresh" ? `/${id}/refresh` : ""}`,
+            { method: "POST", data: prepared.request },
           );
         } catch (error) {
           // Unknown outcomes retain the exact encrypted exchange for recovery.
@@ -344,18 +324,19 @@ export function createWorkspaceServer({
             error.status < 500 &&
             error.status !== 429
           ) {
-            store.run(
+            await store.run(
               "UPDATE launches SET closed=1,request=NULL WHERE id=?",
               id,
             );
           }
           throw error;
         }
-        store.run(
-          "UPDATE launches SET response=?,request=NULL WHERE id=?",
-          JSON.stringify(response),
-          id,
-        );
+        await store.transaction(async () => {
+          const current = await store.get("SELECT closed FROM launches WHERE id=?", id);
+          check(current && !current.closed, 403, "编辑会话已结束。");
+          await store.permit(account.user, file, "document.view");
+          await store.run("UPDATE launches SET response=?,request=NULL WHERE id=?", JSON.stringify(response), id);
+        });
         return {
           ...response,
           fileName: file.name,
@@ -380,31 +361,31 @@ export function createWorkspaceServer({
         name: config.name,
       });
     if (path === "/public/files" && method === "GET")
-      return send(response, 200, { files: sharing.publicFiles() });
+      return send(response, 200, { files: await sharing.publicFiles() });
     const shared = /^\/shared\/([a-f0-9-]{36})\/open$/.exec(path);
     if (shared && method === "POST") {
       origin(request);
       const data = await jsonBody(request);
       check(data && Object.keys(data).every(key => key === "sessionId") && uuid(data.sessionId), 400, "打开文档的参数无效。");
-      const file = store.file(shared[1]);
+      const file = await store.file(shared[1]);
       let account;
-      try { account = session(request); } catch (error) { if (!(error instanceof HttpError)) throw error; }
+      try { account = await session(request); } catch (error) { if (!(error instanceof HttpError)) throw error; }
       let joined;
-      if (!account || account.user.is_guest || !store.permissions(account.user, file).includes("document.view")) {
-        const policy = store.get("SELECT visibility FROM shares WHERE file_id=?", file.id);
+      if (!account || account.user.is_guest || !(await store.permissions(account.user, file)).includes("document.view")) {
+        const policy = await store.get("SELECT visibility FROM shares WHERE file_id=?", file.id);
         if ((!policy || policy.visibility === "private") && !request.headers["x-workspace-share"])
           throw new HttpError(account && !account.user.is_guest ? 403 : 401, "此文档仅对受邀成员开放，请使用有权限的账号登录。");
-        joined = sharing.join(file, request.headers["x-workspace-share"], cookie(request, GUEST_COOKIE));
+        joined = await sharing.join(file, request.headers["x-workspace-share"], cookie(request, GUEST_COOKIE));
         account = joined.account;
         if (joined.cookie) response.setHeader("Set-Cookie", setCookie(joined.cookie, account.expires - now(), GUEST_COOKIE));
       }
-      const previous = store.get("SELECT * FROM launches WHERE id=?", data.sessionId);
+      const previous = await store.get("SELECT * FROM launches WHERE id=?", data.sessionId);
       if (previous?.closed && previous.user_id === account.user.id && previous.file_id === file.id && previous.browser_hash === account.hash)
         return send(response, 409, { error: "分享权限已更新，正在重新打开。", retrySession: true }, joined?.cookie
           ? { "Set-Cookie": setCookie(joined.cookie, account.expires - now(), GUEST_COOKIE) } : {});
       const result = await launch(account, file, data.sessionId);
-      return send(response, 200, { ...result, actor: publicUser(account.user), canManage: summary(account.user, file).canManage,
-        sharing: sharing.settings(file), guestExpiresAt: account.user.is_guest ? account.expires : null }, joined?.cookie
+      return send(response, 200, { ...result, actor: publicUser(account.user), canManage: await store.canManage(account.user, file),
+        sharing: await sharing.settings(file), guestExpiresAt: account.user.is_guest ? account.expires : null }, joined?.cookie
           ? { "Set-Cookie": setCookie(joined.cookie, account.expires - now(), GUEST_COOKIE) } : {});
     }
     if (path === "/login" && method === "POST") {
@@ -421,8 +402,8 @@ export function createWorkspaceServer({
         "账号或密码不正确。",
       );
       const attemptKey = hash(`${username}:${request.socket.remoteAddress}`),
-        attempt = store.get(
-          "SELECT * FROM login_attempts WHERE key=?",
+        attempt = await store.get(
+          'SELECT * FROM login_attempts WHERE "key"=?',
           attemptKey,
         );
       check(
@@ -430,34 +411,34 @@ export function createWorkspaceServer({
         429,
         "登录失败次数较多，请 15 分钟后重试。",
       );
-      const user = store.get("SELECT * FROM users WHERE username=? AND id NOT IN (SELECT user_id FROM guest_identities)", username);
+      const user = await store.get("SELECT * FROM users WHERE username=? AND id NOT IN (SELECT user_id FROM guest_identities)", username);
       const encoded = user?.password || keys.dummyPassword;
       const valid = await verifyPassword(data.password, encoded);
       if (!user || user.disabled || !valid) {
-        store.run(
-          "INSERT INTO login_attempts VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET failures=CASE WHEN reset_at<=? THEN 1 ELSE failures+1 END,reset_at=CASE WHEN reset_at<=? THEN excluded.reset_at ELSE reset_at END",
-          attemptKey,
-          now() + 900,
-          now(),
-          now(),
-        );
+        await store.transaction(async () => {
+          const current = await store.get('SELECT * FROM login_attempts WHERE "key"=?', attemptKey);
+          const active = current?.reset_at > now();
+          await store.upsert("login_attempts", ["key"], {
+            key: attemptKey, failures: active ? current.failures + 1 : 1, reset_at: active ? current.reset_at : now() + 900,
+          });
+        });
         throw new HttpError(401, "账号或密码不正确。");
       }
       const value = random(),
         csrfToken = random(),
         expiry = now() + 8 * 3600;
-      const current = store.transaction(() => {
+      const current = await store.transaction(async () => {
         // Password verification yields to the event loop. A concurrent reset
         // or disable must invalidate this login before a new session is issued.
-        const current = store.get("SELECT * FROM users WHERE id=?", user.id);
+        const current = await store.get("SELECT * FROM users WHERE id=?", user.id);
         check(
           current && !current.disabled && current.password === user.password,
           401,
           "账号或密码已变化，请重新登录。",
         );
-        store.run("DELETE FROM login_attempts WHERE key=?", attemptKey);
-        store.run("DELETE FROM sessions WHERE expires<=?", now());
-        store.run(
+        await store.run('DELETE FROM login_attempts WHERE "key"=?', attemptKey);
+        await store.run("DELETE FROM sessions WHERE expires<=?", now());
+        await store.run(
           "INSERT INTO sessions VALUES(?,?,?,?,?)",
           hash(value),
           user.id,
@@ -465,7 +446,7 @@ export function createWorkspaceServer({
           expiry,
           now(),
         );
-        store.audit(user.id, "session.login");
+        await store.audit(user.id, "session.login");
         return current;
       });
       return send(
@@ -475,7 +456,7 @@ export function createWorkspaceServer({
         { "Set-Cookie": setCookie(value, 8 * 3600) },
       );
     }
-    const account = session(request);
+    const account = await session(request);
     if (!["GET", "HEAD"].includes(method)) csrf(request, account);
     if (path === "/session" && method === "GET")
       return send(response, 200, {
@@ -487,19 +468,19 @@ export function createWorkspaceServer({
     check(!account.user.is_guest, 403, "访客仅可访问分享给自己的文档，请通过分享链接打开。");
     if (path === "/mentions" && method === "GET") {
       const incomplete = await inbox.refresh();
-      const current = session(request);
+      const current = await session(request);
       check(!current.user.is_guest, 403, "请登录工作空间查看提及。");
-      return send(response, 200, { ...inbox.list(current.user, url.searchParams.get("before")), incomplete });
+      return send(response, 200, { ...await inbox.list(current.user, url.searchParams.get("before")), incomplete });
     }
     if (path === "/mentions/read" && method === "POST") {
       csrf(request, account);
-      inbox.markAllRead(account.user);
+      await inbox.markAllRead(account.user);
       return send(response, 204);
     }
     const mentionRead = /^\/mentions\/([a-f0-9-]{36})\/read$/.exec(path);
     if (mentionRead && method === "POST") {
       csrf(request, account);
-      return send(response, 200, { item: inbox.markRead(account.user, mentionRead[1]) });
+      return send(response, 200, { item: await inbox.markRead(account.user, mentionRead[1]) });
     }
     if (path === "/embed/selection" && method === "PUT")
       return send(response, 200, await grants.set(account, await jsonBody(request)));
@@ -509,25 +490,26 @@ export function createWorkspaceServer({
       check(Array.isArray(sources) && sources.length <= 128 && Array.isArray(sections) && sections.length > 0 && sections.length <= 128
         && sections.every(s => s && typeof s.id === "string" && s.id.length <= 256 && typeof s.heading === "string" && Array.isArray(s.lines) && s.lines.every(t => typeof t === "string"))
         && new Set(sections.map(s => s.id)).size === sections.length && JSON.stringify(sections).length <= 64000, 400, "请选择较小的白板选区。");
-      const board = store.file(boardId);
+      const { organizeBoardSections } = await import("./workbench-planner.mts");
+      const board = await store.file(boardId);
       check(board.format === "excalidraw", 400, "请选择一份白板。");
       for (const id of new Set([boardId, ...sources])) {
-        const file = store.file(id);
-        for (const op of ["document.view", "document.copy", "document.ai"]) store.permit(account.user, file, op);
+        const file = await store.file(id);
+        for (const op of ["document.view", "document.copy", "document.ai"]) await store.permit(account.user, file, op);
       }
       return send(response, 200, { sections: await organizeBoardSections(workbenchModel, sections) });
     }
     if (path === "/agent-jobs" && method === "GET")
-      return send(response, 200, { jobs: workbenchJobs.list(account) });
+      return send(response, 200, { jobs: await workbenchJobs.list(account) });
     const jobAction = /^\/agent-jobs\/([a-f0-9-]+)\/(approve|retry|recheck|undo)$/.exec(path);
     if (jobAction && method === "POST") {
       const { files, token, reviews } = await jsonBody(request);
       if (jobAction[2] === "undo") return send(response, 200, await workbenchJobs.undo(account, jobAction[1], files));
       if (jobAction[2] === "recheck") {
-        const grant = token === undefined ? undefined : grants.authenticate("Bearer " + token);
-        return send(response, 202, workbenchJobs.recheck(account, jobAction[1], files, grant));
+        const grant = token === undefined ? undefined : await grants.authenticate("Bearer " + token);
+        return send(response, 202, await workbenchJobs.recheck(account, jobAction[1], files, grant));
       }
-      return send(response, 202, workbenchJobs.transition(account, jobAction[1], jobAction[2], files, reviews));
+      return send(response, 202, await workbenchJobs.transition(account, jobAction[1], jobAction[2], files, reviews));
     }
     if ((path === "/agent-plan" || path === "/agent-jobs") && method === "POST") {
       const { id, prompt, tokens } = await jsonBody(request);
@@ -542,15 +524,16 @@ export function createWorkspaceServer({
         "请选择任务文件并输入指令。",
       );
       const compile = async () => {
-        const selections = tokens.map(token => {
-          const grant = grants.authenticate("Bearer " + token);
+        const { planWorkbench } = await import("./workbench-planner.mts");
+        const selections = await Promise.all(tokens.map(async token => {
+          const grant = await grants.authenticate("Bearer " + token);
           check(
             grant.userId === account.user.id && grant.browser === account.hash,
             403,
             "文件选区属于其他会话。",
           );
           return grant;
-        });
+        }));
         check(new Set(selections.map(grant => grant.fileId)).size === selections.length, 400, "目标文件不能重复。");
         const targets = await Promise.all(selections.map(async grant =>
           ({ fileId: grant.fileId, ...(await grants.call(grant, "read_selection", {})) })));
@@ -574,17 +557,20 @@ export function createWorkspaceServer({
         "X-Accel-Buffering": "no",
         "X-Content-Type-Options": "nosniff",
       });
-      const deliver = () => {
+      let delivering = false;
+      const deliver = async () => {
+        if (delivering || response.writableEnded || response.destroyed) return;
+        delivering = true;
         try {
-          const current = session(request);
+          const current = await session(request);
           if (!current || current.hash !== account.hash || current.user.is_guest)
             return response.end();
-          const payload = JSON.stringify({ activity: grants.recentActivity(current) });
+          const payload = JSON.stringify({ activity: await grants.recentActivity(current) });
           if (response.writableLength > 256 * 1024) return response.end();
           response.write("data: " + payload + "\n\n");
         } catch {
           response.end();
-        }
+        } finally { delivering = false; }
       };
       const unsubscribe = grants.subscribe(account.user.id, deliver);
       const heartbeat = setInterval(deliver, 15000);
@@ -596,24 +582,23 @@ export function createWorkspaceServer({
       return;
     }
     if (path === "/agent-activity" && method === "GET")
-      return send(response, 200, { activity: grants.recentActivity(account) });
+      return send(response, 200, { activity: await grants.recentActivity(account) });
     if (path === "/logout" && method === "POST") {
-      store.transaction(() => {
-        store.run("DELETE FROM sessions WHERE hash=?", account.hash);
-        store.run(
+      await store.transaction(async () => {
+        await store.run("DELETE FROM sessions WHERE hash=?", account.hash);
+        await store.run(
           "UPDATE launches SET closed=1 WHERE browser_hash=?",
           account.hash,
         );
-        store.audit(account.user.id, "session.logout");
+        await store.audit(account.user.id, "session.logout");
       });
       return send(response, 204, null, { "Set-Cookie": setCookie("", 0) });
     }
     if (path === "/users" && method === "GET") {
-      admin(account);
+      const users = await adminRead(request, () =>
+        store.all("SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM guest_identities) ORDER BY created_at"));
       return send(response, 200, {
-        users: store
-          .all("SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM guest_identities) ORDER BY created_at")
-          .map(publicUser),
+        users: users.map(publicUser),
       });
     }
     if (path === "/users" && method === "POST") {
@@ -627,19 +612,17 @@ export function createWorkspaceServer({
         /^[a-z0-9_.-]{3,64}$/.test(username) &&
           name.length > 0 &&
           name.length <= 128 &&
+          !name.includes("\0") &&
           ["admin", "member"].includes(data.role),
         400,
         "账号、显示名称或角色无效。",
       );
       const password = await passwordHash(data.password);
-      check(
-        !store.get("SELECT id FROM users WHERE username=?", username),
-        409,
-        "账号已存在。",
-      );
       const id = randomUUID();
-      store.transaction(() => {
-        store.run(
+      await store.transaction(async () => {
+        admin(await session(request));
+        check(!await store.get("SELECT id FROM users WHERE username=?", username), 409, "账号已存在。");
+        await store.run(
           "INSERT INTO users VALUES(?,?,?,?,?,0,?)",
           id,
           username,
@@ -648,16 +631,16 @@ export function createWorkspaceServer({
           data.role,
           iso(),
         );
-        store.audit(account.user.id, "user.created", id);
+        await store.audit(account.user.id, "user.created", id);
       });
-      return send(response, 201, { user: publicUser(store.user(id)) });
+      return send(response, 201, { user: publicUser(await store.user(id)) });
     }
     const userMatch = /^\/users\/([a-f0-9-]+)$/.exec(path);
     if (userMatch && method === "PATCH") {
       admin(account);
       const data = await jsonBody(request),
-        user = store.get("SELECT * FROM users WHERE id=?", userMatch[1]);
-      check(user && !store.get("SELECT 1 FROM guest_identities WHERE user_id=?", user.id), 404, "用户不存在。");
+        user = await store.get("SELECT * FROM users WHERE id=?", userMatch[1]);
+      check(user && !await store.get("SELECT 1 FROM guest_identities WHERE user_id=?", user.id), 404, "用户不存在。");
       const role = data.role ?? user.role,
         disabled =
           data.disabled === undefined ? user.disabled : Number(!!data.disabled),
@@ -668,7 +651,8 @@ export function createWorkspaceServer({
       check(
         ["admin", "member"].includes(role) &&
           displayName.length > 0 &&
-          displayName.length <= 128,
+          displayName.length <= 128 &&
+          !displayName.includes("\0"),
         400,
         "用户资料无效。",
       );
@@ -676,8 +660,9 @@ export function createWorkspaceServer({
         data.password === undefined
           ? user.password
           : await passwordHash(data.password);
-      store.transaction(() => {
-        const current = store.get("SELECT * FROM users WHERE id=?", user.id);
+      await store.transaction(async () => {
+        admin(await session(request));
+        const current = await store.get("SELECT * FROM users WHERE id=?", user.id);
         check(
           current.password === user.password &&
             current.role === user.role &&
@@ -692,13 +677,13 @@ export function createWorkspaceServer({
           (role !== "admin" || disabled)
         )
           check(
-            store.get(
+            (await store.get(
               "SELECT COUNT(*) AS count FROM users WHERE role='admin' AND disabled=0",
-            ).count > 1,
+            )).count > 1,
             409,
             "不能停用或降级最后一个管理员。",
           );
-        store.run(
+        await store.run(
           "UPDATE users SET role=?,disabled=?,display_name=?,password=? WHERE id=?",
           role,
           disabled,
@@ -707,57 +692,59 @@ export function createWorkspaceServer({
           user.id,
         );
         if (disabled || role !== user.role || password !== user.password) {
-          store.run("DELETE FROM sessions WHERE user_id=?", user.id);
-          store.run("UPDATE launches SET closed=1 WHERE user_id=?", user.id);
+          await store.run("DELETE FROM sessions WHERE user_id=?", user.id);
+          await store.run("UPDATE launches SET closed=1 WHERE user_id=?", user.id);
         }
-        store.audit(account.user.id, "user.updated", user.id);
+        await store.audit(account.user.id, "user.updated", user.id);
       });
       return send(response, 200, {
-        user: publicUser(store.get("SELECT * FROM users WHERE id=?", user.id)),
+        user: publicUser(await store.get("SELECT * FROM users WHERE id=?", user.id)),
       });
     }
     if (path === "/projects") {
-      if (method === "GET") return send(response, 200, { projects: projects.list(account.user) });
+      if (method === "GET") {
+        const items = await store.read(async () => projects.list((await session(request)).user));
+        return send(response, 200, { projects: items });
+      }
       if (method === "POST") {
         const value = await jsonBody(request);
-        return send(response, 201, { project: projects.create(session(request).user, value) });
+        return send(response, 201, { project: await projects.create((await session(request)).user, value) });
       }
     }
     const projectPath = /^\/projects\/([a-f0-9-]+)(?:\/(folders|members)(?:\/([a-f0-9-]+))?)?$/.exec(path);
     if (projectPath) {
       const [, id, part, item] = projectPath, user = account.user;
-      if (!part && method === "GET") return send(response, 200, projects.details(user, id));
+      if (!part && method === "GET") return send(response, 200, await projects.details(user, id));
       if (!part && method === "PATCH") {
         const value = await jsonBody(request);
-        return send(response, 200, { project: projects.rename(session(request).user, id, value) });
+        return send(response, 200, { project: await projects.rename((await session(request)).user, id, value) });
       }
       if (part === "folders") {
         if (!item && method === "POST" || item && method === "PATCH") {
           const value = await jsonBody(request);
-          return send(response, item ? 200 : 201, { folder: projects.saveFolder(session(request).user, id, value, item ?? null) });
+          return send(response, item ? 200 : 201, { folder: await projects.saveFolder((await session(request)).user, id, value, item ?? null) });
         }
         if (item && method === "DELETE") {
-          projects.removeFolder(user, id, item);
+          await projects.removeFolder(user, id, item);
           return send(response, 204);
         }
       }
       if (part === "members") {
-        if (!item && method === "GET") return send(response, 200, projects.members(user, id));
+        if (!item && method === "GET") return send(response, 200, await projects.members(user, id));
         if (item && method === "PUT") {
           const data = await jsonBody(request);
-          projects.setMember(session(request).user, id, item, data?.role);
+          await projects.setMember((await session(request)).user, id, item, data?.role);
           return send(response, 204);
         }
       }
     }
     if (path === "/files" && method === "GET") {
-      const files = store
-        .all("SELECT * FROM files ORDER BY modified_at DESC")
-        .filter((file) =>
-          store.permissions(account.user, file).includes("document.view"),
-        )
-        .map((file) => summary(account.user, file));
-      return send(response, 200, { files });
+      return send(response, 200, { files: await store.read(async () => {
+        const { user } = await session(request);
+        check(!user.is_guest, 403, "访客仅可访问分享给自己的文档。");
+        const files = await store.listFiles(user);
+        return files.map(access => summary(user, access));
+      }) });
     }
     if (path === "/content-search" && method === "GET") {
       const q = (url.searchParams.get("q") || "").trim();
@@ -767,19 +754,20 @@ export function createWorkspaceServer({
       const projectId = url.searchParams.get("projectId");
       if (projectId !== null) {
         check(uuid(projectId), 400, "项目 ID 无效。");
-        check(store.projectRole(account.user, projectId), 404, "项目不存在或无权访问。");
+        check(await store.projectRole(account.user, projectId), 404, "项目不存在或无权访问。");
       }
-      const batch = projectId === null ? store.all("SELECT * FROM files WHERE id>? ORDER BY id LIMIT ?", cursor, scanSize)
-        : store.all(`SELECT files.* FROM files JOIN project_files pf ON pf.file_id=files.id
+      const batch = projectId === null ? await store.all("SELECT * FROM files WHERE id>? ORDER BY id LIMIT ?", cursor, scanSize)
+        : await store.all(`SELECT files.* FROM files JOIN project_files pf ON pf.file_id=files.id
           WHERE pf.project_id=? AND files.id>? ORDER BY files.id LIMIT ?`, projectId, cursor, scanSize);
-      const candidates = batch.filter(file => store.permissions(account.user, file).includes("document.view"));
+      const visible = await Promise.all(batch.map(async file => (await store.permissions(account.user, file)).includes("document.view")));
+      const candidates = batch.filter((_, index) => visible[index]);
       const page = candidates.slice(0, 6);
       const next = candidates.length > page.length ? page.at(-1).id : batch.length === scanSize ? batch.at(-1).id : null;
       const params = new URLSearchParams({ q, workspace: "true" });
       const controller = new AbortController();
       response.once("close", () => controller.abort());
       const results = await Promise.allSettled(page.map(async file => {
-        const existing = store.get(`SELECT id FROM launches WHERE file_id=? AND user_id=?
+        const existing = await store.get(`SELECT id FROM launches WHERE file_id=? AND user_id=?
           AND browser_hash=? AND closed=0 AND expires>? ORDER BY expires DESC LIMIT 1`,
         file.id, account.user.id, account.hash, now());
         const { token, documentId } = await launch(account, file, existing?.id || randomUUID());
@@ -787,18 +775,18 @@ export function createWorkspaceServer({
         return { id: file.id, name: file.name, format: file.format, ...result };
       }));
       if (controller.signal.aborted) return;
-      const current = session(request);
+      const current = await session(request);
       if (projectId !== null)
-        check(store.projectRole(current.user, projectId), 404, "项目不存在或无权访问。");
+        check(await store.projectRole(current.user, projectId), 404, "项目不存在或无权访问。");
       const files = [], unavailable = [];
-      results.forEach((result, index) => {
+      for (const [index, result] of results.entries()) {
         const file = page[index];
-        if (!store.permissions(current.user, file).includes("document.view") ||
-          projectId !== null && store.fileLocation(file.id)?.projectId !== projectId) return;
+        if (!(await store.permissions(current.user, file)).includes("document.view") ||
+          projectId !== null && (await store.fileLocation(file.id))?.projectId !== projectId) continue;
         if (result.status === "fulfilled") {
           if (result.value.hits.length || result.value.truncated) files.push(result.value);
         } else unavailable.push({ id: file.id, name: file.name });
-      });
+      }
       return send(response, 200, { files, unavailable, next });
     }
     if (path === "/files" && method === "POST") {
@@ -846,45 +834,46 @@ export function createWorkspaceServer({
       const raw = name.split(".").at(-1).toLowerCase(),
         format = { jpg: "jpeg", markdown: "md", htm: "html" }[raw] || raw;
       check(formats[format], 415, "不支持此文件类型。");
-      const actor = session(request).user;
-      const file = store.createFile(
+      const actor = (await session(request)).user;
+      const file = await store.createFile(
         actor,
         name,
         format,
         formats[format],
         bytes,
-        projects.destination(actor, destination),
+        () => projects.destination(actor, destination),
       );
-      return send(response, 201, { file: summary(actor, file) });
+      return send(response, 201, { file: await fileSummary(actor, file) });
     }
     const fileMatch = /^\/files\/([a-f0-9-]+)(.*)$/.exec(path);
     if (fileMatch) {
-      const file = store.file(fileMatch[1]),
+      const file = await store.file(fileMatch[1]),
         action = fileMatch[2];
-      store.permit(account.user, file, "document.view");
+      await store.permit(account.user, file, "document.view");
       if (!action && method === "GET")
-        return send(response, 200, { file: summary(account.user, file) });
+        return send(response, 200, { file: await fileSummary(account.user, file) });
       if (action === "/location" && method === "PUT") {
-        const value = await jsonBody(request), actor = session(request).user;
-        projects.moveFile(actor, file, value);
-        return send(response, 200, { file: summary(actor, file) });
+        const value = await jsonBody(request), actor = (await session(request)).user;
+        await projects.moveFile(actor, file, value);
+        return send(response, 200, { file: await fileSummary(actor, file) });
       }
       if (action === "/editor-session" && method === "POST") {
         const data = await jsonBody(request);
         const result = await launch(account, file, data.sessionId);
-        return send(response, 200, { ...result, actor: publicUser(account.user), canManage: !desktop && summary(account.user, file).canManage });
+        return send(response, 200, { ...result, actor: publicUser(account.user), canManage: !desktop && await store.canManage(account.user, file) });
       }
       if (action === "/sharing" && method === "GET") {
-        store.manage(account.user, file);
-        return send(response, 200, { sharing: sharing.settings(file) });
+        await store.manage(account.user, file);
+        return send(response, 200, { sharing: await sharing.settings(file) });
       }
       if (action === "/sharing" && method === "PUT") {
-        const result = sharing.update(account.user, file, await jsonBody(request));
+        const data = await jsonBody(request);
+        const result = await store.read(async () => sharing.update((await session(request)).user, file, data));
         await Promise.allSettled(result.revokedSessions.map(id => engine(`/integration/v1/sessions/${id}`, { method: "DELETE" })));
         return send(response, 200, { sharing: result.sharing });
       }
       if (action === "/themes" && method === "GET") {
-        store.permit(account.user, file, "theme.assign");
+        await store.permit(account.user, file, "theme.assign");
         const token = jwt(keys.jwt, {
           doc: "*",
           scope: "admin",
@@ -907,7 +896,7 @@ export function createWorkspaceServer({
         });
       }
       if (action === "/theme" && method === "POST") {
-        store.permit(account.user, file, "theme.assign", "document.edit");
+        await store.permit(account.user, file, "theme.assign", "document.edit");
         const data = await jsonBody(request);
         check(
           data.themeRevisionId === null ||
@@ -935,17 +924,17 @@ export function createWorkspaceServer({
             },
           },
         );
-        store.audit(account.user.id, "file.theme.updated", file.id);
+        await store.audit(account.user.id, "file.theme.updated", file.id);
         return send(response, 200, value);
       }
       if (action === "/versions" && method === "GET") {
-        store.permit(account.user, file, "history.view");
+        await store.permit(account.user, file, "history.view");
         return send(response, 200, {
-          versions: store
+          versions: (await store
             .all(
               "SELECT version,sha256,size,actor_id,created_at,receipt FROM versions WHERE file_id=? ORDER BY version DESC LIMIT 200",
               file.id,
-            )
+            ))
             .map((item) => ({
               ...item,
               version: `v${item.version}`,
@@ -954,12 +943,12 @@ export function createWorkspaceServer({
         });
       }
       if (action === "/download" && method === "GET") {
-        store.permit(account.user, file, "document.download");
+        await store.permit(account.user, file, "document.download");
         const version = url.searchParams.get("version") || `v${file.head}`;
         check(/^v[1-9]\d{0,12}$/.test(version), 400, "业务版本无效。");
         if (version !== `v${file.head}`)
-          store.permit(account.user, file, "history.view");
-        const descriptor = provider.descriptor(file, Number(version.slice(1))),
+          await store.permit(account.user, file, "history.view");
+        const descriptor = await provider.descriptor(file, Number(version.slice(1))),
           bytes = readFileSync(store.object(descriptor.sha256));
         check(
           bytes.length === descriptor.sizeBytes &&
@@ -977,12 +966,12 @@ export function createWorkspaceServer({
         return;
       }
       if (action === "/mentionable" && method === "GET") {
-        store.permit(account.user, file, "document.view", "document.edit");
-        const people = store.all(
+        await store.permit(account.user, file, "document.view", "document.edit");
+        const people = await store.all(
           `SELECT u.id, u.display_name AS name FROM users u
            WHERE u.disabled = 0 AND u.id NOT IN (SELECT user_id FROM guest_identities)
-           AND (u.id = ? OR EXISTS (SELECT 1 FROM acl a, json_each(a.operations) op
-             WHERE a.file_id = ? AND a.user_id = u.id AND op.value = 'document.view')
+           AND (u.id = ? OR EXISTS (SELECT 1 FROM acl a
+             WHERE a.file_id = ? AND a.user_id = u.id AND ${hasViewOperation})
              OR EXISTS (SELECT 1 FROM project_files pf JOIN projects p ON p.id=pf.project_id
                LEFT JOIN project_members m ON m.project_id=p.id AND m.user_id=u.id
                WHERE pf.file_id=? AND (p.owner_id=u.id OR m.user_id IS NOT NULL)))
@@ -991,23 +980,23 @@ export function createWorkspaceServer({
         return send(response, 200, { people });
       }
       if (action === "/acl" && method === "GET") {
-        store.manage(account.user, file);
+        await store.manage(account.user, file);
         return send(response, 200, {
           ownerId: file.owner_id,
-          users: store
+          users: (await store
             .all(
               "SELECT id,username,display_name FROM users WHERE disabled=0 AND id NOT IN (SELECT user_id FROM guest_identities) ORDER BY username",
-            )
+            ))
             .map((user) => ({
               id: user.id,
               username: user.username,
               displayName: user.display_name,
             })),
-          grants: store
+          grants: (await store
             .all(
               "SELECT user_id,profile,operations FROM acl WHERE file_id=?",
               file.id,
-            )
+            ))
             .map((row) => ({
               userId: row.user_id,
               profile: row.profile,
@@ -1016,7 +1005,7 @@ export function createWorkspaceServer({
         });
       }
       if (action === "/acl" && method === "PUT") {
-        store.manage(account.user, file);
+        await store.manage(account.user, file);
         const data = await jsonBody(request);
         check(
           uuid(data.userId) &&
@@ -1025,7 +1014,6 @@ export function createWorkspaceServer({
           400,
           "权限主体或角色无效。",
         );
-        check(!store.user(data.userId).is_guest, 400, "临时访客不能作为受邀成员分配权限。");
         const granted = data.operations ?? profiles[data.profile];
         check(
           Array.isArray(granted) &&
@@ -1044,41 +1032,38 @@ export function createWorkspaceServer({
             400,
             "回写或恢复同时需要编辑权限。",
           );
-        store.transaction(() => {
-          store.run(
-            "INSERT INTO acl VALUES(?,?,?,?) ON CONFLICT(file_id,user_id) DO UPDATE SET profile=excluded.profile,operations=excluded.operations",
-            file.id,
-            data.userId,
-            data.profile,
-            JSON.stringify(granted),
-          );
-          store.audit(account.user.id, "acl.updated", file.id);
+        await store.transaction(async () => {
+          const current = await session(request);
+          await store.manage(current.user, file);
+          check(!(await store.user(data.userId)).is_guest, 400, "临时访客不能作为受邀成员分配权限。");
+          await store.upsert("acl", ["file_id", "user_id"], {
+            file_id: file.id, user_id: data.userId, profile: data.profile, operations: JSON.stringify(granted),
+          });
+          await store.audit(account.user.id, "acl.updated", file.id);
         });
         return send(response, 204);
       }
       if (action.startsWith("/acl/") && method === "DELETE") {
-        store.manage(account.user, file);
+        await store.manage(account.user, file);
         const id = action.slice(5);
         check(uuid(id), 400, "用户 ID 无效。");
-        store.transaction(() => {
-          store.run(
+        await store.transaction(async () => {
+          await store.manage((await session(request)).user, file);
+          await store.run(
             "DELETE FROM acl WHERE file_id=? AND user_id=?",
             file.id,
             id,
           );
-          store.audit(account.user.id, "acl.removed", file.id);
+          await store.audit(account.user.id, "acl.removed", file.id);
         });
         return send(response, 204);
       }
     }
     if (path === "/events" && method === "GET") {
-      admin(account);
+      const events = await adminRead(request, () =>
+        store.all("SELECT id,file_id,sequence,type,received_at,body FROM events ORDER BY received_at DESC LIMIT 200"));
       return send(response, 200, {
-        events: store
-          .all(
-            "SELECT id,file_id,sequence,type,received_at,body FROM events ORDER BY received_at DESC LIMIT 200",
-          )
-          .map((row) => ({ ...row, body: JSON.parse(row.body) })),
+        events: events.map(row => ({ ...row, body: JSON.parse(row.body) })),
       });
     }
     if (path === "/publication-jobs" && method === "GET") {
@@ -1087,7 +1072,7 @@ export function createWorkspaceServer({
     }
     const jobPath = /^\/publication-jobs\/([a-f0-9-]{36})\/(reconcile|retry|artifact|copy|event-retry)$/.exec(path);
     if (jobPath) {
-      const current = () => { const value = session(request); admin(value); return value; };
+      const current = async () => { const value = await session(request); admin(value); return value; };
       const [, id, operation] = jobPath;
       check(uuid(id), 400, "回写任务无效。");
       if (operation === "artifact" && method === "GET") {
@@ -1097,16 +1082,15 @@ export function createWorkspaceServer({
         return await pipeline(Readable.fromWeb(output.body), response);
       }
       if (operation !== "artifact" && method === "POST") {
-        csrf(request, current());
+        csrf(request, await current());
         return send(response, 200, await publicationJobs.action(id, operation, current));
       }
     }
     if (path === "/audit" && method === "GET") {
-      admin(account);
       return send(response, 200, {
-        records: store.all(
+        records: await adminRead(request, () => store.all(
           "SELECT audit.*,users.display_name AS actor_name FROM audit LEFT JOIN users ON users.id=audit.actor_id ORDER BY audit.id DESC LIMIT 200",
-        ),
+        )),
       });
     }
     if (path === "/service" && method === "GET") {
@@ -1116,7 +1100,7 @@ export function createWorkspaceServer({
         schemaVersion: "officecli-workspace/1",
         ai: { enabled: workspace.aiEnabled },
         storage: {
-          business: "SQLite + immutable objects",
+          business: { sqlite: "SQLite", postgres: "PostgreSQL", mysql: "MySQL" }[store.kind] + " + immutable objects",
           editing: "OfficeCLI HCD root",
         },
         deployment: {
@@ -1234,7 +1218,7 @@ export function createWorkspaceServer({
         check(request.method === "POST", 405, "仅接受 POST。");
         const bytes = await body(request, 2 * 1024 * 1024),
           event = url.pathname === "/officecli-events/v1/events";
-        verifySignature(
+        await verifySignature(
           store,
           request,
           bytes,
@@ -1248,7 +1232,7 @@ export function createWorkspaceServer({
           throw new HttpError(400, "JSON 格式无效。");
         }
         if (event) {
-          provider.event(data);
+          await provider.event(data);
           send(response, 204);
         } else send(response, 200, await provider.callback(url.pathname, data));
         return;
@@ -1256,7 +1240,7 @@ export function createWorkspaceServer({
       if (url.pathname === "/workspace/mcp/selection") {
         check(!desktop, 404, "此接口仅供团队工作空间使用。");
         if (request.headers.origin) origin(request);
-        const grant = grants.authenticate(request.headers.authorization);
+        const grant = await grants.authenticate(request.headers.authorization);
         if (request.method !== "POST") return send(response, 405, { error: "MCP 使用 POST。" }, { Allow: "POST" });
         const { handleSelectionMcp } = selectionTransport();
         return await handleSelectionMcp(request, response, await jsonBody(request), grant, grants.call);
@@ -1264,14 +1248,18 @@ export function createWorkspaceServer({
       if (url.pathname.startsWith("/workspace/api/"))
         return await business(request, response, url);
       if (url.pathname.startsWith("/v1/")) {
-        const account = session(request);
-        if ((account.user.is_guest || sharing.guestToken(request.headers.authorization)) && url.pathname !== "/v1/capabilities") {
-          const guest = sharing.account(cookie(request, GUEST_COOKIE));
-          check(guest, 401, "访客会话已失效，请重新打开分享链接。");
-          const document = /^\/v1\/documents\/([A-Za-z0-9_-]+)(?:\/|$)/.exec(url.pathname);
-          check(document, 403, "访客仅可访问当前分享文档。");
-          sharing.authorizeProxy(guest, request.headers.authorization, document[1]);
-        }
+        const account = await store.read(async () => {
+          const current = await session(request);
+          if (url.pathname !== "/v1/capabilities" &&
+              (current.user.is_guest || await sharing.guestToken(request.headers.authorization))) {
+            const guest = await sharing.account(cookie(request, GUEST_COOKIE));
+            check(guest, 401, "访客会话已失效，请重新打开分享链接。");
+            const document = /^\/v1\/documents\/([A-Za-z0-9_-]+)(?:\/|$)/.exec(url.pathname);
+            check(document, 403, "访客仅可访问当前分享文档。");
+            await sharing.authorizeProxy(guest, request.headers.authorization, document[1]);
+          }
+          return current;
+        });
         const global =
           /^\/v1\/(catalog|themes|admin)(\/|$)/.test(url.pathname) ||
           url.pathname === "/v1/documents";
@@ -1369,7 +1357,7 @@ export function createWorkspaceServer({
       finish?.();
     }
   }
-  function handleUpgrade(request, socket, head) {
+  async function handleUpgrade(request, socket, head) {
     if (!publicAvailable()) {
       socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
       return;
@@ -1382,7 +1370,9 @@ export function createWorkspaceServer({
         403,
         "WebSocket 来源无效。",
       );
-      session(request);
+      await session(request);
+      if (socket.destroyed) return;
+      check(publicAvailable(), 503, "工作空间正在关闭。");
       const target = new URL(config.collabUrl),
         outgoing = httpRequest(target, {
           path: "/",
@@ -1427,9 +1417,9 @@ export function createWorkspaceServer({
       callbacksPaused = true;
       return Promise.allSettled([...callbacks]);
     },
-    resumeAgentJobs() {
+    async resumeAgentJobs() {
       backupPaused = false;
       callbacksPaused = false;
-      if (workspace.selectionMcp) workbenchJobs.resume();
+      if (workspace.selectionMcp) await workbenchJobs.resume();
     } };
 }

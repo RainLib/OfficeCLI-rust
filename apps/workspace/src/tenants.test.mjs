@@ -4,8 +4,8 @@ import { randomUUID } from "node:crypto";
 import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { atomic } from "./store.mjs";
-import { publicOrigin, readTenantRegistry } from "./tenants.mjs";
+import { atomic } from "./store.mts";
+import { publicOrigin, readTenantRegistry } from "./tenants.mts";
 
 function fixtures(t) {
   const root = mkdtempSync(join(tmpdir(), "officecli-tenant-registry-"));

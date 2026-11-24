@@ -13,11 +13,14 @@ npm ci --prefix examples/hdoc/admin-app
 npm ci --prefix examples/hdoc/editor
 npm ci --prefix examples/hdoc/xlsx-univer-viewer
 npm ci --prefix examples/hdoc/embed-host
+npm ci --prefix apps/workspace
 cargo build --release -p officecli --bin officecli
-node apps/workspace/scripts/build.mjs
+npm run build --prefix apps/workspace
 ```
 
 构建输出 `apps/workspace/dist/`，包含单页后台、编辑器及 worker/异步资源、独立打包的协作 sidecar 和当前平台的 OfficeCLI。设置 `OFFICECLI_BIN` 可选择发行二进制，设置 `OFFICECLI_WORKSPACE_DIST` 可指定构建目录。默认优先使用已构建的 release 二进制，缺少时才回退到 debug；脚本不会自动编译 Rust。日常使用和性能验证请构建 release，debug 保留完整调试开销。
+
+`npm run typecheck --prefix apps/workspace` 检查工作台的 TypeScript 源码。源码入口可用 Node.js 24.13+ 直接启动。独立发行包和 Docker 镜像使用编译后的 `app/cli.mjs` 和运行模块。数据库驱动按工作区所选后端加载。
 
 Word 的原格式下载优先保留原 OOXML 包，并将支持的正文、表格行列和合并变化写回正文；不会自动改用有损语义重建。PDF 使用与编辑器分页预览相同的字体、分节和页眉页脚规则，并验证导出页数、每页纸张尺寸和文字；中文部首等字形别名的 Unicode 映射按预览正文校正，保持原有绘制内容。该 PDF 路径需要服务器安装 Chromium/Chrome/Edge，也可用 `OFFICECLI_PDF_BROWSER` 指定可执行文件；缺少排版引擎或一致性校验失败时会停止导出，不会返回替代版式。浏览器以临时独立配置运行，文档资源内联且不允许文档发起网络请求。
 
@@ -79,7 +82,7 @@ PPTX 支持常见占位符继承版式和母版的坐标、文字格式与主题
 
 ## 用一个入口承载多个工作区
 
-每个工作区分配一个域名。共享监听器按已登记的 Host 将 HTTP、白板事件流和协作 WebSocket 交给同一个工作区。工作区各自持有 SQLite 业务库、源文件、HCD 编辑引擎、协作进程和签名密钥。两家公司可以使用相同的账号名、文件名或调用方会话 ID。公开目录、分享权限、Agent 任务和编辑回执均归属于文件所在的工作区。
+每个工作区分配一个域名。共享监听器按已登记的 Host 将 HTTP、白板事件流和协作 WebSocket 交给同一个工作区。工作区各自持有业务数据库、源文件、HCD 编辑引擎、协作进程和签名密钥。云端每个工作区可选 SQLite、PostgreSQL 或 MySQL，远程数据库使用独立的数据库和连接配置。两家公司可以使用相同的账号名、文件名或调用方会话 ID。公开目录、分享权限、Agent 任务和编辑回执均归属于文件所在的工作区。
 
 下面的示例使用两个本机域名和同一个公开端口。在仓库根目录执行，先向环境注入两套独立的管理员密码。
 
@@ -157,7 +160,7 @@ root/
 
 ## 离线发行与版本切换
 
-Linux 归档、HTTPS 反代及 macOS Electron 离线包的构建和验收命令见[工作台部署与桌面打包](../../docs/workspace-distribution.zh.md)。
+Docker Compose、Linux 归档、HTTPS 反代和 macOS Electron 离线包的部署与验收命令见[工作台部署与桌面打包](../../docs/workspace-distribution.zh.md)。
 
 在构建机器准备当前平台的 OfficeCLI、已锁定的前端依赖、构建后的静态资源和 Node.js 发行目录。封装命令会把 Node.js、原生引擎、协作与 MCP、界面、模板和第三方许可随包复制，并生成带平台、版本、协议指纹和逐文件 SHA-256 的 `release.json`。
 
@@ -190,7 +193,7 @@ npm run package --prefix apps/workspace -- \
 
 ## 在线备份与恢复
 
-在运行 Workspace 的主机上操作，每个 `--root` 对应一个租户。快照包含业务数据库、原文件与版本、项目和权限、编辑修订、协作状态、回写暂存与回执，以及当前配置和签名密钥。取点时系统先落盘已同步的协作修改，等待已受理的写入完成。读请求继续服务，取点期间的新写入会返回可重试的 `503`，原有协作连接会在取点完成后继续同步。复制到指定目录和逐文件校验在开放写入后进行。
+在运行 Workspace 的主机上操作，每个 `--root` 对应一个租户。快照包含业务数据库、原文件与版本、项目和权限、编辑修订、协作状态、回写暂存与回执，以及当前配置和签名密钥。取点时系统先落盘已同步的协作修改，等待已受理的写入完成。取点期间的新写入会返回可重试的 `503`，读取业务库的请求可能需要等待数据库快照。原有协作连接会在取点完成后继续同步。复制到指定目录和逐文件校验在开放写入后进行。
 
 ```bash
 node apps/workspace/cli.mjs backup --root ./workspace-data --output /backup/fold-2026-11-20
@@ -199,7 +202,9 @@ node apps/workspace/cli.mjs restore --backup /backup/fold-2026-11-20 --root ./wo
 node apps/workspace/cli.mjs start --root ./workspace-restored
 ```
 
-用已有父目录下的新路径作为备份目标和恢复目标。恢复校验每个文件的 SHA-256、SQLite 完整性和文件版本对应的对象，随后启用新工作区。恢复保留原域名和端口，同机启动恢复实例前须腾出这些监听地址。服务账号应限制备份目录的访问权限，因为其中含密钥。外部 Provider 管理的业务数据库和文件使用其自身的备份流程。
+用已有父目录下的新路径作为备份目标和恢复目标。恢复校验每个文件的 SHA-256、快照数据库完整性和文件版本对应的对象。用 `restore --database postgres` 或 `restore --database mysql` 可以导入空的目标数据库，省略参数则恢复为 SQLite。恢复保留原域名和端口，同机启动恢复实例前须腾出这些监听地址。服务账号应限制备份目录的访问权限，因为其中含密钥。外部 Provider 管理的业务数据库和文件使用其自身的备份流程。[数据库接入与切换](../../docs/workspace-distribution.zh.md#数据库与文件存储)
+
+设置 `FOLDLY_TEST_POSTGRES_URL_FILE` 和 `FOLDLY_TEST_MYSQL_URL_FILE` 指向两个空验收数据库的连接文件，再运行 `npm run test:databases --prefix apps/workspace`。该命令将同一工作区依次恢复到 PostgreSQL、MySQL 和 SQLite，并在每次恢复后验证登录、权限、原件、编辑发布和导出。
 
 `npm run test:backup --prefix apps/workspace` 使用真实工作区和两页协作编辑器，验证在线读写时的取点、备份损坏拒绝、异目录恢复、DOCX 导出及原回写任务续跑。
 

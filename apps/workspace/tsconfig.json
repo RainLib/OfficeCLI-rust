@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "types": ["node"],
+    "strict": true,
+    "allowJs": true,
+    "rewriteRelativeImportExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmitOnError": true,
+    "rootDir": ".",
+    "outDir": "dist/runtime"
+  },
+  "include": ["cli.mts", "src/*.mts", "src/*.mjs"],
+  "exclude": ["src/*.test.mjs"]
+}

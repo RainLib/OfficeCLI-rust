@@ -1,0 +1,5 @@
+{$FOLDLY_PROXY_SITE::80} {
+	@internal path /officecli-provider /officecli-provider/* /officecli-events /officecli-events/* /workspace/objects /workspace/objects/* /workspace/internal /workspace/internal/*
+	respond @internal 404
+	reverse_proxy workspace:{$FOLDLY_INTERNAL_PORT:7400}
+}

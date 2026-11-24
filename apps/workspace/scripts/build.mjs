@@ -3,6 +3,9 @@ import { cpSync, mkdirSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+
+const { values } = parseArgs({ options: { "web-only": { type: "boolean" } } });
 
 const app = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
   repo = resolve(app, "../.."),
@@ -46,6 +49,10 @@ await build({
 cpSync(join(repo, "examples/hdoc/embed-host/dist"), join(out, "embed-example"), { recursive: true });
 cpSync(join(admin, "embed"), join(out, "admin"), { recursive: true });
 cpSync(join(editor, "dist"), join(out, "editor"), { recursive: true });
+if (values["web-only"]) {
+  console.log(`Workspace 共用 Web 资源构建完成：${out}`);
+  process.exit(0);
+}
 const binary =
   process.env.OFFICECLI_BIN ||
   (existsSync(join(repo, "target/release/officecli"))

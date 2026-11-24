@@ -1,0 +1,53 @@
+services:
+  workspace:
+    image: ${FOLDLY_IMAGE:-foldly-workspace:0.1.32-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 140s
+    shm_size: 256m
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./deploy/workspace/chromium-seccomp.json
+    env_file:
+      - path: ${FOLDLY_RUNTIME_ENV_FILE:-./.foldly.runtime.env}
+        required: false
+    environment:
+      FOLDLY_PUBLIC_URL: ${FOLDLY_PUBLIC_URL:-http://localhost:7400}
+      FOLDLY_INTERNAL_PORT: ${FOLDLY_INTERNAL_PORT:-7400}
+      FOLDLY_ADMIN: ${FOLDLY_ADMIN:-admin}
+      FOLDLY_WORKSPACE_NAME: ${FOLDLY_WORKSPACE_NAME:-Foldly 工作空间}
+      FOLDLY_SELECTION_MCP: ${FOLDLY_SELECTION_MCP:-false}
+      FOLDLY_DATABASE: ${FOLDLY_DATABASE:-}
+    volumes:
+      - workspace_data:/var/lib/foldly
+    secrets:
+      - foldly_admin_password
+
+  proxy:
+    image: caddy:2.11-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    restart: unless-stopped
+    depends_on:
+      workspace:
+        condition: service_healthy
+    environment:
+      FOLDLY_PROXY_SITE: ${FOLDLY_PROXY_SITE:-:80}
+      FOLDLY_INTERNAL_PORT: ${FOLDLY_INTERNAL_PORT:-7400}
+    ports:
+      - "${FOLDLY_LISTEN_ADDR:-127.0.0.1}:${FOLDLY_HTTP_PORT:-7400}:80"
+      - "${FOLDLY_LISTEN_ADDR:-127.0.0.1}:${FOLDLY_HTTPS_PORT:-7443}:443"
+    volumes:
+      - ./deploy/workspace/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  workspace_data:
+  caddy_data:
+  caddy_config:
+
+secrets:
+  foldly_admin_password:
+    file: ${FOLDLY_ADMIN_PASSWORD_FILE:-./.secrets/foldly-admin-password}

@@ -5,24 +5,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { HttpError, now, Store } from "./store.mjs";
+import { HttpError, now, Store } from "./store.mts";
 import { createWorkbenchJobs } from "./workbench-jobs.mjs";
 
-function fixture(t) {
+async function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "officecli-jobs-"));
-  const store = new Store(root);
-  t.after(() => { store.db.close(); rmSync(root, { recursive: true, force: true }); });
+  const store = await Store.open(root, { initialize: async () => {} });
+  t.after(async () => { await store.close(); rmSync(root, { recursive: true, force: true }); });
   const owner = randomUUID(), other = randomUUID(), session = randomUUID();
-  for (const id of [owner, other]) store.run(
+  for (const id of [owner, other]) await store.run(
     "INSERT INTO users(id,username,display_name,password,role,created_at) VALUES(?,?,?,?,?,?)",
     id, id, "工作坊", "unused", "member", "2026-11-20",
   );
-  store.run("INSERT INTO sessions VALUES(?,?,?,?,?)", session, owner, "unused", now() + 300, now());
+  await store.run("INSERT INTO sessions VALUES(?,?,?,?,?)", session, owner, "unused", now() + 300, now());
   const contents = ["会议纪要.docx", "计划.docx"].map(name => ({ fileId: randomUUID(), name, format: "docx", target: { kind: "append" } }));
-  for (const { fileId, name } of contents) store.run(
+  for (const { fileId, name } of contents) await store.run(
     "INSERT INTO files VALUES(?,?,?,?,?,?,?,?)", fileId, name, "docx", "application/octet-stream", owner, 0, "2026-11-20", "2026-11-20",
   );
-  const account = { hash: session, user: store.user(owner) };
+  const account = { hash: session, user: await store.user(owner) };
   const plan = (ids) => async () => ({
     selections: contents,
     plan: { reply: "", actions: contents.map(({ fileId }, i) => ({ fileId, tool: "append_to_file", args: { requestId: ids[i], text: "下一步" } })) },
@@ -59,12 +59,12 @@ function fixture(t) {
       },
     },
   };
-  return { account, other: { user: store.user(other) }, contents, plan, dependencies, revisions, attempts };
+  return { account, other: { user: await store.user(other) }, contents, plan, dependencies, revisions, attempts };
 }
 
 async function settled(jobs, account) {
   for (let i = 0; i < 80; i++) {
-    const result = jobs.list(account).at(-1);
+    const result = (await jobs.list(account)).at(-1);
     if (result?.done) return result;
     await delay(10);
   }
@@ -72,7 +72,7 @@ async function settled(jobs, account) {
 }
 
 test("approval reserves the exact patch and retry runs only the failed file", async t => {
-  const { account, other, contents, plan, dependencies, attempts } = fixture(t);
+  const { account, other, contents, plan, dependencies, attempts } = await fixture(t);
   const [first, second] = contents.map(item => item.fileId);
   const [firstPatch, secondPatch] = [randomUUID(), randomUUID()];
   const commit = dependencies.grants.commitPrepared;
@@ -90,30 +90,30 @@ test("approval reserves the exact patch and retry runs only the failed file", as
   assert.deepEqual(waiting.targets.map(item => item.phase), ["review", "review"]);
   assert.equal(waiting.targets[0].changes[0].after, "下一步");
   assert.equal(attempts.length, 0);
-  assert.deepEqual(jobs.list(other), []);
-  assert.throws(() => jobs.transition(other, id, "approve", [first]), { status: 404 });
-  assert.deepEqual(jobs.list(account), [waiting]);
-  jobs.transition(account, id, "approve", [first, second], { [first]: firstPatch, [second]: secondPatch });
+  assert.deepEqual(await jobs.list(other), []);
+  await assert.rejects(() => jobs.transition(other, id, "approve", [first]), { status: 404 });
+  assert.deepEqual(await jobs.list(account), [waiting]);
+  await jobs.transition(account, id, "approve", [first, second], { [first]: firstPatch, [second]: secondPatch });
   const partial = await settled(jobs, account);
   assert.deepEqual(partial.targets.map(item => item.phase), ["complete", "failed"]);
   assert.equal(partial.targets[1].retryable, true);
-  assert.throws(() => jobs.transition(account, id, "retry", [first]), { status: 400 });
-  jobs.transition(account, id, "retry", [second]);
+  await assert.rejects(() => jobs.transition(account, id, "retry", [first]), { status: 400 });
+  await jobs.transition(account, id, "retry", [second]);
   assert.deepEqual((await settled(jobs, account)).targets.map(item => item.receipt), [2, 2]);
   assert.deepEqual(attempts, [[first, firstPatch], [second, secondPatch], [second, secondPatch]]);
 });
 
 test("a restarted worker recovers a committed result when its reply was lost", async t => {
-  const { account, contents, plan, dependencies, revisions, attempts } = fixture(t);
+  const { account, contents, plan, dependencies, revisions, attempts } = await fixture(t);
   const id = randomUUID(), patchId = randomUUID();
   const jobs = createWorkbenchJobs(dependencies);
   await jobs.create(account, id, "追加下一步", plan([patchId, randomUUID()]));
-  const job = JSON.parse(dependencies.store.get("SELECT state FROM workbench_jobs WHERE id=?", id).state);
+  const job = JSON.parse((await dependencies.store.get("SELECT state FROM workbench_jobs WHERE id=?", id)).state);
   job.targets[0].phase = "editing";
   revisions.set(patchId, 2);
-  dependencies.store.run("UPDATE workbench_jobs SET state=? WHERE id=?", JSON.stringify(job), id);
+  await dependencies.store.run("UPDATE workbench_jobs SET state=? WHERE id=?", JSON.stringify(job), id);
   const restarted = createWorkbenchJobs(dependencies);
-  restarted.resume();
+  await restarted.resume();
   const result = await settled(restarted, account);
   assert.equal(result.targets[0].id, contents[0].fileId);
   assert.equal(result.targets[0].receipt, 2);
@@ -122,7 +122,7 @@ test("a restarted worker recovers a committed result when its reply was lost", a
 });
 
 test("only confirmed prerequisites enable drafting and each dependent diff requires fresh approval", async t => {
-  const { account, contents, plan, dependencies, attempts } = fixture(t);
+  const { account, contents, plan, dependencies, attempts } = await fixture(t);
   const [first, second] = contents.map(item => item.fileId);
   const firstPatch = randomUUID(), secondPatch = randomUUID();
   const snapshots = [];
@@ -138,22 +138,22 @@ test("only confirmed prerequisites enable drafting and each dependent diff requi
     return result;
   });
   assert.deepEqual(waiting.targets.map(t => t.phase), ["review", "waiting"]);
-  assert.throws(() => jobs.transition(account, id, "approve", [second]), { status: 400 });
+  await assert.rejects(() => jobs.transition(account, id, "approve", [second]), { status: 400 });
   assert.deepEqual(snapshots, []);
-  jobs.transition(account, id, "approve", [first], { [first]: firstPatch });
+  await jobs.transition(account, id, "approve", [first], { [first]: firstPatch });
   const reviewed = await settled(jobs, account);
   assert.deepEqual(attempts, [[first, firstPatch]]);
   assert.deepEqual(reviewed.targets.map(t => t.phase), ["complete", "review"]);
   assert.equal(snapshots[0].task, "汇总已保存的结论");
   assert.equal(snapshots[0].facts[0].revision, 2);
   assert.equal(reviewed.targets[1].changes[0].after, "汇总：下一步");
-  jobs.transition(account, id, "approve", [second], { [second]: secondPatch });
+  await jobs.transition(account, id, "approve", [second], { [second]: secondPatch });
   assert.deepEqual((await settled(jobs, account)).targets.map(t => t.receipt), [2, 2]);
   assert.deepEqual(attempts, [[first, firstPatch], [second, secondPatch]]);
 });
 
 test("rechecking a version conflict replaces only its proposal and keeps its sibling's receipt", async t => {
-  const { account, contents, plan, dependencies, attempts } = fixture(t);
+  const { account, contents, plan, dependencies, attempts } = await fixture(t);
   const [first, second] = contents.map(item => item.fileId);
   const [firstPatch, stalePatch, freshPatch] = [randomUUID(), randomUUID(), randomUUID()];
   const commit = dependencies.grants.commitPrepared;
@@ -168,25 +168,25 @@ test("rechecking a version conflict replaces only its proposal and keeps its sib
   };
   const jobs = createWorkbenchJobs(dependencies), id = randomUUID();
   await jobs.create(account, id, "追加下一步", plan([firstPatch, stalePatch]));
-  jobs.transition(account, id, "approve", [first, second], { [first]: firstPatch, [second]: stalePatch });
+  await jobs.transition(account, id, "approve", [first, second], { [first]: firstPatch, [second]: stalePatch });
   const failed = await settled(jobs, account);
   assert.equal(failed.targets[1].recheckable, true);
   assert.equal(failed.targets[1].retryable, undefined);
-  assert.throws(() => jobs.transition(account, id, "retry", [second]), { status: 400 });
+  await assert.rejects(() => jobs.transition(account, id, "retry", [second]), { status: 400 });
   const restarted = createWorkbenchJobs(dependencies);
-  restarted.recheck(account, id, [second]);
+  await restarted.recheck(account, id, [second]);
   const previewed = await settled(restarted, account);
   assert.equal(previewed.targets[0].receipt, 2);
   assert.equal(previewed.targets[1].changes[0].after, "重新核对的下一步");
   assert.deepEqual(attempts, [[first, firstPatch]]);
-  assert.throws(() => restarted.transition(account, id, "approve", [second], { [second]: stalePatch }), { status: 409 });
-  restarted.transition(account, id, "approve", [second], { [second]: freshPatch });
+  await assert.rejects(() => restarted.transition(account, id, "approve", [second], { [second]: stalePatch }), { status: 409 });
+  await restarted.transition(account, id, "approve", [second], { [second]: freshPatch });
   assert.deepEqual((await settled(restarted, account)).targets.map(t => t.receipt), [2, 2]);
   assert.deepEqual(attempts, [[first, firstPatch], [second, freshPatch]]);
 });
 
 test("resume finishes an interrupted dependent preview without repeating its committed source", async t => {
-  const { account, contents, plan, dependencies, attempts } = fixture(t);
+  const { account, contents, plan, dependencies, attempts } = await fixture(t);
   const [first, second] = contents.map(item => item.fileId);
   const id = randomUUID();
   const firstPatch = randomUUID(), secondPatch = randomUUID();
@@ -197,18 +197,18 @@ test("resume finishes an interrupted dependent preview without repeating its com
     result.plan.steps = [{ fileId: second, dependsOn: [first], task: "整理" }];
     return result;
   });
-  const persisted = JSON.parse(dependencies.store.get("SELECT state FROM workbench_jobs WHERE id=?", id).state);
+  const persisted = JSON.parse((await dependencies.store.get("SELECT state FROM workbench_jobs WHERE id=?", id)).state);
   persisted.targets[0].phase = "complete";
   persisted.targets[0].receipt = 2;
   persisted.targets[1].phase = "drafting";
-  dependencies.store.run("UPDATE workbench_jobs SET state=? WHERE id=?", JSON.stringify(persisted), id);
+  await dependencies.store.run("UPDATE workbench_jobs SET state=? WHERE id=?", JSON.stringify(persisted), id);
   dependencies.planFile = async ({ target, facts }) => {
     assert.equal(target.fileId, second);
     assert.deepEqual(facts.map(fact => [fact.fileId, fact.revision]), [[first, 2]]);
     return [{ fileId: second, tool: "append_to_file", args: { requestId: secondPatch, text: "可核对的结果" } }];
   };
   const restarted = createWorkbenchJobs(dependencies);
-  restarted.resume();
+  await restarted.resume();
   const recovered = await settled(restarted, account);
   assert.equal(recovered.targets[0].receipt, 2);
   assert.equal(recovered.targets[1].reviewId, secondPatch);

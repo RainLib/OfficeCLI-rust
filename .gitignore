@@ -19,6 +19,9 @@ Thumbs.db
 /officecli
 dist/
 **/node_modules/
+/.env
+/.foldly.runtime.env
+/.secrets/
 
 # Local custom folders / reference code / build output
 source/

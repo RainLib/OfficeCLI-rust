@@ -3,7 +3,7 @@ import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { createSelectionGrants, replaceSpan } from "./selection-grants.mjs";
 import { documentId } from "./provider.mjs";
-import { check, now } from "./store.mjs";
+import { check, now } from "./store.mts";
 
 const block = {
   blockId: "workshop",
@@ -69,6 +69,7 @@ test("a selection token expires with its editor launch and rechecks current perm
   let permitted = true,
     closed = false;
   const store = {
+    read: work => work(),
     file: () => file,
     user: () => account.user,
     get: () => ({
@@ -104,19 +105,19 @@ test("a selection token expires with its editor launch and rechecks current perm
   const first = await grants.set(account, payload);
   assert.equal(first.expiresAt, launchExpiry);
   const authenticate = () => grants.authenticate("Bearer " + first.token);
-  const grant = authenticate();
+  const grant = await authenticate();
   permitted = false;
-  assert.throws(authenticate, (e) => e.status === 403);
+  await assert.rejects(authenticate, (e) => e.status === 403);
   await assert.rejects(
     grants.call(grant, "read_selection", {}),
     (e) => e.status === 403,
   );
   permitted = true;
   closed = true;
-  assert.throws(authenticate, (e) => e.status === 403);
+  await assert.rejects(authenticate, (e) => e.status === 403);
   closed = false;
   await grants.set(account, { instanceId, generation: 3, selection: null });
-  assert.throws(authenticate, (e) => e.status === 401);
+  await assert.rejects(authenticate, (e) => e.status === 401);
   await assert.rejects(
     grants.set(account, { ...payload, generation: 2 }),
     (e) => e.status === 409,
@@ -130,7 +131,7 @@ test("a selection token expires with its editor launch and rechecks current perm
 
 test("sheet ranges stay bounded; native numbers and empty cells keep their patch types", async () => {
   const { sheetTarget, selectedCells, sheetEdit } =
-    await import("./workbench-targets.mjs");
+    await import("./workbench-targets.mts");
   const sheetId = "s_" + "a".repeat(32);
   const target = sheetTarget({
     sheetId,
@@ -195,7 +196,7 @@ test("sheet ranges stay bounded; native numbers and empty cells keep their patch
 });
 
 test("a saved sheet selection follows the same rectangle of native cell IDs", async () => {
-  const { relocateSheetSelection, sheetTarget } = await import("./workbench-targets.mjs");
+  const { relocateSheetSelection, sheetTarget } = await import("./workbench-targets.mts");
   const sheetId = "s_" + "b".repeat(32);
   const before = sheetTarget({ sheetId, sheetIndex: 1, top: 1, left: 1, bottom: 2, right: 2 });
   const sheet = { sheetId, sheetIndex: 0, cells: [
@@ -209,7 +210,7 @@ test("a saved sheet selection follows the same rectangle of native cell IDs", as
 });
 
 test("workbench planner uses only the selected source and rejects out-of-scope model plans", async () => {
-  const { planWorkbench } = await import("./workbench-planner.mjs");
+  const { planWorkbench } = await import("./workbench-planner.mts");
   const targets = [
     {
       kind: "document",
@@ -313,6 +314,7 @@ test("a granted Spec keeps its Unicode offsets as people type, and reads back th
     expiresAt: account.expires,
   };
   const store = {
+    read: work => work(),
     user: () => account.user,
     file: () => file,
     permit() {},
@@ -372,7 +374,7 @@ test("a granted Spec keeps its Unicode offsets as people type, and reads back th
       target: { kind: "canvas", elementIds: ["paper", "body"] },
     },
   });
-  const grant = grants.authenticate("Bearer " + saved.token);
+  const grant = await grants.authenticate("Bearer " + saved.token);
   revision++;
   lines = ["🙂春（优先）季发布"];
   const read = () => grants.call(grant, "read_selection", {});
@@ -433,7 +435,7 @@ test("a granted Spec keeps its Unicode offsets as people type, and reads back th
 });
 
 test("a demo phrase edit uses the paragraph and Unicode offsets of the single match", async () => {
-  const { planSpecPhrase } = await import("./spec-edit.mjs");
+  const { planSpecPhrase } = await import("./spec-edit.mts");
   const target = [
     { id: "b", specBlocks: [{ block: 2, text: "🙂在春季发布" }] },
   ];

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createServer, request } from "node:http";
 import { join } from "node:path";
-import { Store, iso } from "../src/store.mjs";
+import { Store, iso } from "../src/store.mts";
 import { expect } from "../../../examples/hdoc/editor/node_modules/@playwright/test/index.mjs";
 
 /** A loopback Provider proxy for the isolated acceptance workspace. */
@@ -108,14 +108,14 @@ export async function verifyPublicationJobs({ base, root, ownerPage, call, launc
 
   const conflict = await create("独立版本.txt", "Workplace content retained in an independent recovery copy.");
   const businessBytes = Buffer.from("Independent edit committed directly in the business system.\n");
-  const store = new Store(root);
+  const store = await Store.open(root);
   try {
     const digest = store.put(businessBytes), at = iso();
-    store.transaction(() => {
-      store.run("INSERT INTO versions VALUES(?,?,?,?,?,?,NULL)", conflict.file.id, 2, digest, businessBytes.length, admin.user.id, at);
-      store.run("UPDATE files SET head=2,modified_at=? WHERE id=?", at, conflict.file.id);
+    await store.transaction(async () => {
+      await store.run("INSERT INTO versions VALUES(?,?,?,?,?,?,NULL)", conflict.file.id, 2, digest, businessBytes.length, admin.user.id, at);
+      await store.run("UPDATE files SET head=2,modified_at=? WHERE id=?", at, conflict.file.id);
     });
-  } finally { store.close(); }
+  } finally { await store.close(); }
   assert.equal((await publish(conflict)).status, 409);
   await restart();
 

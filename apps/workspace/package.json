@@ -9,12 +9,15 @@
   "scripts": {
     "init": "node cli.mjs init",
     "start": "node cli.mjs start",
-    "build": "node scripts/build.mjs",
+    "build": "npm run build:runtime && node scripts/build.mjs",
+    "build:runtime": "tsc --project tsconfig.json",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
     "package": "node scripts/package.mjs",
     "package:macos": "node ../desktop/package-macos.mjs",
     "test": "node --test src/*.test.mjs",
     "test:acceptance": "node scripts/verify.mjs",
     "test:backup": "node scripts/verify-backup.mjs",
+    "test:databases": "node scripts/verify-databases.mjs",
     "test:deployment": "node scripts/verify-deployment.mjs",
     "test:desktop": "node ../desktop/verify.mjs",
     "test:canvas": "node scripts/verify-canvas.mjs",
@@ -26,5 +29,14 @@
     "test:workbench-pptx": "node scripts/verify-workbench-pptx.mjs",
     "test:workbench-native": "node scripts/verify-workbench-native.mjs",
     "test:embed": "node ../../examples/hdoc/embed-host/verify.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.6",
+    "@types/pg": "8.23.1",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "mysql2": "3.24.6",
+    "pg": "8.23.1"
   }
 }

@@ -1,15 +1,19 @@
 import { spawn } from "node:child_process";
+import type { ChildProcess, StdioOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { join } from "node:path";
+import type { Server } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { Store, atomic, check } from "./store.mjs";
+import { Store, atomic, check } from "./store.mts";
+import { databaseEnvKeys } from "./database.mts";
 import { createWorkspaceServer } from "./server.mjs";
-import { captureWorkspace } from "./backup.mjs";
+import { errorMessage } from "./contracts.mts";
+import type { Workspace } from "./contracts.mts";
 
-export function listen(server, port, host) {
-  return new Promise((yes, no) => {
-    const failed = (error) => {
+export function listen(server: Server, port: number, host: string) {
+  return new Promise<void>((yes, no) => {
+    const failed = (error: Error) => {
       server.off("listening", listening);
       no(error);
     };
@@ -23,31 +27,34 @@ export function listen(server, port, host) {
   });
 }
 
-async function bounded(work, signal) {
-  let abort;
-  const stopped = new Promise((_, reject) => {
+async function bounded<T>(work: Promise<T>, signal: AbortSignal) {
+  let abort: (() => void) | undefined;
+  const stopped = new Promise<never>((_, reject) => {
     abort = () => reject(signal.reason);
     if (signal.aborted) abort();
     else signal.addEventListener("abort", abort, { once: true });
   });
   try { return await Promise.race([work, stopped]); }
-  finally { signal.removeEventListener("abort", abort); }
+  finally { if (abort) signal.removeEventListener("abort", abort); }
 }
 
-function collabCommand(child, type, id, signal) {
-  return new Promise((resolve, reject) => {
-    const finish = (error, result) => {
+type CollabCommand = "backup-freeze" | "backup-resume";
+
+function collabCommand(child: ChildProcess, type: CollabCommand, id: string, signal: AbortSignal) {
+  return new Promise<{ flushed?: number }>((resolve, reject) => {
+    const finish = (result: { flushed?: number } | Error) => {
       child.off("message", message);
       child.off("disconnect", disconnected);
       signal.removeEventListener("abort", aborted);
-      if (error) reject(error);
+      if (result instanceof Error) reject(result);
       else resolve(result);
     };
     const disconnected = () => finish(new Error("协作服务已断开。"));
-    const aborted = () => finish(signal.reason);
-    const message = result => {
-      if (result?.type === type && result.id === id)
-        finish(result.error ? new Error(result.error) : null, result);
+    const aborted = () => finish(signal.reason instanceof Error ? signal.reason : new Error(errorMessage(signal.reason)));
+    const message = (result: unknown) => {
+      if (!result || typeof result !== "object" || !("type" in result) || result.type !== type || !("id" in result) || result.id !== id) return;
+      if ("error" in result && typeof result.error === "string" && result.error) finish(new Error(result.error));
+      else finish({ flushed: "flushed" in result && typeof result.flushed === "number" ? result.flushed : undefined });
     };
     if (signal.aborted) return aborted();
     if (!child.connected) return disconnected();
@@ -58,51 +65,61 @@ function collabCommand(child, type, id, signal) {
   });
 }
 
-export function createRuntime(workspace, { assets, binary, sidecar, standby = false }, onFailure) {
+interface RuntimeOptions {
+  assets: string;
+  binary: string;
+  sidecar: string;
+  standby?: boolean;
+  privateEnv?: readonly string[];
+}
+
+export function createRuntime(workspace: Workspace, { assets, binary, sidecar, standby = false, privateEnv = [] }: RuntimeOptions, onFailure: (tenantId: string) => void) {
   const { root, config, keys } = workspace;
-  const children = [];
-  let store,
-    business,
-    collab,
-    backupTask,
-    backupAbort,
-    draining = false,
-    ready = false,
-    failure = false,
-    stopped;
+  const children: ChildProcess[] = [];
+  let store: Store | undefined;
+  let business: ReturnType<typeof createWorkspaceServer> | undefined;
+  let collab: ChildProcess | undefined;
+  let backupTask: Promise<unknown> | undefined;
+  let backupAbort: AbortController | undefined;
+  let stopped: Promise<void> | undefined;
+  let draining = false, ready = false, failure = false;
   const desktop = config.mode === "desktop";
   const aiEnabled = !desktop && process.env.OFFICECLI_AI_ENABLED === "true" && workspace.allowAI !== false;
   const aiModel = process.env.HCD_OPENAI_MODEL || "gpt-6.1-sol";
 
-  function spawnService(executable, args, env, ipc = false) {
-    const stdio = ["ignore", "inherit", "inherit", ...(ipc ? ["ipc"] : [])];
+  function failed() {
+    if (stopped || failure) return;
+    failure = true;
+    ready = false;
+    onFailure(config.tenantId);
+  }
+
+  function spawnService(executable: string, args: string[], env: NodeJS.ProcessEnv, ipc = false) {
+    const stdio: StdioOptions = ipc ? ["ignore", "inherit", "inherit", "ipc"] : ["ignore", "inherit", "inherit"];
     const child = spawn(executable, args, { env, stdio });
     children.push(child);
-    function failed() {
-      if (stopped || failure) return;
-      failure = true;
-      ready = false;
-      onFailure(config.tenantId);
-    }
     child.once("error", failed);
     child.once("exit", failed);
     return child;
   }
 
-  async function waitForService(url, label) {
+  async function waitForService(url: string, label: string) {
     const deadline = Date.now() + 120_000;
+    let interval = 20;
     while (!stopped && !failure && Date.now() < deadline) {
       try {
         const response = await fetch(url, { signal: AbortSignal.timeout(1000), redirect: "error" });
         await response.body?.cancel();
         if (response.ok && !stopped && !failure) return;
       } catch {}
-      await new Promise((done) => setTimeout(done, 200));
+      await delay(interval);
+      interval = Math.min(interval * 2, 200);
     }
     throw new Error(config.name + " 的" + label + "未就绪。");
   }
 
-  async function holdForBackup(id, copy, signal, shutdown = false) {
+  async function holdForBackup(id: string, copy: () => Promise<unknown>, signal: AbortSignal, shutdown = false) {
+    check(business && collab, 503, "工作空间未就绪。");
     const url = `${config.engineUrl}/integration/v1/backup-leases/${id}`;
     const headers = { Authorization: `Bearer ${keys.service}` };
     const prep = AbortSignal.any([signal, AbortSignal.timeout(90_000)]);
@@ -112,6 +129,7 @@ export function createRuntime(workspace, { assets, binary, sidecar, standby = fa
     try {
       await bounded(business.pauseForBackup(), prep);
       const paused = await collabCommand(collab, "backup-freeze", id, prep);
+      check(typeof paused.flushed === "number" && Number.isSafeInteger(paused.flushed), 503, "协作服务未确认落盘。");
       while (true) {
         prep.throwIfAborted();
         const response = await fetch(url, { method: "PUT", headers, redirect: "error", signal: prep });
@@ -134,24 +152,35 @@ export function createRuntime(workspace, { assets, binary, sidecar, standby = fa
       if (!heldUntilShutdown) {
         if (!releaseConfirmed) await removeLease().then(result => result.body?.cancel()).catch(() => {});
         try { await collabCommand(collab, "backup-resume", id, AbortSignal.timeout(5000)); }
-        finally { if (!standby) business.resumeAgentJobs(); }
+        finally { if (!standby) await business.resumeAgentJobs(); }
       }
     }
   }
 
-  function snapshot(id) {
-    check(ready && !stopped && !standby && !draining, 503, "工作空间未就绪。");
+  function snapshot(id: string) {
+    const currentStore = store;
+    check(currentStore && ready && !stopped && !standby && !draining, 503, "工作空间未就绪。");
     check(!backupTask, 409, "已有在线备份进行中。");
     backupAbort = new AbortController();
     const { signal } = backupAbort;
-    backupTask = captureWorkspace({ root, store, config, id, signal, hold: copy => holdForBackup(id, copy, signal) })
-      .finally(() => { backupTask = null; backupAbort = null; });
+    backupTask = import("./backup.mjs")
+      .then(({ captureWorkspace }) => captureWorkspace({
+        root, config, id, signal, copyDatabase: (path: string) => currentStore.exportDatabase(path, signal),
+        hold: (copy: () => Promise<unknown>) => holdForBackup(id, copy, signal),
+      }))
+      .finally(() => { backupTask = undefined; backupAbort = undefined; });
     return backupTask;
   }
 
   async function start() {
     check(!stopped, 503, "工作空间启动已结束。");
-    store = new Store(root);
+    check(!standby || !config.database, 409, "托管版本切换使用本机 SQLite。远程数据库可以用 Compose 或直接启动。");
+    const opened = await Store.open(root, { database: config.database, onFailure: failed });
+    if (stopped || failure) {
+      await opened.close();
+      check(false, 503, "工作空间启动已结束。");
+    }
+    store = opened;
     business = createWorkspaceServer({
       store,
       config,
@@ -183,7 +212,7 @@ export function createRuntime(workspace, { assets, binary, sidecar, standby = fa
     };
     const configPath = join(root, "engine-integration.json");
     atomic(configPath, JSON.stringify(integration, null, 2) + "\n");
-    const env = {
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       HCD_TOKEN_SECRET: keys.jwt,
       HCD_WORKSPACE_PROVIDER_SECRET: keys.provider,
@@ -198,6 +227,8 @@ export function createRuntime(workspace, { assets, binary, sidecar, standby = fa
       "HCD_DATABASE_URL",
       "HCD_S3_BUCKET",
       "HCD_DEFAULT_THEME",
+      ...databaseEnvKeys(),
+      ...privateEnv,
       ...(aiEnabled ? [] : ["OPENAI_API_KEY", "RAINY_OPENAI_API_KEY"]),
     ])
       delete env[key];
@@ -222,14 +253,14 @@ export function createRuntime(workspace, { assets, binary, sidecar, standby = fa
     await waitForService(config.engineUrl + "/health", "编辑服务");
     collab = spawnService(process.execPath, [sidecar], env, true);
     await waitForService(config.collabUrl, "协作服务");
+    if (!standby) await business.resumeAgentJobs();
     ready = true;
-    if (!standby) business.resumeAgentJobs();
   }
 
-  function activate() {
-    check(ready && !draining && !stopped, 503, "工作空间未通过启动检查。");
+  async function activate() {
+    check(business && ready && !draining && !stopped, 503, "工作空间未通过启动检查。");
     standby = false;
-    business.resumeAgentJobs();
+    await business.resumeAgentJobs();
   }
 
   async function drain() {
@@ -265,9 +296,13 @@ export function createRuntime(workspace, { assets, binary, sidecar, standby = fa
         }),
       );
       business?.server.closeAllConnections();
-      store?.close();
+      await store?.close();
     });
     return stopped;
+  }
+  function service() {
+    check(business, 503, "工作空间未就绪。");
+    return business;
   }
   return {
     config,
@@ -278,8 +313,8 @@ export function createRuntime(workspace, { assets, binary, sidecar, standby = fa
     get ready() {
       return ready && !standby;
     },
-    createDesktopSession: () => business.createDesktopSession(),
-    handleRequest: (...args) => business.handleRequest(...args),
-    handleUpgrade: (...args) => business.handleUpgrade(...args),
+    createDesktopSession: () => service().createDesktopSession(),
+    handleRequest: (...args: Parameters<ReturnType<typeof createWorkspaceServer>["handleRequest"]>) => service().handleRequest(...args),
+    handleUpgrade: (...args: Parameters<ReturnType<typeof createWorkspaceServer>["handleUpgrade"]>) => service().handleUpgrade(...args),
   };
 }

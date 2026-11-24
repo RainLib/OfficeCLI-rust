@@ -85,14 +85,19 @@ npm ci --prefix examples/hdoc/admin-app
 npm ci --prefix examples/hdoc/editor
 npm ci --prefix examples/hdoc/xlsx-univer-viewer
 npm ci --prefix examples/hdoc/embed-host
+npm ci --prefix apps/workspace
 cargo build --release -p officecli --bin officecli
-node apps/workspace/scripts/build.mjs
+npm run build --prefix apps/workspace
 npm run demo --prefix examples/hdoc/embed-host
 ```
 
 打开 **http://fold.localhost:4417/workbench/**。本地演示会创建独立临时工作区和示例文件，并自动登录受限的演示成员；重新启动会创建新的演示数据。
 
 需要自己的账号和持久文件时，按照[应用构建与初始化说明](apps/workspace/README.zh.md#构建与启动)初始化并启动工作区。该文档同时介绍权限、分享、多租户、部署、备份和业务回写。单独下载的 CLI 发行二进制不包含已经构建的 Web 工作台。
+
+### 用 Docker Compose 部署
+
+基础配置启动工作台、协作服务和 Caddy，默认使用 SQLite。云端可以加载 PostgreSQL 或 MySQL 配置，也可以连接已有数据库。已有工作区通过已校验的备份恢复到新目录和空目标库后切换。macOS 离线版使用本机 SQLite。[Compose 部署与数据库迁移](docs/workspace-distribution.zh.md#docker-compose-云端工作台)
 
 ## 接入 AI 与编程 Agent
 
