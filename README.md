@@ -20,7 +20,7 @@
 
 Its Rust document engine is exposed through the `officecli` command for reading, creating, editing and exporting files from scripts, developer tools and agent workflows.
 
-[Try the workspace](#run-the-workspace) · [Deploy with Docker Compose](#deploy-with-docker-compose) · [Downloads](docs/workspace-distribution.zh.md#下载-0134) · [Connect an agent](#connect-ai-and-coding-agents) · [Embed an editor](#embed-in-your-product) · [Documentation](#documentation)
+[Try the workspace](#run-the-workspace) · [Deploy with Docker Compose](#deploy-with-docker-compose) · [Administration console](#administration-console) · [Downloads](docs/workspace-distribution.zh.md#下载-0134) · [Connect an agent](#connect-ai-and-coding-agents) · [Embed an editor](#embed-in-your-product) · [Documentation](#documentation)
 
 ## One workspace, several ways to collaborate
 
@@ -92,6 +92,12 @@ For a persistent workspace with your own accounts, initialize and start it with 
 ### Deploy with Docker Compose
 
 The root Compose file starts PostgreSQL, Caddy, the workspace and a separate Yjs/Hocuspocus service. Scale collaboration replicas by document and keep the same authenticated WebSocket entry point. The workspace hosts the OfficeCLI document engine, editor and admin console. Compose overlays support MySQL, SQLite and managed databases. The offline macOS desktop app uses local SQLite. [docker-compose.yaml](docker-compose.yaml) · [Deployment, scaling and recovery](docs/workspace-distribution.zh.md#docker-compose-云端工作台)
+
+### Administration console
+
+Open `/admin` on your workspace domain, or [http://localhost:7400/admin](http://localhost:7400/admin) with the default local Compose configuration. Sign in with the workspace administrator account. On the first Compose startup, `FOLDLY_ADMIN` sets its username and `FOLDLY_ADMIN_PASSWORD_FILE` points to its password file.
+
+Administrators can manage members and roles, grant access to individual files, configure fonts and themes, and review write-back jobs and audit records. The console currently uses a Chinese interface. [Console screenshots](README_zh.md#管理后台) · [Administration guide](apps/workspace/README.zh.md#使用流程)
 
 ## Connect AI and coding agents
 

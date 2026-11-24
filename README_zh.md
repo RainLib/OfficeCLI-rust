@@ -20,7 +20,7 @@
 
 底层 Rust 文档引擎通过 `officecli` 命令提供，供脚本、开发工具和 AI 编程助手读取、创建、修改、渲染与导出文件。
 
-[启动工作台](#启动工作台) · [Docker Compose 部署](#用-docker-compose-部署) · [工作台和桌面包下载](docs/workspace-distribution.zh.md#下载-0134) · [AI 与编程 Agent 接入](#接入-ai-与编程-agent) · [嵌入业务系统](#嵌入业务系统) · [开发文档](#开发文档)
+[启动工作台](#启动工作台) · [Docker Compose 部署](#用-docker-compose-部署) · [管理后台](#管理后台) · [工作台和桌面包下载](docs/workspace-distribution.zh.md#下载-0134) · [AI 与编程 Agent 接入](#接入-ai-与编程-agent) · [嵌入业务系统](#嵌入业务系统) · [开发文档](#开发文档)
 
 ## 一个工作空间，连接团队与文件
 
@@ -98,6 +98,14 @@ npm run demo --prefix examples/hdoc/embed-host
 ### 用 Docker Compose 部署
 
 根目录的 Compose 默认启动 PostgreSQL、Caddy、工作台和独立的 Yjs/Hocuspocus 协作服务。协作实例按文档分流，统一从原有的 WebSocket 入口鉴权。工作台提供文档引擎、编辑器和管理后台，附加配置支持 MySQL、SQLite 和已有数据库。macOS 离线版使用本机 SQLite。[docker-compose.yaml](docker-compose.yaml) · [部署、扩容与恢复](docs/workspace-distribution.zh.md#docker-compose-云端工作台)
+
+### 管理后台
+
+在工作台的部署域名下访问 `/admin`。本机使用默认 Compose 配置时，打开 [http://localhost:7400/admin](http://localhost:7400/admin)，用工作区管理员账号登录。Compose 首次启动时，`FOLDLY_ADMIN` 指定管理员账号，`FOLDLY_ADMIN_PASSWORD_FILE` 指向密码文件。
+
+管理员可以管理成员与角色、逐文件授权、配置字体与主题，并查看回写任务和操作记录。[管理操作说明](apps/workspace/README.zh.md#使用流程)
+
+![管理后台的用户与角色页面，包含添加用户、角色和账号状态](docs/assets/readme/admin-console-zh.png)
 
 ## 接入 AI 与编程 Agent
 
