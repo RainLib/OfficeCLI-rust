@@ -4,6 +4,16 @@
   "content": "Locally generated example files, not private user documents. Screenshots are unmodified captures. Logo and banner are original SVG artwork adapted from the existing workspace mark.",
   "screenshots": [
     {
+      "file": "admin-console-zh.png",
+      "source": "Foldly 0.1.34 Compose workspace, /admin, Users and roles with example accounts",
+      "sourceCommit": "3ab475fbe92825d970503b4334c92d71aa573d37",
+      "capturedOn": "2026-11-24",
+      "locale": "zh-CN",
+      "kind": "verified workspace browser run",
+      "sha256": "4dabf62ebebf0f6b6a472f6c6e529e072303cc41d7b90b58378455735cb98695",
+      "syntheticProductScreenshot": false
+    },
+    {
       "file": "workspace-home.png",
       "source": "/tmp/canvas-input-workbench-regression/home.png",
       "kind": "verified workbench browser run",
